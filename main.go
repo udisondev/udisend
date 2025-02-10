@@ -34,8 +34,7 @@ type Message struct {
 
 // Hello – handshake-сообщение, передаёт уникальный идентификатор и публичный (слушающий) адрес.
 type Hello struct {
-	PeerID  string `json:"peer_id"`
-	Address string `json:"address"`
+	PeerID string `json:"peer_id"`
 }
 
 // Candidate – информация об узле для рекурсивного подключения.
@@ -86,15 +85,14 @@ var (
 type LogWriter struct{}
 
 func (w *LogWriter) Write(p []byte) (n int, err error) {
-    msg := string(p)
-    if !strings.HasSuffix(msg, "\n") {
-        msg += "\n"
-    }
-    // Выводим лог только один раз через displayMessage
-    displayMessage("[LOG] " + msg)
-    return len(p), nil
+	msg := string(p)
+	if !strings.HasSuffix(msg, "\n") {
+		msg += "\n"
+	}
+	// Выводим лог только один раз через displayMessage
+	displayMessage("[LOG] " + msg)
+	return len(p), nil
 }
-
 
 // websocket upgrader для преобразования HTTP в WebSocket.
 var upgrader = websocket.Upgrader{
@@ -174,6 +172,7 @@ func startServer() {
 
 // wsHandler обрабатывает входящие WebSocket-соединения, создаёт yamux-сессию и временно сохраняет соединение.
 func wsHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Получен запрос от %s", r.RemoteAddr)
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("Ошибка Upgrade:", err)
@@ -188,7 +187,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	// До получения hello используем временный идентификатор (r.RemoteAddr).
 	tempID := r.RemoteAddr
 	peersMutex.Lock()
-	peersMap[tempID] = &Peer{session: session, Address: ""}
+	peersMap[tempID] = &Peer{session: session, Address: r.RemoteAddr}
 	peersMutex.Unlock()
 
 	go acceptStreams(session, tempID)
@@ -267,56 +266,55 @@ func handleHelloEnvelope(data json.RawMessage, tempID string) {
 		log.Printf("Ошибка декодирования hello от %s: %v", tempID, err)
 		return
 	}
-	log.Printf("Получен hello от %s: PeerID=%s, Address=%s", tempID, hello.PeerID, hello.Address)
+	log.Printf("Получен hello от %s: PeerID=%s, Address=%s", tempID, hello.PeerID, peersMap[tempID].Address)
 	// Обновляем запись в peersMap: заменяем временный ключ на реальный PeerID.
 	peersMutex.Lock()
 	defer peersMutex.Unlock()
 	if peer, exists := peersMap[tempID]; exists {
 		delete(peersMap, tempID)
-		peer.Address = hello.Address
+		peer.Address = peersMap[tempID].Address
 		peersMap[hello.PeerID] = peer
 	} else {
-		peersMap[hello.PeerID] = &Peer{session: nil, Address: hello.Address}
+		peersMap[hello.PeerID] = &Peer{session: nil, Address: ""}
 	}
 }
 
 // handleCandidateEnvelope обрабатывает сообщение с кандидатами и инициирует подключение к новым узлам,
 // если не достигнут лимит дополнительных соединений и кандидат ещё не пытались подключить.
 func handleCandidateEnvelope(data json.RawMessage, tempID string) {
-    var candMsg CandidateMessage
-    if err := json.Unmarshal(data, &candMsg); err != nil {
-        log.Printf("Ошибка декодирования candidate message от %s: %v", tempID, err)
-        return
-    }
-    for _, cand := range candMsg.Candidates {
-        // Проверяем, не пытались ли мы уже подключиться к данному кандидату.
-       	attemptedCandidates.Lock()
+	var candMsg CandidateMessage
+	if err := json.Unmarshal(data, &candMsg); err != nil {
+		log.Printf("Ошибка декодирования candidate message от %s: %v", tempID, err)
+		return
+	}
+	for _, cand := range candMsg.Candidates {
+		// Проверяем, не пытались ли мы уже подключиться к данному кандидату.
+		attemptedCandidates.Lock()
 		alreadyAttempted := attemptedCandidates.m[cand.PeerID]
 		attemptedCandidates.Unlock()
 		if alreadyAttempted {
 			continue
 		}
-        peersMutex.Lock()
-        _, exists := peersMap[cand.PeerID]
-        var currentAdditional int
-        // Если у узла есть родитель, считаем, что первое соединение – основное,
-        // а все остальные – дополнительные.
-        if parent != "" {
-            currentAdditional = len(peersMap) - 1
-        } else {
-            currentAdditional = len(peersMap)
-        }
-        peersMutex.Unlock()
-        if !exists && cand.Address != "" && cand.Address != localAddress && currentAdditional < maxAdditionalConnections {
-            log.Printf("Попытка подключения к кандидату %s (%s)", cand.PeerID, cand.Address)
-            attemptedCandidates.Lock()
-            attemptedCandidates.m[cand.PeerID] = true
-           	attemptedCandidates.Unlock()
-            go connectToPeer(cand.Address)
-        }
-    }
+		peersMutex.Lock()
+		_, exists := peersMap[cand.PeerID]
+		var currentAdditional int
+		// Если у узла есть родитель, считаем, что первое соединение – основное,
+		// а все остальные – дополнительные.
+		if parent != "" {
+			currentAdditional = len(peersMap) - 1
+		} else {
+			currentAdditional = len(peersMap)
+		}
+		peersMutex.Unlock()
+		if !exists && cand.Address != "" && cand.Address != localAddress && currentAdditional < maxAdditionalConnections {
+			log.Printf("Попытка подключения к кандидату %s (%s)", cand.PeerID, cand.Address)
+			attemptedCandidates.Lock()
+			attemptedCandidates.m[cand.PeerID] = true
+			attemptedCandidates.Unlock()
+			go connectToPeer(cand.Address)
+		}
+	}
 }
-
 
 // processChatMessage обрабатывает входящее чат-сообщение: выводит его и ретранслирует.
 func processChatMessage(msg Message, from string) {
@@ -377,8 +375,7 @@ func sendEnvelope(session *yamux.Session, msgType string, payload interface{}) e
 // sendHello отправляет handshake-сообщение с информацией о данном узле.
 func sendHello(session *yamux.Session) {
 	hello := Hello{
-		PeerID:  nick,
-		Address: localAddress,
+		PeerID: nick,
 	}
 	if err := sendEnvelope(session, "hello", hello); err != nil {
 		log.Printf("Ошибка отправки hello: %v", err)
@@ -443,9 +440,7 @@ func sendChatMessage(msg Message) {
 	}
 }
 
-//
 // Обёртка WebSocket -> net.Conn (упрощённая для демонстрации)
-//
 type websocketConn struct {
 	ws *websocket.Conn
 }
@@ -498,4 +493,3 @@ func (w *websocketConn) SetWriteDeadline(t time.Time) error {
 func websocketToConn(ws *websocket.Conn) net.Conn {
 	return &websocketConn{ws: ws}
 }
-
