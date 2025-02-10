@@ -173,7 +173,6 @@ func inputLoop() {
 			Text:      text,
 			HopPath:   []string{nick},
 		}
-		fmt.Printf("You: %s\n", text)
 		sendChatMessage(msg)
 	}
 	if err := scanner.Err(); err != nil {
@@ -244,6 +243,8 @@ func acceptStreams(session *yamux.Session, addr string) {
 		stream, err := session.Accept()
 		if err != nil {
 			log.Printf("Ошибка Accept потока от %s: %+v", addr, err)
+			delete(nickPeerMap, addressPeerMap[addr].Nick)
+			delete(addressPeerMap, addr)
 			return
 		}
 		go handleStream(stream, addr)
