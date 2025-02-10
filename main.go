@@ -126,6 +126,13 @@ func main() {
 	// Задаём локальный адрес (для тестирования на локальной машине).
 	localAddress = myAddress + port
 
+	go func() {
+		for {
+			<-time.After(10 * time.Second)
+			ping()
+		}
+	}()
+
 	// Запускаем сервер для входящих соединений.
 	go startServer()
 
@@ -253,6 +260,15 @@ func handleStream(stream net.Conn, addr string) {
 		return
 	}
 	switch env.Type {
+	case "ping":
+		encoder := json.NewEncoder(stream)
+		err := encoder.Encode(Envelope{
+			Type: "pong",
+		})
+		if err != nil {
+			log.Printf("Ошибка отправки pong")
+		}
+	case "pong":
 	case "hello":
 		handleHelloEnvelope(env.Data, addr)
 	case "candidate":
@@ -490,4 +506,10 @@ func (w *websocketConn) SetWriteDeadline(t time.Time) error {
 
 func websocketToConn(ws *websocket.Conn) net.Conn {
 	return &websocketConn{ws: ws}
+}
+
+func ping() {
+	for _, peer := range nickPeerMap {
+		sendEnvelope(peer.session, "ping", nil)
+	}
 }
