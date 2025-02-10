@@ -34,13 +34,20 @@ type Message struct {
 
 // Hello – handshake-сообщение, передаёт уникальный идентификатор и публичный (слушающий) адрес.
 type Hello struct {
-	PeerID string `json:"peer_id"`
+	Nick string `json:"peer_id"`
+	Port string `json:"port"`
 }
 
 // Candidate – информация об узле для рекурсивного подключения.
 type Candidate struct {
-	PeerID  string `json:"peer_id"`
+	Nick    string `json:"peer_id"`
 	Address string `json:"address"`
+}
+
+type Member struct {
+	Nick          string
+	Address       string
+	PublicAddress string
 }
 
 // CandidateMessage – сообщение, содержащее список кандидатов.
@@ -51,19 +58,22 @@ type CandidateMessage struct {
 // Peer – информация о подключённом узле.
 type Peer struct {
 	session *yamux.Session
-	Address string
+	*Member
 }
 
 // Глобальные переменные и мапы.
 var (
 	nick         string
 	port         string
+	myAddress    string
 	parent       string
 	localAddress string
 
 	// peersMap хранит активные соединения: ключ – уникальный идентификатор (PeerID).
-	peersMap   = make(map[string]*Peer)
-	peersMutex sync.Mutex
+	addressPeerMap   = make(map[string]*Peer)
+	addrPeerMapMutex = sync.Mutex{}
+	nickPeerMap      = make(map[string]*Peer)
+	nickPeerMapMutex = sync.Mutex{}
 
 	// processedMessages предотвращает повторную обработку одного и того же сообщения.
 	processedMessages = struct {
@@ -106,6 +116,7 @@ var upgrader = websocket.Upgrader{
 func main() {
 	flag.StringVar(&nick, "nick", "anon", "Никнейм для узла")
 	flag.StringVar(&port, "port", "8000", "Порт для прослушивания")
+	flag.StringVar(&myAddress, "address", "127.0.0.1", "Адрес для прослушивания")
 	flag.StringVar(&parent, "parent", "", "Адрес родительского узла (IP:PORT)")
 	flag.Parse()
 
@@ -113,7 +124,7 @@ func main() {
 	log.SetOutput(&LogWriter{})
 
 	// Задаём локальный адрес (для тестирования на локальной машине).
-	localAddress = "localhost:" + port
+	localAddress = myAddress + port
 
 	// Запускаем сервер для входящих соединений.
 	go startServer()
@@ -167,7 +178,7 @@ func inputLoop() {
 func startServer() {
 	http.HandleFunc("/ws", wsHandler)
 	log.Printf("[%s] Сервер слушает на %s", nick, port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	log.Fatal(http.ListenAndServe(myAddress+":"+port, nil))
 }
 
 // wsHandler обрабатывает входящие WebSocket-соединения, создаёт yamux-сессию и временно сохраняет соединение.
@@ -184,23 +195,22 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		log.Println("Ошибка создания yamux-сервера:", err)
 		return
 	}
-	// До получения hello используем временный идентификатор (r.RemoteAddr).
-	tempID := r.RemoteAddr
-	peersMutex.Lock()
-	peersMap[tempID] = &Peer{session: session, Address: r.RemoteAddr}
-	peersMutex.Unlock()
 
-	go acceptStreams(session, tempID)
+	addrPeerMapMutex.Lock()
+	addressPeerMap[r.RemoteAddr] = &Peer{session: session, Member: &Member{Nick: "", Address: r.RemoteAddr}}
+	addrPeerMapMutex.Unlock()
+
+	go acceptStreams(session, r.RemoteAddr)
 	// Отправляем кандидатов и hello-сообщение.
-	sendCandidates(session)
+	sendCandidates(session, r.RemoteAddr)
 	sendHello(session)
 }
 
 // connectToPeer устанавливает исходящее соединение к заданному адресу.
 func connectToPeer(address string) {
-	url := "ws://" + address + "/ws"
+	uri := "ws://" + address + "/ws"
 	log.Printf("[%s] Подключение к %s", nick, address)
-	ws, _, err := websocket.DefaultDialer.Dial(url, nil)
+	ws, _, err := websocket.DefaultDialer.Dial(uri, nil)
 	if err != nil {
 		log.Println("Ошибка Dial:", err)
 		return
@@ -212,107 +222,99 @@ func connectToPeer(address string) {
 		return
 	}
 	// Сохраняем соединение временно по адресу до handshake.
-	tempID := address
-	peersMutex.Lock()
-	peersMap[tempID] = &Peer{session: session, Address: ""}
-	peersMutex.Unlock()
+	addrPeerMapMutex.Lock()
+	addressPeerMap[address] = &Peer{session: session, Member: &Member{Address: address}}
+	addrPeerMapMutex.Unlock()
+	log.Printf("Добавлен peer addr: %s", address)
 
-	go acceptStreams(session, tempID)
+	go acceptStreams(session, address)
 	sendHello(session)
 }
 
 // acceptStreams принимает новые потоки из yamux-сессии.
-func acceptStreams(session *yamux.Session, tempID string) {
+func acceptStreams(session *yamux.Session, addr string) {
 	for {
 		stream, err := session.Accept()
 		if err != nil {
-			log.Printf("Ошибка Accept потока от %s: %v", tempID, err)
+			log.Printf("Ошибка Accept потока от %s: %+v", addr, err)
 			return
 		}
-		go handleStream(stream, tempID)
+		go handleStream(stream, addr)
 	}
 }
 
 // handleStream читает Envelope из потока и вызывает соответствующую обработку.
-func handleStream(stream net.Conn, tempID string) {
+func handleStream(stream net.Conn, addr string) {
 	defer stream.Close()
 	decoder := json.NewDecoder(stream)
 	var env Envelope
 	if err := decoder.Decode(&env); err != nil {
-		log.Printf("Ошибка чтения envelope от %s: %v", tempID, err)
+		log.Printf("Ошибка чтения envelope от %s: %+v", addr, err)
 		return
 	}
 	switch env.Type {
 	case "hello":
-		handleHelloEnvelope(env.Data, tempID)
+		handleHelloEnvelope(env.Data, addr)
 	case "candidate":
-		handleCandidateEnvelope(env.Data, tempID)
+		handleCandidateEnvelope(env.Data, addr)
 	case "chat":
 		var msg Message
 		if err := json.Unmarshal(env.Data, &msg); err != nil {
-			log.Printf("Ошибка декодирования chat-сообщения от %s: %v", tempID, err)
+			log.Printf("Ошибка декодирования chat-сообщения от %s: %+v", addr, err)
 			return
 		}
-		processChatMessage(msg, tempID)
+		processChatMessage(msg, addr)
 	default:
-		log.Printf("Неизвестный тип envelope от %s: %s", tempID, env.Type)
+		log.Printf("Неизвестный тип envelope от %s: %s", addr, env.Type)
 	}
 }
 
 // handleHelloEnvelope обрабатывает handshake-сообщение и обновляет информацию о соединении.
-func handleHelloEnvelope(data json.RawMessage, tempID string) {
+func handleHelloEnvelope(data json.RawMessage, addr string) {
 	var hello Hello
 	if err := json.Unmarshal(data, &hello); err != nil {
-		log.Printf("Ошибка декодирования hello от %s: %v", tempID, err)
+		log.Printf("Ошибка декодирования hello от %s: %+v", addr, err)
 		return
 	}
-	log.Printf("Получен hello от %s: PeerID=%s, Address=%s", tempID, hello.PeerID, peersMap[tempID].Address)
+	peer, ok := addressPeerMap[addr]
+	if !ok {
+		log.Printf("Unknown hello from: %s", addr)
+		return
+	}
+	memb := peer.Member
+	memb.Nick = hello.Nick
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		log.Printf("Ошибка при попытке распарсить адрес=%s: %+v", addr, err)
+		return
+	}
+	memb.PublicAddress = fmt.Sprintf("%s:%s", host, hello.Port)
+	log.Printf("Получен hello от member= %+v", memb)
 	// Обновляем запись в peersMap: заменяем временный ключ на реальный PeerID.
-	peersMutex.Lock()
-	defer peersMutex.Unlock()
-	if peer, exists := peersMap[tempID]; exists {
-		delete(peersMap, tempID)
-		peer.Address = peersMap[tempID].Address
-		peersMap[hello.PeerID] = peer
+	nickPeerMapMutex.Lock()
+	defer nickPeerMapMutex.Unlock()
+	if peer, exists := addressPeerMap[addr]; exists {
+		nickPeerMap[memb.Nick] = peer
 	} else {
-		peersMap[hello.PeerID] = &Peer{session: nil, Address: ""}
+		log.Printf("Peer not found by addr: %s", addr)
 	}
 }
 
 // handleCandidateEnvelope обрабатывает сообщение с кандидатами и инициирует подключение к новым узлам,
 // если не достигнут лимит дополнительных соединений и кандидат ещё не пытались подключить.
-func handleCandidateEnvelope(data json.RawMessage, tempID string) {
+func handleCandidateEnvelope(data json.RawMessage, senderNick string) {
 	var candMsg CandidateMessage
 	if err := json.Unmarshal(data, &candMsg); err != nil {
-		log.Printf("Ошибка декодирования candidate message от %s: %v", tempID, err)
+		log.Printf("Ошибка декодирования candidate message от %s: %+v", senderNick, err)
 		return
 	}
 	for _, cand := range candMsg.Candidates {
-		// Проверяем, не пытались ли мы уже подключиться к данному кандидату.
-		attemptedCandidates.Lock()
-		alreadyAttempted := attemptedCandidates.m[cand.PeerID]
-		attemptedCandidates.Unlock()
-		if alreadyAttempted {
+		if _, ok := nickPeerMap[cand.Nick]; ok {
 			continue
 		}
-		peersMutex.Lock()
-		_, exists := peersMap[cand.PeerID]
-		var currentAdditional int
-		// Если у узла есть родитель, считаем, что первое соединение – основное,
-		// а все остальные – дополнительные.
-		if parent != "" {
-			currentAdditional = len(peersMap) - 1
-		} else {
-			currentAdditional = len(peersMap)
-		}
-		peersMutex.Unlock()
-		if !exists && cand.Address != "" && cand.Address != localAddress && currentAdditional < maxAdditionalConnections {
-			log.Printf("Попытка подключения к кандидату %s (%s)", cand.PeerID, cand.Address)
-			attemptedCandidates.Lock()
-			attemptedCandidates.m[cand.PeerID] = true
-			attemptedCandidates.Unlock()
-			go connectToPeer(cand.Address)
-		}
+		log.Printf("%s прислал кандидата для подключения <Candidate:%+v>", senderNick, cand)
+
+		go connectToPeer(cand.Address)
 	}
 }
 
@@ -338,17 +340,12 @@ func processChatMessage(msg Message, from string) {
 
 // forwardMessage пересылает сообщение через все активные соединения (кроме источника).
 func forwardMessage(msg Message, from string) {
-	peersMutex.Lock()
-	defer peersMutex.Unlock()
-	for peerID, peer := range peersMap {
-		if peerID == from {
+	for nick, peer := range nickPeerMap {
+		if nick == from {
 			continue
 		}
-		if !contains(msg.HopPath, nick) {
-			msg.HopPath = append(msg.HopPath, nick)
-		}
 		if err := sendEnvelope(peer.session, "chat", msg); err != nil {
-			log.Printf("Ошибка ретрансляции через %s: %v", peerID, err)
+			log.Printf("Ошибка ретрансляции через %s: %+v", nick, err)
 		}
 	}
 }
@@ -375,37 +372,36 @@ func sendEnvelope(session *yamux.Session, msgType string, payload interface{}) e
 // sendHello отправляет handshake-сообщение с информацией о данном узле.
 func sendHello(session *yamux.Session) {
 	hello := Hello{
-		PeerID: nick,
+		Nick: nick,
+		Port: port,
 	}
 	if err := sendEnvelope(session, "hello", hello); err != nil {
-		log.Printf("Ошибка отправки hello: %v", err)
+		log.Printf("Ошибка отправки hello: %+v", err)
 	}
 }
 
 // sendCandidates отправляет список известных кандидатов (не более maxAdditionalConnections) через данную сессию.
-func sendCandidates(session *yamux.Session) {
-	peersMutex.Lock()
+func sendCandidates(session *yamux.Session, recipientNick string) {
+	nickPeerMapMutex.Lock()
 	var candidates []Candidate
 	count := 0
-	for peerID, peer := range peersMap {
-		if peerID == nick {
+	for nick, peer := range nickPeerMap {
+		if recipientNick == nick {
 			continue
 		}
 		if count >= maxAdditionalConnections {
 			break
 		}
-		if peer.Address != "" {
-			candidates = append(candidates, Candidate{
-				PeerID:  peerID,
-				Address: peer.Address,
-			})
-			count++
-		}
+		candidates = append(candidates, Candidate{
+			Nick:    nick,
+			Address: peer.PublicAddress,
+		})
+		count++
 	}
-	peersMutex.Unlock()
+	nickPeerMapMutex.Unlock()
 	candMsg := CandidateMessage{Candidates: candidates}
 	if err := sendEnvelope(session, "candidate", candMsg); err != nil {
-		log.Printf("Ошибка отправки candidates: %v", err)
+		log.Printf("Ошибка отправки candidates: %+v", err)
 	}
 }
 
@@ -431,11 +427,9 @@ func displayMessage(text string) {
 
 // sendChatMessage отправляет сообщение всем подключённым узлам.
 func sendChatMessage(msg Message) {
-	peersMutex.Lock()
-	defer peersMutex.Unlock()
-	for peerID, peer := range peersMap {
+	for peerID, peer := range nickPeerMap {
 		if err := sendEnvelope(peer.session, "chat", msg); err != nil {
-			log.Printf("Ошибка отправки сообщения через %s: %v", peerID, err)
+			log.Printf("Ошибка отправки сообщения через %s: %+v", peerID, err)
 		}
 	}
 }
