@@ -29,10 +29,8 @@ var (
 	localAddress string
 
 	// peersMap хранит активные соединения: ключ – уникальный идентификатор (PeerID).
-	addressPeerMap   = make(map[string]*Peer)
-	addrPeerMapMutex = sync.Mutex{}
-	nickPeerMap      = make(map[string]*Peer)
-	nickPeerMapMutex = sync.Mutex{}
+	addressPeerMap = sync.Map{}
+	nickPeerMap    = sync.Map{}
 
 	// processedMessages предотвращает повторную обработку одного и того же сообщения.
 	processedMessages = struct {
@@ -161,10 +159,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	addrPeerMapMutex.Lock()
-	addressPeerMap[r.RemoteAddr] = &Peer{session: session}
-	addrPeerMapMutex.Unlock()
-
 	go acceptStreams(session, r.RemoteAddr)
 	sendCandidates(session, r.RemoteAddr)
 }
@@ -185,13 +179,10 @@ func connectToPeer(address string) bool {
 		return false
 	}
 	// Сохраняем соединение временно по адресу до handshake.
-	addrPeerMapMutex.Lock()
-	addressPeerMap[address] = &Peer{session: session, Member: &Member{Address: address}}
-	addrPeerMapMutex.Unlock()
+	addressPeerMap.Store(address, &Peer{session: session, Member: &Member{Address: address}})
 	log.Printf("connectToPeer: Добавлен peer addr: %s", address)
 
 	go acceptStreams(session, address)
-	sendHello(session)
 	return true
 }
 
@@ -200,14 +191,17 @@ func acceptStreams(session *yamux.Session, addr string) {
 	for {
 		stream, err := session.Accept()
 		log.Printf("acceptStreams: Установлен новый stream c addr=%s", addr)
+		sendHello(session)
 		if err != nil {
 			log.Printf("acceptStreams: Ошибка Accept потока от %s: %+v", addr, err)
-			peer, ok := addressPeerMap[addr]
+			anyPeer, ok := addressPeerMap.Load(addr)
 			if !ok {
 				return
 			}
-			delete(nickPeerMap, peer.Nick)
-			delete(addressPeerMap, addr)
+			peer := anyPeer.(*Peer)
+			log.Printf("acceptStreams: Собираюсь удалить из хранилища nick=%s addr=%s", peer.Nick, addr)
+			nickPeerMap.Delete(peer.Nick)
+			addressPeerMap.Delete(addr)
 			return
 		}
 		go handleStream(stream, addr)
@@ -256,19 +250,18 @@ func handleHelloEnvelope(data json.RawMessage, addr string) {
 		log.Printf("handleHelloEnvelope: Ошибка декодирования hello от %s: %+v", addr, err)
 		return
 	}
-	peer, ok := addressPeerMap[addr]
+	val, ok := addressPeerMap.Load(addr)
 	if !ok {
 		log.Printf("handleHelloEnvelope: Unknown hello from: %s", addr)
 		return
 	}
+	peer := val.(*Peer)
 	memb := peer.Member
 	memb.Nick = hello.Nick
 	memb.PublicAddresses = hello.PublicAddresses
 	log.Printf("handleHelloEnvelope: Получен hello от member= %+v", memb)
-	nickPeerMapMutex.Lock()
-	defer nickPeerMapMutex.Unlock()
-	if peer, exists := addressPeerMap[addr]; exists {
-		nickPeerMap[memb.Nick] = peer
+	if peer, exists := addressPeerMap.Load(addr); exists {
+		nickPeerMap.Store(memb.Nick, peer)
 	} else {
 		log.Printf("Peer not found by addr: %s", addr)
 	}
@@ -283,7 +276,7 @@ func handleCandidateEnvelope(data json.RawMessage, senderNick string) {
 		return
 	}
 	for _, cand := range candMsg.Candidates {
-		if _, ok := nickPeerMap[cand.Nick]; ok {
+		if _, ok := nickPeerMap.Load(cand.Nick); ok {
 			continue
 		}
 		log.Printf("handleCandidateEnvelope: %s прислал кандидата для подключения <Candidate:%+v>", senderNick, cand)
@@ -326,14 +319,16 @@ func processChatMessage(msg Message, from string) {
 
 // forwardMessage пересылает сообщение через все активные соединения (кроме источника).
 func forwardMessage(msg Message, from string) {
-	for nick, peer := range nickPeerMap {
+	nickPeerMap.Range(func(key, value any) bool {
+		peer := value.(*Peer)
 		if nick == from {
-			continue
+			return true
 		}
 		if err := sendEnvelope(peer.session, "chat", msg); err != nil {
 			log.Printf("Ошибка ретрансляции через %s: %+v", nick, err)
 		}
-	}
+		return true
+	})
 }
 
 // sendEnvelope открывает новый поток в сессии и отправляет в него JSON-объект (envelope).
@@ -377,23 +372,24 @@ func sendHello(session *yamux.Session) {
 
 // sendCandidates отправляет список известных кандидатов (не более maxAdditionalConnections) через данную сессию.
 func sendCandidates(session *yamux.Session, recipientNick string) {
-	nickPeerMapMutex.Lock()
 	var candidates []Candidate
 	count := 0
-	for nick, peer := range nickPeerMap {
+	nickPeerMap.Range(func(key, value any) bool {
+		peer := value.(*Peer)
 		if recipientNick == nick {
-			continue
+			return true
 		}
 		if count >= maxAdditionalConnections {
-			break
+			return false
 		}
 		candidates = append(candidates, Candidate{
 			Nick:      nick,
 			Addresses: peer.PublicAddresses,
 		})
 		count++
-	}
-	nickPeerMapMutex.Unlock()
+		return true
+	})
+
 	candMsg := CandidateMessage{Candidates: candidates}
 	if err := sendEnvelope(session, "candidate", candMsg); err != nil {
 		log.Printf("Ошибка отправки candidates: %+v", err)
@@ -422,11 +418,13 @@ func displayMessage(text string) {
 
 // sendChatMessage отправляет сообщение всем подключённым узлам.
 func sendChatMessage(msg Message) {
-	for peerID, peer := range nickPeerMap {
+	nickPeerMap.Range(func(key, value any) bool {
+		peer := value.(*Peer)
 		if err := sendEnvelope(peer.session, "chat", msg); err != nil {
-			log.Printf("Ошибка отправки сообщения через %s: %+v", peerID, err)
+			log.Printf("Ошибка отправки сообщения через %s: %+v", peer.Nick, err)
 		}
-	}
+		return true
+	})
 }
 
 // Обёртка WebSocket -> net.Conn (упрощённая для демонстрации)
@@ -484,9 +482,11 @@ func websocketToConn(ws *websocket.Conn) net.Conn {
 }
 
 func ping() {
-	for _, peer := range nickPeerMap {
+	nickPeerMap.Range(func(key, value any) bool {
+		peer := value.(*Peer)
 		sendEnvelope(peer.session, "ping", nil)
-	}
+		return true
+	})
 }
 
 func getPublicAddress() ([]string, error) {
