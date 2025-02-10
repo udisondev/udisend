@@ -202,7 +202,11 @@ func acceptStreams(session *yamux.Session, addr string) {
 		log.Printf("acceptStreams: Установлен новый stream c addr=%s", addr)
 		if err != nil {
 			log.Printf("acceptStreams: Ошибка Accept потока от %s: %+v", addr, err)
-			delete(nickPeerMap, addressPeerMap[addr].Nick)
+			peer, ok := addressPeerMap[addr]
+			if !ok {
+				return
+			}
+			delete(nickPeerMap, peer.Nick)
 			delete(addressPeerMap, addr)
 			return
 		}
