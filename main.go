@@ -328,6 +328,10 @@ func processChatMessage(msg Message, from string) {
 	processedMessages.m[msg.ID] = true
 	processedMessages.Unlock()
 
+	if msg.Sender == nick {
+		return
+	}
+
 	if msg.Recipient == nick {
 		fmt.Printf("[ЛС] %s: %s\n", msg.Sender, msg.Text)
 	} else if msg.Recipient == "" {
