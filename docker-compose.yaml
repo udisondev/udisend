@@ -1,0 +1,76 @@
+version: '3'
+services:
+  first:
+    build: .
+    container_name: messenger_first
+    environment:
+      - NICK=first
+      - PORT=5000
+      - TERM=xterm
+      - LINES=40
+      - COLUMNS=80
+    ports:
+      - "5000:5000"
+    tty: true
+    stdin_open: true
+
+  second:
+    build: .
+    container_name: messenger_second
+    environment:
+      - NICK=second
+      - PORT=6000
+      - PARENT=messenger_first:5000
+      - TERM=xterm
+      - LINES=40
+      - COLUMNS=80
+    ports:
+      - "6001:6000"
+    tty: true
+    stdin_open: true
+
+  third:
+    build: .
+    container_name: messenger_third
+    environment:
+      - NICK=third
+      - PORT=7000
+      - PARENT=messenger_second:6000
+      - TERM=xterm
+      - LINES=40
+      - COLUMNS=80
+    ports:
+      - "7002:7000"
+    tty: true
+    stdin_open: true
+
+  fourth:
+    build: .
+    container_name: messenger_fourth
+    environment:
+      - NICK=fourth
+      - PORT=8000
+      - PARENT=messenger_first:5000
+      - TERM=xterm
+      - LINES=40
+      - COLUMNS=80
+    ports:
+      - "8003:8000"
+    tty: true
+    stdin_open: true
+
+  fifth:
+    build: .
+    container_name: messenger_fifth
+    environment:
+      - NICK=fifth
+      - PORT=9000
+      - PARENT=messenger_third:7000
+      - TERM=xterm
+      - LINES=40
+      - COLUMNS=80
+    ports:
+      - "9004:9000"
+    tty: true
+    stdin_open: true
+
