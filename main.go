@@ -18,13 +18,13 @@ const (
 	TypeCandidate MessageType = "candidate"
 )
 
+// SignalMsg — универсальная структура сигнализации.
 type SignalMsg struct {
-	Type MessageType `json:"type"`
-	From string      `json:"from"`
-	To   string      `json:"to,omitempty"` // если пусто — широковещательно
-	SDP  string      `json:"sdp,omitempty"`
-	// Для упрощения кандидат передается как строка (в реальной реализации обмениваются ICE кандидатами)
-	Candidate string `json:"candidate,omitempty"`
+	Type      MessageType `json:"type"`
+	From      string      `json:"from"`
+	To        string      `json:"to,omitempty"` // если пусто — широковещательно
+	SDP       string      `json:"sdp,omitempty"`
+	Candidate string      `json:"candidate,omitempty"`
 }
 
 type Client struct {
@@ -47,8 +47,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		log.Println("Upgrade error:", err)
 		return
 	}
-
-	// Ожидаем, что первым сообщением клиент пришлёт свой ID (ник)
+	// Ожидаем, что первым сообщением клиент отправит свой ник.
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		log.Println("Ошибка чтения ID:", err)
@@ -63,6 +62,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	clientsMu.Unlock()
 	log.Printf("Клиент %s подключился", id)
 
+	// Читаем сообщения от клиента.
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
@@ -94,6 +94,7 @@ func routeMessage(sig SignalMsg) {
 		return
 	}
 
+	// Если поле To задано, отправляем только указанному клиенту.
 	if sig.To != "" {
 		if target, ok := clients[sig.To]; ok {
 			target.Conn.WriteMessage(websocket.TextMessage, data)
@@ -104,6 +105,7 @@ func routeMessage(sig SignalMsg) {
 		return
 	}
 
+	// Иначе рассылаем всем, кроме отправителя.
 	for id, client := range clients {
 		if id == sig.From {
 			continue
