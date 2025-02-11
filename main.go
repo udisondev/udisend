@@ -40,6 +40,7 @@ var dataChannel *webrtc.DataChannel
 
 // sendSignal отправляет сигнал через WebSocket.
 func sendSignal(conn *websocket.Conn, sig SignalMsg) {
+	log.Printf("Going to send sig=%s\n", sig)
 	data, err := json.Marshal(sig)
 	if err != nil {
 		log.Println("Ошибка маршалинга сигнала:", err)
@@ -52,6 +53,7 @@ func sendSignal(conn *websocket.Conn, sig SignalMsg) {
 
 // handleSignal обрабатывает полученные сигнальные сообщения.
 func handleSignal(sig SignalMsg, pc *webrtc.PeerConnection, conn *websocket.Conn) {
+	log.Printf("Receive sig=%s\n", sig)
 	switch sig.Type {
 	case TypeOffer:
 		log.Println("Получен offer")
@@ -218,4 +220,3 @@ func main() {
 	// Оставляем приложение активным.
 	select {}
 }
-
