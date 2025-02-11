@@ -33,10 +33,68 @@ type SignalMsg struct {
 var (
 	nick         string
 	role         string // "offerer" или "answerer"
-	signalServer string // например, ws://<public_ip>:8080/ws
+	signalServer string // пример: ws://<public_ip>:8080/ws
 )
 
 var dataChannel *webrtc.DataChannel
+
+// sendSignal отправляет сигнал через WebSocket.
+func sendSignal(conn *websocket.Conn, sig SignalMsg) {
+	data, err := json.Marshal(sig)
+	if err != nil {
+		log.Println("Ошибка маршалинга сигнала:", err)
+		return
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		log.Println("Ошибка отправки сигнала:", err)
+	}
+}
+
+// handleSignal обрабатывает полученные сигнальные сообщения.
+func handleSignal(sig SignalMsg, pc *webrtc.PeerConnection, conn *websocket.Conn) {
+	switch sig.Type {
+	case TypeOffer:
+		log.Println("Получен offer")
+		offer := webrtc.SessionDescription{
+			Type: webrtc.SDPTypeOffer,
+			SDP:  sig.SDP,
+		}
+		if err := pc.SetRemoteDescription(offer); err != nil {
+			log.Println("Ошибка установки remote description:", err)
+			return
+		}
+		answer, err := pc.CreateAnswer(nil)
+		if err != nil {
+			log.Println("Ошибка создания answer:", err)
+			return
+		}
+		if err = pc.SetLocalDescription(answer); err != nil {
+			log.Println("Ошибка установки локального описания:", err)
+			return
+		}
+		<-webrtc.GatheringCompletePromise(pc)
+		answerMsg := SignalMsg{
+			Type: TypeAnswer,
+			SDP:  pc.LocalDescription().SDP,
+			To:   sig.From,
+		}
+		sendSignal(conn, answerMsg)
+	case TypeAnswer:
+		log.Println("Получен answer")
+		answer := webrtc.SessionDescription{
+			Type: webrtc.SDPTypeAnswer,
+			SDP:  sig.SDP,
+		}
+		if err := pc.SetRemoteDescription(answer); err != nil {
+			log.Println("Ошибка установки remote description:", err)
+		}
+	case TypeCandidate:
+		// Для упрощения здесь кандидат не обрабатывается отдельно.
+		log.Printf("Получен кандидат: %s", sig.Candidate)
+	default:
+		log.Printf("Неизвестный тип сигнала: %s", sig.Type)
+	}
+}
 
 func main() {
 	flag.StringVar(&nick, "nick", "anon", "Никнейм клиента")
@@ -59,7 +117,7 @@ func main() {
 	defer conn.Close()
 	log.Printf("Подключились к сигнальному серверу %s", signalServer)
 
-	// Отправляем свой ник.
+	// Отправляем свой ник сразу после подключения.
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(nick)); err != nil {
 		log.Fatal("Ошибка отправки идентификатора:", err)
 	}
@@ -83,21 +141,21 @@ func main() {
 			log.Println("DataChannel открыт!")
 		})
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			// Здесь логируем, что сообщение получено напрямую от другого узла.
+			// Здесь явно показываем, что сообщение получено напрямую от другого узла.
 			log.Printf("Прямое сообщение получено: %s", string(msg.Data))
 		})
 	})
 
-	// Обработка входящих сигналов через WebSocket.
+	// Обработка входящих сигналов.
 	go func() {
 		for {
-			_, message, err := conn.ReadMessage()
+			_, msg, err := conn.ReadMessage()
 			if err != nil {
 				log.Println("Ошибка чтения сигнала:", err)
 				return
 			}
 			var sig SignalMsg
-			if err := json.Unmarshal(message, &sig); err != nil {
+			if err := json.Unmarshal(msg, &sig); err != nil {
 				log.Println("Ошибка декодирования сигнала:", err)
 				continue
 			}
@@ -105,7 +163,7 @@ func main() {
 		}
 	}()
 
-	// Если роль offerer, создаем DataChannel и генерируем offer.
+	// Если мы инициатор, создаем DataChannel и генерируем offer.
 	if role == "offerer" {
 		dc, err := pc.CreateDataChannel("data", nil)
 		if err != nil {
@@ -126,9 +184,7 @@ func main() {
 		if err = pc.SetLocalDescription(offer); err != nil {
 			log.Fatal(err)
 		}
-		gatherComplete := webrtc.GatheringCompletePromise(pc)
-		<-gatherComplete
-
+		<-webrtc.GatheringCompletePromise(pc)
 		offerMsg := SignalMsg{
 			Type: TypeOffer,
 			SDP:  pc.LocalDescription().SDP,
@@ -136,7 +192,7 @@ func main() {
 		sendSignal(conn, offerMsg)
 	}
 
-	// Запускаем ввод из консоли: отправка сообщений через DataChannel.
+	// Запускаем цикл чтения сообщений из консоли.
 	go func() {
 		scanner := bufio.NewScanner(os.Stdin)
 		fmt.Println("Введите сообщение:")
@@ -146,7 +202,6 @@ func main() {
 				log.Println("DataChannel не открыт, сообщение не отправлено")
 				continue
 			}
-			// Отправляем сообщение с префиксом, чтобы можно было видеть, кто отправил.
 			messageToSend := fmt.Sprintf("%s: %s", nick, text)
 			err := dataChannel.SendText(messageToSend)
 			if err != nil {
@@ -164,60 +219,3 @@ func main() {
 	select {}
 }
 
-func sendSignal(conn *websocket.Conn, sig SignalMsg) {
-	data, err := json.Marshal(sig)
-	if err != nil {
-		log.Println("Ошибка маршалинга сигнала:", err)
-		return
-	}
-	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		log.Println("Ошибка отправки сигнала:", err)
-	}
-}
-
-func handleSignal(sig SignalMsg, pc *webrtc.PeerConnection, conn *websocket.Conn) {
-	switch sig.Type {
-	case TypeOffer:
-		log.Println("Получен offer")
-		offer := webrtc.SessionDescription{
-			Type: webrtc.SDPTypeOffer,
-			SDP:  sig.SDP,
-		}
-		if err := pc.SetRemoteDescription(offer); err != nil {
-			log.Println("Ошибка установки remote description:", err)
-			return
-		}
-		// Если мы не инициатор, создаем answer.
-		answer, err := pc.CreateAnswer(nil)
-		if err != nil {
-			log.Println("Ошибка создания answer:", err)
-			return
-		}
-		if err = pc.SetLocalDescription(answer); err != nil {
-			log.Println("Ошибка установки локального описания:", err)
-			return
-		}
-		gatherComplete := webrtc.GatheringCompletePromise(pc)
-		<-gatherComplete
-		answerMsg := SignalMsg{
-			Type: TypeAnswer,
-			SDP:  pc.LocalDescription().SDP,
-			To:   sig.From, // направляем конкретно отправителю
-		}
-		sendSignal(conn, answerMsg)
-	case TypeAnswer:
-		log.Println("Получен answer")
-		answer := webrtc.SessionDescription{
-			Type: webrtc.SDPTypeAnswer,
-			SDP:  sig.SDP,
-		}
-		if err := pc.SetRemoteDescription(answer); err != nil {
-			log.Println("Ошибка установки remote description:", err)
-		}
-	case TypeCandidate:
-		// Обработка ICE кандидатов не реализована отдельно в этом примере.
-		log.Printf("Получен кандидат: %s", sig.Candidate)
-	default:
-		log.Printf("Неизвестный тип сигнала: %s", sig.Type)
-	}
-}
