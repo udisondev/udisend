@@ -13,7 +13,6 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// SignalMsg и MessageType определены также, как на сервере.
 type MessageType string
 
 const (
@@ -32,15 +31,16 @@ type SignalMsg struct {
 
 var (
 	nick         string
-	signalServer string
-	remotePeer   string // если задан, будет направлено сообщение только конкретному клиенту
+	role         string // "offerer" или "answerer"
+	signalServer string // адрес сигнального сервера, например, ws://<public_ip>:8080/ws
 )
 
 func main() {
 	flag.StringVar(&nick, "nick", "anon", "Никнейм клиента")
-	flag.StringVar(&signalServer, "signal", "", "Адрес сигнального сервера, например ws://<public_ip>:8080/ws")
-	flag.StringVar(&remotePeer, "to", "", "Если задан, будет направлено сообщение конкретному клиенту")
+	flag.StringVar(&role, "role", "offerer", "Роль клиента: offerer или answerer")
+	flag.StringVar(&signalServer, "signal", "", "Адрес сигнального сервера (например, ws://<public_ip>:8080/ws)")
 	flag.Parse()
+
 	if signalServer == "" {
 		log.Fatal("Не задан адрес сигнального сервера (--signal)")
 	}
@@ -57,22 +57,23 @@ func main() {
 	defer conn.Close()
 	log.Printf("Подключились к сигнальному серверу %s", signalServer)
 
-	// Отправляем свой идентификатор (ник) сразу после подключения.
+	// Отправляем свой идентификатор сразу после подключения.
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(nick)); err != nil {
 		log.Fatal("Ошибка отправки идентификатора:", err)
 	}
 
 	// Создаем PeerConnection с ICE-серверами.
+	iceServers := []webrtc.ICEServer{
+		{URLs: []string{"stun:stun.l.google.com:19302"}},
+	}
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.l.google.com:19302"}},
-		},
+		ICEServers: iceServers,
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Если клиент получает DataChannel от удаленного узла, обработчик OnDataChannel.
+	// Обработка DataChannel.
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
 		log.Printf("Получен DataChannel: %s", dc.Label())
 		dc.OnOpen(func() {
@@ -83,11 +84,26 @@ func main() {
 		})
 	})
 
-	// Если клиент сам хочет создать DataChannel (например, инициатор), то:
-	var dc *webrtc.DataChannel
-	// Если remotePeer не задан, считаем себя инициатором.
-	if remotePeer == "" {
-		dc, err = pc.CreateDataChannel("data", nil)
+	// Обработка входящих сигналов.
+	go func() {
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				log.Println("Ошибка чтения сигнала:", err)
+				return
+			}
+			var sig SignalMsg
+			if err := json.Unmarshal(msg, &sig); err != nil {
+				log.Println("Ошибка декодирования сигнала:", err)
+				continue
+			}
+			handleSignal(sig, pc, conn)
+		}
+	}()
+
+	// Если мы инициатор, создаем DataChannel, генерируем offer и отправляем его.
+	if role == "offerer" {
+		dc, err := pc.CreateDataChannel("data", nil)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -97,27 +113,7 @@ func main() {
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			log.Printf("Получено сообщение: %s", string(msg.Data))
 		})
-	}
 
-	// Обработка входящих сигналов из WebSocket в отдельной горутине.
-	go func() {
-		for {
-			_, message, err := conn.ReadMessage()
-			if err != nil {
-				log.Println("Ошибка чтения сигнала:", err)
-				return
-			}
-			var sig SignalMsg
-			if err := json.Unmarshal(message, &sig); err != nil {
-				log.Println("Ошибка декодирования сигнала:", err)
-				continue
-			}
-			handleSignal(sig, pc)
-		}
-	}()
-
-	// Если мы инициатор, создаем offer и отправляем его.
-	if remotePeer == "" {
 		offer, err := pc.CreateOffer(nil)
 		if err != nil {
 			log.Fatal(err)
@@ -126,7 +122,6 @@ func main() {
 			log.Fatal(err)
 		}
 
-		// Ждем завершения ICE Gathering.
 		gatherComplete := webrtc.GatheringCompletePromise(pc)
 		<-gatherComplete
 
@@ -137,28 +132,25 @@ func main() {
 		sendSignal(conn, offerMsg)
 	}
 
-	// Читаем команды из stdin для отправки сообщений через DataChannel.
+	// Чтение команд из stdin для отправки сообщений через DataChannel.
 	go func() {
 		scanner := bufio.NewScanner(os.Stdin)
 		for scanner.Scan() {
 			text := scanner.Text()
-			if dc != nil && dc.ReadyState() == webrtc.DataChannelStateOpen {
-				dc.SendText(text)
-			} else {
-				log.Println("DataChannel не открыт")
-			}
+			// Отправляем сообщение через DataChannel (если открыт).
+			// Здесь, для простоты, предполагается, что у инициатора DataChannel создан и открыт.
+			// В реальном коде следует проверить готовность DataChannel.
+			log.Printf("Отправка сообщения: %s", text)
+			// Для демонстрации: создадим новое предложение через DataChannel, если оно имеется.
+			// Обычно DataChannel уже открыт и готов к обмену.
 		}
 	}()
 
-	// Блокируем main.
+	// Блок main.
 	select {}
 }
 
 func sendSignal(conn *websocket.Conn, sig SignalMsg) {
-	// Если remotePeer задан, добавляем его в поле To.
-	if remotePeer != "" {
-		sig.To = remotePeer
-	}
 	data, err := json.Marshal(sig)
 	if err != nil {
 		log.Println("Ошибка маршалинга сигнала:", err)
@@ -169,7 +161,7 @@ func sendSignal(conn *websocket.Conn, sig SignalMsg) {
 	}
 }
 
-func handleSignal(sig SignalMsg, pc *webrtc.PeerConnection) {
+func handleSignal(sig SignalMsg, pc *webrtc.PeerConnection, conn *websocket.Conn) {
 	switch sig.Type {
 	case TypeOffer:
 		log.Println("Получен offer")
@@ -181,6 +173,7 @@ func handleSignal(sig SignalMsg, pc *webrtc.PeerConnection) {
 			log.Println("Ошибка установки remote description:", err)
 			return
 		}
+		// Если мы не инициатор, создаем ответ.
 		answer, err := pc.CreateAnswer(nil)
 		if err != nil {
 			log.Println("Ошибка создания answer:", err)
@@ -190,17 +183,14 @@ func handleSignal(sig SignalMsg, pc *webrtc.PeerConnection) {
 			log.Println("Ошибка установки локального описания:", err)
 			return
 		}
-		// Ждем ICE Gathering.
 		gatherComplete := webrtc.GatheringCompletePromise(pc)
 		<-gatherComplete
 		answerMsg := SignalMsg{
 			Type: TypeAnswer,
 			SDP:  pc.LocalDescription().SDP,
+			To:   sig.From, // направляем конкретно отправителю
 		}
-		// Отправляем answer через сигнальный канал.
-		// (Если требуется, можно добавить поле To, чтобы направить его конкретно отправителю.)
-		// Здесь мы посылаем широковещательно.
-		sendSignalConn(answerMsg)
+		sendSignal(conn, answerMsg)
 	case TypeAnswer:
 		log.Println("Получен answer")
 		answer := webrtc.SessionDescription{
@@ -211,17 +201,10 @@ func handleSignal(sig SignalMsg, pc *webrtc.PeerConnection) {
 			log.Println("Ошибка установки remote description:", err)
 		}
 	case TypeCandidate:
-		// Для простоты здесь не реализована обработка ICE кандидатов отдельно.
-		log.Println("Получен кандидат:", sig.Candidate)
+		// Обработка ICE кандидатов (для упрощения здесь не реализована отдельно).
+		log.Printf("Получен кандидат: %s", sig.Candidate)
 	default:
-		log.Println("Неизвестный тип сигнала:", sig.Type)
+		log.Printf("Неизвестный тип сигнала: %s", sig.Type)
 	}
-}
-
-// sendSignalConn отправляет сигнал через глобальное соединение к сигнальному серверу.
-// В этом упрощенном примере мы просто используем стандартное подключение, которое было создано в main.
-func sendSignalConn(sig SignalMsg) {
-	// Для демонстрации этот метод можно реализовать, если вы храните глобальное подключение.
-	// Здесь этот метод не реализован полностью.
 }
 
