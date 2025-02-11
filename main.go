@@ -21,13 +21,12 @@ const (
 type SignalMsg struct {
 	Type MessageType `json:"type"`
 	From string      `json:"from"`
-	To   string      `json:"to,omitempty"` // если пусто – широковещательно
+	To   string      `json:"to,omitempty"` // если пусто — широковещательно
 	SDP  string      `json:"sdp,omitempty"`
-	// Для простоты кандидат передаем как строку
+	// Для упрощения кандидат передается как строка (в реальной реализации обмениваются ICE кандидатами)
 	Candidate string `json:"candidate,omitempty"`
 }
 
-// Client представляет подключённого по WebSocket клиента.
 type Client struct {
 	ID   string
 	Conn *websocket.Conn
@@ -37,19 +36,19 @@ var (
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
+
 	clientsMu sync.Mutex
-	clients   = make(map[string]*Client) // ключ – идентификатор (например, ник)
+	clients   = make(map[string]*Client) // ключ — идентификатор (например, ник)
 )
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
-	// Обновляем соединение до WebSocket.
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("Upgrade error:", err)
 		return
 	}
 
-	// Ожидаем, что первым сообщением клиент пришлёт свой ID (ник).
+	// Ожидаем, что первым сообщением клиент пришлёт свой ID (ник)
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		log.Println("Ошибка чтения ID:", err)
@@ -64,7 +63,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	clientsMu.Unlock()
 	log.Printf("Клиент %s подключился", id)
 
-	// Обработка сообщений от клиента.
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
@@ -86,7 +84,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Клиент %s отключился", id)
 }
 
-// routeMessage пересылает сигнал полученный от одного клиента другому (если To задан) или всем.
 func routeMessage(sig SignalMsg) {
 	clientsMu.Lock()
 	defer clientsMu.Unlock()
@@ -97,7 +94,6 @@ func routeMessage(sig SignalMsg) {
 		return
 	}
 
-	// Если To указан, отправляем только этому клиенту.
 	if sig.To != "" {
 		if target, ok := clients[sig.To]; ok {
 			target.Conn.WriteMessage(websocket.TextMessage, data)
@@ -108,7 +104,6 @@ func routeMessage(sig SignalMsg) {
 		return
 	}
 
-	// Иначе широковещательно (без отправителя).
 	for id, client := range clients {
 		if id == sig.From {
 			continue
