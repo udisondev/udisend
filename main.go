@@ -1,90 +1,133 @@
-// signaling_server.go
+// server.go
 package main
 
 import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 
-	"github.com/pion/webrtc/v4"
+	"github.com/gorilla/websocket"
 )
 
-type SignalMessage struct {
-	SDP string `json:"sdp"`
+// MessageType обозначает тип сигнализационного сообщения.
+type MessageType string
+
+const (
+	TypeOffer    MessageType = "offer"
+	TypeAnswer   MessageType = "answer"
+	TypeCandidate MessageType = "candidate"
+)
+
+// SignalMsg – универсальная структура сигнализации.
+type SignalMsg struct {
+	Type MessageType       `json:"type"`
+	From string            `json:"from"`
+	To   string            `json:"to,omitempty"` // если пусто – широковещательно
+	SDP  string            `json:"sdp,omitempty"`
+	// Кандидат может быть любым JSON объектом, здесь упрощённо строка
+	Candidate string       `json:"candidate,omitempty"`
 }
 
-func offerHandler(w http.ResponseWriter, r *http.Request) {
-	// Распаковка SDP offer от клиента.
-	var offerMsg SignalMessage
-	if err := json.NewDecoder(r.Body).Decode(&offerMsg); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	log.Printf("Получен SDP offer:\n%s", offerMsg.SDP)
+// Client представляет подключённого по WebSocket клиента.
+type Client struct {
+	ID   string
+	Conn *websocket.Conn
+}
 
-	// Создаем PeerConnection (с STUN для ICE).
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.l.google.com:19302"}},
-		},
-	})
+var (
+	upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+
+	clientsMu sync.Mutex
+	clients   = make(map[string]*Client) // ключ – ID клиента (например, его ник)
+)
+
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+	// Обновляем соединение до WebSocket
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Println("Upgrade error:", err)
 		return
 	}
 
-	// Опционально: создаем DataChannel (если нужно).
-	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		log.Printf("DataChannel создан: %s (ID %d)", dc.Label(), dc.ID())
-		dc.OnOpen(func() {
-			log.Printf("DataChannel %s открыт", dc.Label())
-			dc.SendText("Привет от сигнального сервера!")
-		})
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			log.Printf("Сообщение от %s: %s", dc.Label(), string(msg.Data))
-		})
-	})
-
-	// Устанавливаем удаленное описание (offer).
-	offer := webrtc.SessionDescription{
-		Type: webrtc.SDPTypeOffer,
-		SDP:  offerMsg.SDP,
-	}
-	if err := pc.SetRemoteDescription(offer); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Создаем SDP answer.
-	answer, err := pc.CreateAnswer(nil)
+	// Ожидаем, что первым сообщением клиент пришлёт свой ID (ник)
+	_, msg, err := conn.ReadMessage()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Println("Ошибка чтения id:", err)
+		conn.Close()
+		return
+	}
+	id := string(msg)
+	client := &Client{ID: id, Conn: conn}
+
+	clientsMu.Lock()
+	clients[id] = client
+	clientsMu.Unlock()
+	log.Printf("Клиент %s подключился", id)
+
+	// Запускаем обработку сообщений от клиента
+	go handleClient(client)
+}
+
+func handleClient(client *Client) {
+	defer func() {
+		client.Conn.Close()
+		clientsMu.Lock()
+		delete(clients, client.ID)
+		clientsMu.Unlock()
+		log.Printf("Клиент %s отключился", client.ID)
+	}()
+
+	for {
+		_, msg, err := client.Conn.ReadMessage()
+		if err != nil {
+			log.Println("Ошибка чтения сообщения:", err)
+			return
+		}
+		var signal SignalMsg
+		if err := json.Unmarshal(msg, &signal); err != nil {
+			log.Println("Ошибка декодирования сигнала:", err)
+			continue
+		}
+		signal.From = client.ID
+		broadcast(signal, client.ID)
+	}
+}
+
+// broadcast рассылает сообщение всем клиентам, кроме отправителя,
+// либо, если To задан, только конкретному получателю.
+func broadcast(signal SignalMsg, senderID string) {
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
+
+	data, err := json.Marshal(signal)
+	if err != nil {
+		log.Println("Ошибка маршалинга:", err)
 		return
 	}
 
-	// Устанавливаем локальное описание.
-	if err := pc.SetLocalDescription(answer); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if signal.To != "" {
+		if toClient, ok := clients[signal.To]; ok {
+			toClient.Conn.WriteMessage(websocket.TextMessage, data)
+		} else {
+			log.Printf("Клиент %s не найден", signal.To)
+		}
 		return
 	}
 
-	// Ждем завершения ICE gathering.
-	gatherComplete := webrtc.GatheringCompletePromise(pc)
-	<-gatherComplete
-
-	// Отправляем ответ.
-	respMsg := SignalMessage{
-		SDP: pc.LocalDescription().SDP,
+	// Рассылка всем, кроме отправителя.
+	for id, c := range clients {
+		if id == senderID {
+			continue
+		}
+		c.Conn.WriteMessage(websocket.TextMessage, data)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(respMsg); err != nil {
-		log.Println("Ошибка отправки ответа:", err)
-	}
-	log.Printf("Отправлен SDP answer:\n%s", respMsg.SDP)
 }
 
 func main() {
-	http.HandleFunc("/offer", offerHandler)
+	http.HandleFunc("/ws", wsHandler)
 	log.Println("Сигнальный сервер запущен на :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
