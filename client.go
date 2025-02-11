@@ -98,7 +98,7 @@ func handleSignal(sig SignalMsg, pc *webrtc.PeerConnection, conn *websocket.Conn
 	}
 }
 
-func main() {
+func client() {
 	flag.StringVar(&nick, "nick", "anon", "Никнейм клиента")
 	flag.StringVar(&role, "role", "offerer", "Роль клиента: offerer или answerer")
 	flag.StringVar(&signalServer, "signal", "", "Адрес сигнального сервера (например, ws://<public_ip>:8080/ws)")
