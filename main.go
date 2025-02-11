@@ -1,91 +1,123 @@
-// signaling_server.go
+// client.go
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 )
 
+// SignalMessage используется для обмена SDP между клиентом и сервером.
 type SignalMessage struct {
 	SDP string `json:"sdp"`
 }
 
-func offerHandler(w http.ResponseWriter, r *http.Request) {
-	// Распаковка SDP offer от клиента.
-	var offerMsg SignalMessage
-	if err := json.NewDecoder(r.Body).Decode(&offerMsg); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	log.Printf("Получен SDP offer:\n%s", offerMsg.SDP)
+var (
+	nick         string
+	signalServer string // например, "http://<public_ip>:8080/offer"
+)
 
-	// Создаем PeerConnection (с STUN для ICE).
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.l.google.com:19302"}},
-		},
-	})
+func sendOffer(offer webrtc.SessionDescription) (webrtc.SessionDescription, error) {
+	offerMsg := SignalMessage{SDP: offer.SDP}
+	data, err := json.Marshal(offerMsg)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return webrtc.SessionDescription{}, err
 	}
-
-	// Опционально: создаем DataChannel (если нужно).
-	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		log.Printf("DataChannel создан: %s (ID %d)", dc.Label(), dc.ID())
-		dc.OnOpen(func() {
-			log.Printf("DataChannel %s открыт", dc.Label())
-			dc.SendText("Привет от сигнального сервера!")
-		})
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			log.Printf("Сообщение от %s: %s", dc.Label(), string(msg.Data))
-		})
-	})
-
-	// Устанавливаем удаленное описание (offer).
-	offer := webrtc.SessionDescription{
-		Type: webrtc.SDPTypeOffer,
-		SDP:  offerMsg.SDP,
-	}
-	if err := pc.SetRemoteDescription(offer); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Создаем SDP answer.
-	answer, err := pc.CreateAnswer(nil)
+	resp, err := http.Post(signalServer, "application/json", bytes.NewReader(data))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return webrtc.SessionDescription{}, err
 	}
-
-	// Устанавливаем локальное описание.
-	if err := pc.SetLocalDescription(answer); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	defer resp.Body.Close()
+	respData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return webrtc.SessionDescription{}, err
 	}
-
-	// Ждем завершения ICE gathering.
-	gatherComplete := webrtc.GatheringCompletePromise(pc)
-	<-gatherComplete
-
-	// Отправляем ответ.
-	respMsg := SignalMessage{
-		SDP: pc.LocalDescription().SDP,
+	var answerMsg SignalMessage
+	if err = json.Unmarshal(respData, &answerMsg); err != nil {
+		return webrtc.SessionDescription{}, err
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(respMsg); err != nil {
-		log.Println("Ошибка отправки ответа:", err)
+	answer := webrtc.SessionDescription{
+		Type: webrtc.SDPTypeAnswer,
+		SDP:  answerMsg.SDP,
 	}
-	log.Printf("Отправлен SDP answer:\n%s", respMsg.SDP)
+	return answer, nil
 }
 
 func main() {
-	http.HandleFunc("/offer", offerHandler)
-	log.Println("Сигнальный сервер запущен на :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	flag.StringVar(&nick, "nick", "anon", "Никнейм для клиента")
+	flag.StringVar(&signalServer, "signal", "", "Адрес сигнального сервера (например, http://<public_ip>:8080/offer)")
+	flag.Parse()
+	if signalServer == "" {
+		log.Fatal("Не задан адрес сигнального сервера (--signal)")
+	}
+
+	// Конфигурация ICE с STUN-сервером.
+	iceServers := []webrtc.ICEServer{
+		{URLs: []string{"stun:stun.l.google.com:19302"}},
+	}
+
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
+		ICEServers: iceServers,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Создаем DataChannel.
+	dc, err := pc.CreateDataChannel("data", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	dc.OnOpen(func() {
+		log.Println("DataChannel открыт!")
+		dc.SendText(fmt.Sprintf("Привет от %s!", nick))
+	})
+	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		log.Printf("Получено сообщение: %s", string(msg.Data))
+	})
+
+	// Создаем SDP offer.
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err = pc.SetLocalDescription(offer); err != nil {
+		log.Fatal(err)
+	}
+
+	// Ждем завершения ICE Gathering.
+	gatherComplete := webrtc.GatheringCompletePromise(pc)
+	<-gatherComplete
+
+	log.Println("Отправка SDP offer на сигнальный сервер...")
+	answer, err := sendOffer(*pc.LocalDescription())
+	if err != nil {
+		log.Fatalf("Ошибка отправки offer: %v", err)
+	}
+	if err = pc.SetRemoteDescription(answer); err != nil {
+		log.Fatalf("Ошибка установки remote description: %v", err)
+	}
+	log.Println("Соединение установлено! Теперь можно обмениваться сообщениями через DataChannel.")
+
+	// Для демонстрации ждем некоторое время и затем отправляем сообщение.
+	time.Sleep(5 * time.Second)
+	if dc.ReadyState() == webrtc.DataChannelStateOpen {
+		err = dc.SendText(fmt.Sprintf("Сообщение от %s", nick))
+		if err != nil {
+			log.Printf("Ошибка отправки сообщения: %v", err)
+		}
+	} else {
+		log.Println("DataChannel не открыт")
+	}
+
+	// Оставляем приложение активным.
+	select {}
 }
 
