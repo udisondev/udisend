@@ -10,23 +10,21 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// MessageType обозначает тип сигнализационного сообщения.
 type MessageType string
 
 const (
-	TypeOffer    MessageType = "offer"
-	TypeAnswer   MessageType = "answer"
+	TypeOffer     MessageType = "offer"
+	TypeAnswer    MessageType = "answer"
 	TypeCandidate MessageType = "candidate"
 )
 
-// SignalMsg – универсальная структура сигнализации.
 type SignalMsg struct {
-	Type MessageType       `json:"type"`
-	From string            `json:"from"`
-	To   string            `json:"to,omitempty"` // если пусто – широковещательно
-	SDP  string            `json:"sdp,omitempty"`
-	// Кандидат может быть любым JSON объектом, здесь упрощённо строка
-	Candidate string       `json:"candidate,omitempty"`
+	Type MessageType `json:"type"`
+	From string      `json:"from"`
+	To   string      `json:"to,omitempty"` // если пусто – широковещательно
+	SDP  string      `json:"sdp,omitempty"`
+	// Для простоты кандидат передаем как строку
+	Candidate string `json:"candidate,omitempty"`
 }
 
 // Client представляет подключённого по WebSocket клиента.
@@ -39,23 +37,22 @@ var (
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
-
 	clientsMu sync.Mutex
-	clients   = make(map[string]*Client) // ключ – ID клиента (например, его ник)
+	clients   = make(map[string]*Client) // ключ – идентификатор (например, ник)
 )
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
-	// Обновляем соединение до WebSocket
+	// Обновляем соединение до WebSocket.
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("Upgrade error:", err)
 		return
 	}
 
-	// Ожидаем, что первым сообщением клиент пришлёт свой ID (ник)
+	// Ожидаем, что первым сообщением клиент пришлёт свой ID (ник).
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
-		log.Println("Ошибка чтения id:", err)
+		log.Println("Ошибка чтения ID:", err)
 		conn.Close()
 		return
 	}
@@ -67,63 +64,58 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	clientsMu.Unlock()
 	log.Printf("Клиент %s подключился", id)
 
-	// Запускаем обработку сообщений от клиента
-	go handleClient(client)
-}
-
-func handleClient(client *Client) {
-	defer func() {
-		client.Conn.Close()
-		clientsMu.Lock()
-		delete(clients, client.ID)
-		clientsMu.Unlock()
-		log.Printf("Клиент %s отключился", client.ID)
-	}()
-
+	// Обработка сообщений от клиента.
 	for {
-		_, msg, err := client.Conn.ReadMessage()
+		_, message, err := conn.ReadMessage()
 		if err != nil {
-			log.Println("Ошибка чтения сообщения:", err)
-			return
+			log.Printf("Клиент %s отключился: %v", id, err)
+			break
 		}
-		var signal SignalMsg
-		if err := json.Unmarshal(msg, &signal); err != nil {
+		var sig SignalMsg
+		if err := json.Unmarshal(message, &sig); err != nil {
 			log.Println("Ошибка декодирования сигнала:", err)
 			continue
 		}
-		signal.From = client.ID
-		broadcast(signal, client.ID)
+		sig.From = id
+		routeMessage(sig)
 	}
+	conn.Close()
+	clientsMu.Lock()
+	delete(clients, id)
+	clientsMu.Unlock()
+	log.Printf("Клиент %s отключился", id)
 }
 
-// broadcast рассылает сообщение всем клиентам, кроме отправителя,
-// либо, если To задан, только конкретному получателю.
-func broadcast(signal SignalMsg, senderID string) {
+// routeMessage пересылает сигнал полученный от одного клиента другому (если To задан) или всем.
+func routeMessage(sig SignalMsg) {
 	clientsMu.Lock()
 	defer clientsMu.Unlock()
 
-	data, err := json.Marshal(signal)
+	data, err := json.Marshal(sig)
 	if err != nil {
-		log.Println("Ошибка маршалинга:", err)
+		log.Println("Ошибка маршалинга сигнала:", err)
 		return
 	}
 
-	if signal.To != "" {
-		if toClient, ok := clients[signal.To]; ok {
-			toClient.Conn.WriteMessage(websocket.TextMessage, data)
+	// Если To указан, отправляем только этому клиенту.
+	if sig.To != "" {
+		if target, ok := clients[sig.To]; ok {
+			target.Conn.WriteMessage(websocket.TextMessage, data)
+			log.Printf("Сообщение от %s отправлено клиенту %s", sig.From, sig.To)
 		} else {
-			log.Printf("Клиент %s не найден", signal.To)
+			log.Printf("Клиент %s не найден", sig.To)
 		}
 		return
 	}
 
-	// Рассылка всем, кроме отправителя.
-	for id, c := range clients {
-		if id == senderID {
+	// Иначе широковещательно (без отправителя).
+	for id, client := range clients {
+		if id == sig.From {
 			continue
 		}
-		c.Conn.WriteMessage(websocket.TextMessage, data)
+		client.Conn.WriteMessage(websocket.TextMessage, data)
 	}
+	log.Printf("Сообщение от %s отправлено всем", sig.From)
 }
 
 func main() {
