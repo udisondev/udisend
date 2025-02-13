@@ -31,7 +31,7 @@ func (n *Node) WorkWithMember(
 			log.Println("Upgrade error:", err)
 			return
 		}
-		err = conn.WriteMessage(websocket.BinaryMessage, slices.Concat([]byte{message.HeadUdID}, []byte(n.config.ID)))
+		err = conn.WriteMessage(websocket.BinaryMessage, slices.Concat([]byte{message.HeadMemberID}, []byte(n.config.ID)))
 		if err != nil {
 			log.Printf("Error sending my memberID to member=%s", memberID)
 			return

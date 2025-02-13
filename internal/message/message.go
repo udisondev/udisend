@@ -43,7 +43,7 @@ const (
 	ErrReadMessage               = 6
 	Disconnected                 = 7
 	IamShotdown                  = 8
-	HeadUdID                     = 9
+	HeadMemberID                     = 9
 )
 
 func Inbox(income <-chan Income, dispatcher func(in Income)) {

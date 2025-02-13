@@ -54,7 +54,8 @@ func (n *Node) Dispatch(in message.Income) {
 			n.members.DisconnectiWithCause(signReceiver, fmt.Errorf("connection with '%s' has not established", in.From))
 		})
 	case message.DoConnect:
-	
+
+		
 	}
 }
 
