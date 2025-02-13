@@ -3,12 +3,12 @@ package check
 import "errors"
 
 var (
-	ErrBlankNickname = errors.New("blank nickname")
+	ErrBlankMemberID = errors.New("blank memberID")
 )
 
-func Nickname(v string) error {
+func MemberID(v string) error {
 	if v == "" {
-		return ErrBlankNickname
+		return ErrBlankMemberID
 	}
 
 	return nil

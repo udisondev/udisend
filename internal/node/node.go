@@ -4,14 +4,14 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"udisend/config"
-	"udisend/internal/dispatcher"
 	"udisend/internal/member"
 	"udisend/internal/message"
-	"udisend/pkg/check"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/webrtc/v4"
 )
 
 type Node struct {
@@ -19,6 +19,8 @@ type Node struct {
 	upgrader    websocket.Upgrader
 	clusterSize atomic.Uint32
 	members     *member.Set
+	reacts      []func(message.Income) bool
+	mu          sync.Mutex
 }
 
 func New(cfg config.Config) *Node {
@@ -35,8 +37,7 @@ func (n *Node) Serve(ctx context.Context) error {
 	commonInbox := make(chan message.Income)
 	defer close(commonInbox)
 
-	disp := dispatcher.New(n.members)
-	message.Inbox(commonInbox, disp.Dispatch)
+	message.Inbox(commonInbox, n.Dispatch)
 
 	http.HandleFunc(
 		"/ws",
@@ -54,29 +55,26 @@ func (n *Node) Serve(ctx context.Context) error {
 	return err
 }
 
-func (n *Node) WorkWithMember(
-	ctx context.Context,
-	inbox func(ch <-chan message.Income),
-) func(http.ResponseWriter, *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		nickname := r.Header.Get("nickname")
-
-		switch check.Nickname(nickname) {
-		case check.ErrBlankNickname:
-			http.Error(w, "please specify nickname", 400)
-			return
-		}
-
-		conn, err := n.upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			log.Println("Upgrade error:", err)
-			return
-		}
-
-		membCtx, disconnect := context.WithCancelCause(context.Background())
-		memb := member.New(nickname, conn, disconnect)
-		n.members.Push(memb)
-
-		inbox(memb.Listen(ctx, membCtx))
+func (n *Node) SendSDN(ctx context.Context) {
+	iceServers := []webrtc.ICEServer{
+		{URLs: []string{"stun:stun.l.google.com:19302"}},
 	}
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
+		ICEServers: iceServers,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Обработка входящих DataChannel.
+	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
+		log.Printf("Получен DataChannel: %s", dc.Label())
+		dc.OnOpen(func() {
+			log.Println("DataChannel открыт!")
+		})
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			// Здесь явно показываем, что сообщение получено напрямую от другого узла.
+			log.Printf("Прямое сообщение получено: %s", string(msg.Data))
+		})
+	})
 }

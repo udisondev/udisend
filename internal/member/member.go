@@ -13,7 +13,8 @@ import (
 )
 
 type Struct struct {
-	ID         string
+	id         string
+	isHead     bool
 	publicKey  rsa.PublicKey
 	conn       *websocket.Conn
 	relations  []string
@@ -21,13 +22,14 @@ type Struct struct {
 }
 
 type Set struct {
+	head    *Struct
 	members map[string]*Struct
 	mu      sync.Mutex
 }
 
-func New(ID string, conn *websocket.Conn, disconnect func(cause error)) *Struct {
+func New(ID string, isHead bool, conn *websocket.Conn, disconnect func(cause error)) *Struct {
 	return &Struct{
-		ID:         ID,
+		id:         ID,
 		publicKey:  rsa.PublicKey{},
 		conn:       conn,
 		disconnect: disconnect,
@@ -35,12 +37,7 @@ func New(ID string, conn *websocket.Conn, disconnect func(cause error)) *Struct 
 }
 
 func (m *Struct) send(out message.Event) error {
-	output, err := out.Marshal()
-	if err != nil {
-		return err
-	}
-
-	err = m.conn.WriteMessage(websocket.BinaryMessage, output)
+	err := m.conn.WriteMessage(websocket.BinaryMessage, out.Marshal())
 	if err != nil {
 		return err
 	}
@@ -61,32 +58,26 @@ func (m *Struct) Listen(
 			select {
 			case <-membCtx.Done():
 				cause := ctx.Err()
-				payload, err := message.Event{Type: message.Disconnected, Payload: []byte(cause.Error())}.Marshal()
-				if err != nil {
-					payload = nil
-				}
-				m.conn.WriteMessage(websocket.BinaryMessage, payload)
+				e := message.Event{Type: message.Disconnected, Payload: []byte(cause.Error())}
+				m.conn.WriteMessage(websocket.BinaryMessage, e.Marshal())
 				m.DisconnectWithCause(cause)
 				return
 
 			case <-ctx.Done():
-				payload, err := message.Event{Type: message.IamShotdown}.Marshal()
-				if err != nil {
-					payload = nil
-				}
-				m.conn.WriteMessage(websocket.BinaryMessage, payload)
+				e := message.Event{Type: message.IamShotdown}
+				m.conn.WriteMessage(websocket.BinaryMessage, e.Marshal())
 				m.DisconnectWithCause(errors.New("shotdown"))
 
 			default:
 				_, in, err := m.conn.ReadMessage()
 				if err != nil {
 					income <- message.Income{
-						From:  m.ID,
+						From:  m.id,
 						Event: message.Event{Type: message.ErrReadMessage},
 					}
 				}
 				income <- message.Income{
-					From:  m.ID,
+					From:  m.id,
 					Event: message.Event{Type: message.Type(in[0]), Payload: in[1:]},
 				}
 			}
@@ -105,8 +96,11 @@ func (m *Set) Len() int {
 }
 
 func (m *Set) Push(memb *Struct) {
+	if memb.isHead {
+		m.head = memb
+	}
 	m.mu.Lock()
-	m.members[memb.ID] = memb
+	m.members[memb.id] = memb
 	m.mu.Unlock()
 }
 func (m *Set) Pop() *Struct {
@@ -138,6 +132,11 @@ func (s *Set) SendTo(member string, out message.Event) error {
 	}
 
 	return nil
+}
+
+func (s *Set) SendToTheHead(out message.Event) {
+	s.head.conn.WriteMessage(websocket.BinaryMessage, out.Marshal())
+
 }
 
 func (s *Set) Broadcast(out message.Event) {

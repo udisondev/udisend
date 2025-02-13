@@ -1,10 +1,8 @@
 package message
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
-	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -45,6 +43,7 @@ const (
 	ErrReadMessage               = 6
 	Disconnected                 = 7
 	IamShotdown                  = 8
+	HeadUdID                     = 9
 )
 
 func Inbox(income <-chan Income, dispatcher func(in Income)) {
@@ -53,20 +52,11 @@ func Inbox(income <-chan Income, dispatcher func(in Income)) {
 	}
 }
 
-func (e Event) Marshal() ([]byte, error) {
-	buf := new(bytes.Buffer)
-	// Записываем поле Type, используя LittleEndian (или BigEndian, если нужно)
-	if err := binary.Write(buf, binary.LittleEndian, e.Type); err != nil {
-		return nil, fmt.Errorf("ошибка записи Type: %w", err)
-	}
-	// Записываем payload как есть
-	if _, err := buf.Write(e.Payload); err != nil {
-		return nil, fmt.Errorf("ошибка записи Payload: %w", err)
-	}
-	return buf.Bytes(), nil
+func (e Event) Marshal() []byte {
+	return slices.Concat([]byte{byte(e.Type)}, e.Payload)
 }
 
-func Outbox(outbox <-chan Outcome) func(ctx context.Context, nickname string) <-chan Event {
+func Outbox(outbox <-chan Outcome) func(ctx context.Context, memberID string) <-chan Event {
 	mu := sync.Mutex{}
 	receivers := make(map[string]chan Event)
 
@@ -86,17 +76,17 @@ func Outbox(outbox <-chan Outcome) func(ctx context.Context, nickname string) <-
 		mu.Unlock()
 	}()
 
-	return func(ctx context.Context, nickname string) <-chan Event {
+	return func(ctx context.Context, memberID string) <-chan Event {
 		sub := make(chan Event)
 		mu.Lock()
-		receivers[nickname] = sub
+		receivers[memberID] = sub
 		mu.Unlock()
 
 		go func() {
 			<-ctx.Done()
 			mu.Lock()
-			if _, ok := receivers[nickname]; ok {
-				delete(receivers, nickname)
+			if _, ok := receivers[memberID]; ok {
+				delete(receivers, memberID)
 			}
 			mu.Unlock()
 			close(sub)
