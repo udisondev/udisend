@@ -32,5 +32,8 @@ func main() {
 	// Подписываемся на SIGINT и SIGTERM.
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-	node.New(*cfg).Serve(ctx)
+	err := node.New(*cfg).Serve(ctx)
+	if err != nil {
+
+	}
 }

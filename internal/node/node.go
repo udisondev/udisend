@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"sync/atomic"
 	"udisend/config"
+	"udisend/internal/dispatcher"
 	"udisend/internal/member"
 	"udisend/internal/message"
-	"udisend/internal/signal"
 	"udisend/pkg/check"
 
 	"github.com/gorilla/websocket"
@@ -31,41 +31,32 @@ func New(cfg config.Config) *Node {
 	}
 }
 
-func (n *Node) Serve(ctx context.Context) {
-	inbox := make(chan message.Income)
-	defer close(inbox)
+func (n *Node) Serve(ctx context.Context) error {
+	commonInbox := make(chan message.Income)
+	defer close(commonInbox)
 
-	outbox, signals := message.Inbox(inbox)
-	subscribeOutcome := message.Outbox(outbox)
-
-	signalHandler := signal.NewHandler(n.members)
-	signalHandler.Run(signals)
-
-	clusterBroadcastCh := make(chan message.Event)
-	defer close(clusterBroadcastCh)
-	subscribeClusterBroadcast := message.Broadcast(clusterBroadcastCh)
+	disp := dispatcher.New(n.members)
+	message.Inbox(commonInbox, disp.Dispatch)
 
 	http.HandleFunc(
 		"/ws",
 		n.WorkWithMember(
 			ctx,
 			func(income <-chan message.Income) {
-				for in := range income {
-					inbox <- in
+				for message := range income {
+					commonInbox <- message
 				}
 			},
-			subscribeOutcome,
-			subscribeClusterBroadcast,
 		),
 	)
-	log.Fatal(http.ListenAndServe(n.config.GetAddress(), nil))
+	err := http.ListenAndServe(n.config.GetAddress(), nil)
+
+	return err
 }
 
 func (n *Node) WorkWithMember(
 	ctx context.Context,
 	inbox func(ch <-chan message.Income),
-	outbox func(ctx context.Context, nickname string) <-chan message.Event,
-	clstrBroadcast func(ctx context.Context) <-chan message.Event,
 ) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		nickname := r.Header.Get("nickname")
@@ -82,12 +73,10 @@ func (n *Node) WorkWithMember(
 			return
 		}
 
-		membCtx, disconnect := context.WithCancelCause(ctx)
+		membCtx, disconnect := context.WithCancelCause(context.Background())
 		memb := member.New(nickname, conn, disconnect)
 		n.members.Push(memb)
 
-		outChan := outbox(membCtx, nickname)
-		clstrBroadcastChan := clstrBroadcast(membCtx)
-
+		inbox(memb.Listen(ctx, membCtx))
 	}
 }

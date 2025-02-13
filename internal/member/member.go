@@ -3,6 +3,7 @@ package member
 import (
 	"context"
 	"crypto/rsa"
+	"errors"
 	"maps"
 	"slices"
 	"sync"
@@ -33,13 +34,32 @@ func New(ID string, conn *websocket.Conn, disconnect func(cause error)) *Struct 
 	}
 }
 
-func (m *Struct) Interact(ctx context.Context, inbox func(in <-chan message.Income), outbox <-chan message.Event, clstrBroadcastChan <-chan message.Event) {
-	forward := make(chan message.Income)
+func (m *Struct) send(out message.Event) error {
+	output, err := out.Marshal()
+	if err != nil {
+		return err
+	}
+
+	err = m.conn.WriteMessage(websocket.BinaryMessage, output)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *Struct) Listen(
+	ctx context.Context,
+	membCtx context.Context,
+) <-chan message.Income {
+	income := make(chan message.Income)
+
 	go func() {
-		defer close(forward)
+		defer close(income)
+
 		for {
 			select {
-			case <-ctx.Done():
+			case <-membCtx.Done():
 				cause := ctx.Err()
 				payload, err := message.Event{Type: message.Disconnected, Payload: []byte(cause.Error())}.Marshal()
 				if err != nil {
@@ -47,40 +67,25 @@ func (m *Struct) Interact(ctx context.Context, inbox func(in <-chan message.Inco
 				}
 				m.conn.WriteMessage(websocket.BinaryMessage, payload)
 				m.DisconnectWithCause(cause)
-
 				return
 
-			case e, ok := <-outbox:
-				if !ok {
-					continue
-				}
-
-				output, err := e.Marshal()
+			case <-ctx.Done():
+				payload, err := message.Event{Type: message.IamShotdown}.Marshal()
 				if err != nil {
-					continue
+					payload = nil
 				}
-				m.conn.WriteMessage(websocket.BinaryMessage, output)
-
-			case e, ok := <-clstrBroadcastChan:
-				if !ok {
-					continue
-				}
-
-				output, err := e.Marshal()
-				if err != nil {
-					continue
-				}
-				m.conn.WriteMessage(websocket.BinaryMessage, output)
+				m.conn.WriteMessage(websocket.BinaryMessage, payload)
+				m.DisconnectWithCause(errors.New("shotdown"))
 
 			default:
 				_, in, err := m.conn.ReadMessage()
 				if err != nil {
-					forward <- message.Income{
+					income <- message.Income{
 						From:  m.ID,
 						Event: message.Event{Type: message.ErrReadMessage},
 					}
 				}
-				forward <- message.Income{
+				income <- message.Income{
 					From:  m.ID,
 					Event: message.Event{Type: message.Type(in[0]), Payload: in[1:]},
 				}
@@ -88,7 +93,7 @@ func (m *Struct) Interact(ctx context.Context, inbox func(in <-chan message.Inco
 		}
 	}()
 
-	inbox(forward)
+	return income
 }
 
 func (s *Struct) DisconnectWithCause(cause error) {
@@ -117,6 +122,28 @@ func (m *Set) Pop() *Struct {
 			return 0
 		}
 	})[0]
+}
+
+var ErrNotFound = errors.New("not found")
+
+func (s *Set) SendTo(member string, out message.Event) error {
+	m, ok := s.members[member]
+	if !ok {
+		return ErrNotFound
+	}
+
+	err := m.send(out)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Set) Broadcast(out message.Event) {
+	for _, m := range s.members {
+		m.send(out)
+	}
 }
 
 func (s *Set) DisconnectiWithCause(member string, cause error) {

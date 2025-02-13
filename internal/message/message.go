@@ -5,10 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"slices"
 	"sync"
-	"udisend/internal/signal"
-	"udisend/pkg/crypt"
 )
 
 type (
@@ -36,69 +33,24 @@ type (
 	}
 )
 
-type IncomeDispatcher struct {
-	outbox  chan<- Outcome
-	signals chan<- signal.Interface
-}
-
-func NewIncomeDispatcher(toOutbox func(Outcome), toSignal func(signal.Interface))
-
-type OutboxDispatcher func(out Outcome)
-
-type Type int8
+type Type uint8
 
 const (
-	ErrReadMessage          Type = -2
-	Disconnected                 = -1
-	ConnectionSignRequested      = 0
+	ConnectionSignRequested Type = 0
 	ConnectionSignProvided       = 1
 	DoConnect                    = 2
 	IceOffered                   = 3
 	IceAnswered                  = 4
+	ConnectionEstablished        = 5
+	ErrReadMessage               = 6
+	Disconnected                 = 7
+	IamShotdown                  = 8
 )
 
-func Inbox(income <-chan Income) (<-chan Outcome, <-chan signal.Interface) {
-	outbox := make(chan Outcome)
-	signals := make(chan signal.Interface)
-
-	go func() {
-		defer close(outbox)
-		defer close(signals)
-
-		for in := range income {
-			switch in.Event.Type {
-			case ConnectionSignRequested:
-				connectionSignTo := append(in.Event.Payload, ',')
-				connectionSign, _ := crypt.GenerateConnectionSign(64)
-				outbox <- Outcome{
-					To: in.From,
-					Event: Event{
-						Type:    ConnectionSignProvided,
-						Payload: slices.Concat(connectionSignTo, connectionSign),
-					},
-				}
-				signals <- signal.WaitOffer{
-					Who:  in.From,
-					With: string(connectionSignTo),
-				}
-
-			case ConnectionSignProvided:
-				del := slices.Index(in.Event.Payload, ',')
-				outbox <- Outcome{
-					To: string(in.Event.Payload[:del]),
-					Event: Event{
-						Type:    DoConnect,
-						Payload: in.Event.Payload[del+1:],
-					},
-				}
-			}
-		}
-	}()
-
-	return outbox, signals
-}
-
-func (i *IncomeDispatcher) Dispatch(in Income) {
+func Inbox(income <-chan Income, dispatcher func(in Income)) {
+	for in := range income {
+		dispatcher(in)
+	}
 }
 
 func (e Event) Marshal() ([]byte, error) {
@@ -112,47 +64,6 @@ func (e Event) Marshal() ([]byte, error) {
 		return nil, fmt.Errorf("ошибка записи Payload: %w", err)
 	}
 	return buf.Bytes(), nil
-}
-
-func Broadcast(in <-chan Event) func(ctx context.Context) <-chan Event {
-	mu := sync.Mutex{}
-	subs := make(map[chan Event]struct{})
-
-	go func() {
-		for e := range in {
-			for box := range subs {
-				box <- e
-			}
-		}
-
-		mu.Lock()
-		for ch := range subs {
-			close(ch)
-		}
-
-		subs = nil
-		mu.Unlock()
-	}()
-
-	return func(ctx context.Context) <-chan Event {
-		out := make(chan Event)
-		mu.Lock()
-		subs[out] = struct{}{}
-		mu.Unlock()
-
-		go func() {
-			<-ctx.Done()
-			mu.Lock()
-			if _, ok := subs[out]; ok {
-				delete(subs, out)
-			}
-			mu.Unlock()
-			close(out)
-		}()
-
-		return out
-	}
-
 }
 
 func Outbox(outbox <-chan Outcome) func(ctx context.Context, nickname string) <-chan Event {
