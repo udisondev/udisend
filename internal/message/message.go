@@ -5,40 +5,43 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"sync"
+	"udisend/internal/signal"
+	"udisend/pkg/crypt"
 )
 
-type Event struct {
-	Type    Type
-	Payload []byte
+type (
+	Event struct {
+		Type    Type
+		Payload []byte
+	}
+
+	ConnectionSign struct {
+		ForConnectionWith []byte
+		Sign              []byte
+	}
+
+	ClusterBroadcast struct {
+	}
+
+	Income struct {
+		From  string
+		Event Event
+	}
+
+	Outcome struct {
+		To    string
+		Event Event
+	}
+)
+
+type IncomeDispatcher struct {
+	outbox  chan<- Outcome
+	signals chan<- signal.Interface
 }
 
-type ConnectionSign struct {
-	ForConnectionWith []byte
-	Sign              []byte
-}
-
-type ClusterBroadcast struct {
-	mu   sync.Mutex
-	subs map[chan Event]struct{}
-}
-
-type Income struct {
-	From  string
-	Event Event
-}
-
-type Outcome struct {
-	To    string
-	Event Event
-}
-
-type Outbox struct {
-	mu        sync.Mutex
-	receivers map[string]chan Event
-}
-
-type InboxDispatcher func(in Income)
+func NewIncomeDispatcher(toOutbox func(Outcome), toSignal func(signal.Interface))
 
 type OutboxDispatcher func(out Outcome)
 
@@ -54,18 +57,48 @@ const (
 	IceAnswered                  = 4
 )
 
-func NewOutbox() *Outbox {
-	return &Outbox{mu: sync.Mutex{}, receivers: make(map[string]chan Event)}
+func Inbox(income <-chan Income) (<-chan Outcome, <-chan signal.Interface) {
+	outbox := make(chan Outcome)
+	signals := make(chan signal.Interface)
+
+	go func() {
+		defer close(outbox)
+		defer close(signals)
+
+		for in := range income {
+			switch in.Event.Type {
+			case ConnectionSignRequested:
+				connectionSignTo := append(in.Event.Payload, ',')
+				connectionSign, _ := crypt.GenerateConnectionSign(64)
+				outbox <- Outcome{
+					To: in.From,
+					Event: Event{
+						Type:    ConnectionSignProvided,
+						Payload: slices.Concat(connectionSignTo, connectionSign),
+					},
+				}
+				signals <- signal.WaitOffer{
+					Who:  in.From,
+					With: string(connectionSignTo),
+				}
+
+			case ConnectionSignProvided:
+				del := slices.Index(in.Event.Payload, ',')
+				outbox <- Outcome{
+					To: string(in.Event.Payload[:del]),
+					Event: Event{
+						Type:    DoConnect,
+						Payload: in.Event.Payload[del+1:],
+					},
+				}
+			}
+		}
+	}()
+
+	return outbox, signals
 }
 
-func NewClusterBroadcast() *ClusterBroadcast {
-	return &ClusterBroadcast{mu: sync.Mutex{}, subs: make(map[chan Event]struct{})}
-}
-
-func Inbox(income <-chan Income, dispatch InboxDispatcher) {
-	for in := range income {
-		dispatch(in)
-	}
+func (i *IncomeDispatcher) Dispatch(in Income) {
 }
 
 func (e Event) Marshal() ([]byte, error) {
@@ -81,73 +114,84 @@ func (e Event) Marshal() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (cb *ClusterBroadcast) Chan(ctx context.Context) (chan<- Event, func(ctx context.Context) <-chan Event) {
-	broadcast := make(chan Event)
+func Broadcast(in <-chan Event) func(ctx context.Context) <-chan Event {
+	mu := sync.Mutex{}
+	subs := make(map[chan Event]struct{})
+
 	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				close(broadcast)
-				return
-			case e := <-broadcast:
-				for sub := range cb.subs {
-					sub <- e
-				}
+		for e := range in {
+			for box := range subs {
+				box <- e
 			}
 		}
+
+		mu.Lock()
+		for ch := range subs {
+			close(ch)
+		}
+
+		subs = nil
+		mu.Unlock()
 	}()
-	return broadcast, func(ctx context.Context) <-chan Event {
-		sub := make(chan Event)
-		cb.mu.Lock()
-		cb.subs[sub] = struct{}{}
-		cb.mu.Unlock()
+
+	return func(ctx context.Context) <-chan Event {
+		out := make(chan Event)
+		mu.Lock()
+		subs[out] = struct{}{}
+		mu.Unlock()
 
 		go func() {
 			<-ctx.Done()
-			cb.mu.Lock()
-			if _, ok := cb.subs[sub]; ok {
-				delete(cb.subs, sub)
+			mu.Lock()
+			if _, ok := subs[out]; ok {
+				delete(subs, out)
 			}
-			cb.mu.Unlock()
-			close(sub)
+			mu.Unlock()
+			close(out)
 		}()
 
-		return sub
+		return out
 	}
 
 }
 
-func (o *Outbox) Chan(ctx context.Context) (chan<- Outcome, func(ctx context.Context, nickname string) <-chan Event) {
-	outbox := make(chan Outcome)
+func Outbox(outbox <-chan Outcome) func(ctx context.Context, nickname string) <-chan Event {
+	mu := sync.Mutex{}
+	receivers := make(map[string]chan Event)
+
 	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				close(outbox)
-				return
-			case e := <-outbox:
-				if receiverOutbox, ok := o.receivers[e.To]; ok {
-					receiverOutbox <- e.Event
-				}
+		for e := range outbox {
+			if receiverOutbox, ok := receivers[e.To]; ok {
+				receiverOutbox <- e.Event
 			}
 		}
+
+		mu.Lock()
+		for _, ch := range receivers {
+			close(ch)
+		}
+
+		receivers = nil
+		mu.Unlock()
 	}()
-	return outbox, func(ctx context.Context, nickname string) <-chan Event {
+
+	return func(ctx context.Context, nickname string) <-chan Event {
 		sub := make(chan Event)
-		o.mu.Lock()
-		o.receivers[nickname] = sub
-		o.mu.Unlock()
+		mu.Lock()
+		receivers[nickname] = sub
+		mu.Unlock()
 
 		go func() {
 			<-ctx.Done()
-			o.mu.Lock()
-			if _, ok := o.receivers[nickname]; ok {
-				delete(o.receivers, nickname)
+			mu.Lock()
+			if _, ok := receivers[nickname]; ok {
+				delete(receivers, nickname)
 			}
-			o.mu.Unlock()
+			mu.Unlock()
 			close(sub)
 		}()
 
 		return sub
+
 	}
 }

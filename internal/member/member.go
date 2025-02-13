@@ -1,10 +1,12 @@
 package member
 
 import (
+	"context"
 	"crypto/rsa"
 	"maps"
 	"slices"
 	"sync"
+	"udisend/internal/message"
 
 	"github.com/gorilla/websocket"
 )
@@ -29,6 +31,64 @@ func New(ID string, conn *websocket.Conn, disconnect func(cause error)) *Struct 
 		conn:       conn,
 		disconnect: disconnect,
 	}
+}
+
+func (m *Struct) Interact(ctx context.Context, inbox func(in <-chan message.Income), outbox <-chan message.Event, clstrBroadcastChan <-chan message.Event) {
+	forward := make(chan message.Income)
+	go func() {
+		defer close(forward)
+		for {
+			select {
+			case <-ctx.Done():
+				cause := ctx.Err()
+				payload, err := message.Event{Type: message.Disconnected, Payload: []byte(cause.Error())}.Marshal()
+				if err != nil {
+					payload = nil
+				}
+				m.conn.WriteMessage(websocket.BinaryMessage, payload)
+				m.DisconnectWithCause(cause)
+
+				return
+
+			case e, ok := <-outbox:
+				if !ok {
+					continue
+				}
+
+				output, err := e.Marshal()
+				if err != nil {
+					continue
+				}
+				m.conn.WriteMessage(websocket.BinaryMessage, output)
+
+			case e, ok := <-clstrBroadcastChan:
+				if !ok {
+					continue
+				}
+
+				output, err := e.Marshal()
+				if err != nil {
+					continue
+				}
+				m.conn.WriteMessage(websocket.BinaryMessage, output)
+
+			default:
+				_, in, err := m.conn.ReadMessage()
+				if err != nil {
+					forward <- message.Income{
+						From:  m.ID,
+						Event: message.Event{Type: message.ErrReadMessage},
+					}
+				}
+				forward <- message.Income{
+					From:  m.ID,
+					Event: message.Event{Type: message.Type(in[0]), Payload: in[1:]},
+				}
+			}
+		}
+	}()
+
+	inbox(forward)
 }
 
 func (s *Struct) DisconnectWithCause(cause error) {
