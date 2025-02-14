@@ -10,7 +10,7 @@ import (
 
 // Config хранит конфигурационные параметры приложения.
 type Config struct {
-	ID string
+	MemberID string
 	Port     string
 	Address  string
 	Parent   string
@@ -46,7 +46,7 @@ func GetConfig() *Config {
 	}
 
 	config := &Config{
-		ID: os.Getenv("NICK_NAME"),
+		MemberID: os.Getenv("NICK_NAME"),
 		Port:     os.Getenv("PORT"),
 		Parent:   os.Getenv("PARENT"),
 		Address:  os.Getenv("ADDRESS"),

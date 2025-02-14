@@ -1,8 +1,8 @@
 package node
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"log"
 	"net/http"
 	"sync"
@@ -10,6 +10,7 @@ import (
 	"udisend/config"
 	"udisend/internal/member"
 	"udisend/internal/message"
+	"udisend/pkg/slice"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
@@ -26,6 +27,8 @@ type Node struct {
 	pcMutex         sync.Mutex
 	dataChannels    map[string]*webrtc.DataChannel
 	dcMutex         sync.Mutex
+	income          chan message.Income
+	signMap         map[string][]byte
 }
 
 func New(cfg config.Config) *Node {
@@ -39,10 +42,10 @@ func New(cfg config.Config) *Node {
 }
 
 func (n *Node) Serve(ctx context.Context) error {
-	commonInbox := make(chan message.Income)
-	defer close(commonInbox)
+	n.income = make(chan message.Income)
+	defer close(n.income)
 
-	message.Inbox(commonInbox, n.Dispatch)
+	message.Inbox(n.income, n.Dispatch)
 
 	http.HandleFunc(
 		"/ws",
@@ -50,7 +53,7 @@ func (n *Node) Serve(ctx context.Context) error {
 			ctx,
 			func(income <-chan message.Income) {
 				for message := range income {
-					commonInbox <- message
+					n.income <- message
 				}
 			},
 		),
@@ -60,59 +63,28 @@ func (n *Node) Serve(ctx context.Context) error {
 	return err
 }
 
-func (n *Node) SendSDN(ctx context.Context) {
-	iceServers := []webrtc.ICEServer{
-		{URLs: []string{"stun:stun.l.google.com:19302"}},
-	}
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
-		ICEServers: iceServers,
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Обработка входящих DataChannel.
-	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		log.Printf("Получен DataChannel: %s", dc.Label())
-		dc.OnOpen(func() {
-			log.Println("DataChannel открыт!")
-		})
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			// Здесь явно показываем, что сообщение получено напрямую от другого узла.
-			log.Printf("Прямое сообщение получено: %s", string(msg.Data))
-		})
-	})
-}
-
 // setupPCHandlers настраивает обработчики для PeerConnection и DataChannel.
-func (n *Node) setupPCHandlers(pc *webrtc.PeerConnection, peerID string) {
+func (n *Node) setupPCHandlers(pc *webrtc.PeerConnection, with string, callback func()) {
 	// При получении DataChannel сохраняем его для обмена сообщениями.
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		log.Printf("Получен DataChannel от %s: %s", peerID, dc.Label())
+		log.Printf("Получен DataChannel от %s: %s", with, dc.Label())
 		dc.OnOpen(func() {
-			log.Printf("DataChannel для %s открыт", peerID)
+			callback()
+			log.Printf("DataChannel для %s открыт", with)
 		})
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			log.Printf("Прямое сообщение получено от %s: %s", peerID, string(msg.Data))
+			log.Printf("Прямое сообщение получено от %s: %s", with, string(msg.Data))
 		})
 		n.dcMutex.Lock()
-		n.dataChannels[peerID] = dc
+		n.dataChannels[with] = dc
 		n.dcMutex.Unlock()
 	})
 }
 
-func sendSignal(conn *websocket.Conn, sig SignalMsg) {
-	data, err := json.Marshal(sig)
-	if err != nil {
-		log.Println("Ошибка маршалинга сигнала:", err)
-		return
-	}
-	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		log.Println("Ошибка отправки сигнала:", err)
-	}
-}
-
-func (n *Node) createOfferFor(target string, conn *websocket.Conn) {
+func (n *Node) createOfferFor(
+	dest string,
+	sign []byte,
+) {
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
@@ -123,9 +95,9 @@ func (n *Node) createOfferFor(target string, conn *websocket.Conn) {
 		return
 	}
 	n.pcMutex.Lock()
-	n.peerConnections[target] = pc
+	n.peerConnections[dest] = pc
 	n.pcMutex.Unlock()
-	n.setupPCHandlers(pc, target)
+	n.setupPCHandlers(pc, dest, func() {})
 
 	// Создаем DataChannel.
 	dc, err := pc.CreateDataChannel("data", nil)
@@ -134,13 +106,19 @@ func (n *Node) createOfferFor(target string, conn *websocket.Conn) {
 		return
 	}
 	n.dcMutex.Lock()
-	n.dataChannels[target] = dc
+	n.dataChannels[dest] = dc
 	n.dcMutex.Unlock()
 	dc.OnOpen(func() {
-		log.Printf("DataChannel для %s открыт", target)
+		log.Printf("DataChannel для %s открыт", dest)
 	})
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		log.Printf("Прямое сообщение получено от %s: %s", target, string(msg.Data))
+		n.income <- message.Income{
+			From: dest,
+			Event: message.Event{
+				Type:    message.Type(msg.Data[0]),
+				Payload: msg.Data[1:],
+			},
+		}
 	})
 
 	offer, err := pc.CreateOffer(nil)
@@ -153,84 +131,89 @@ func (n *Node) createOfferFor(target string, conn *websocket.Conn) {
 		return
 	}
 	<-webrtc.GatheringCompletePromise(pc)
-	offerMsg := SignalMsg{
-		Type: TypeOffer,
-		SDP:  pc.LocalDescription().SDP,
-		To:   target,
-	}
-	sendSignal(conn, offerMsg)
+	iam := []byte(n.config.MemberID)
+	connectWith := []byte(dest)
+	sdp := []byte(pc.LocalDescription().SDP)
+	payload := slice.ConcatWithDel(',', connectWith, iam, sign, sdp)
+	n.members.SendToTheHead(message.Event{
+		Type:    message.SendOffer,
+		Payload: payload,
+	})
 }
 
+func (n *Node) answerSignal(m message.Event) {
+	bts := slice.SplitBy(m.Payload, ',')
+	from := string(bts[0])
+	givenSign := bts[1]
+	remoteSdp := string(bts[2])
 
-// handleSignal обрабатывает полученные сигнальные сообщения и управляет PeerConnection.
-func (n *Node) handleSignal(sig SignalMsg, conn *websocket.Conn) {
-	switch sig.Type {
-	case TypeOffer:
-		log.Printf("Получен offer от %s", sig.From)
-		// Если еще нет соединения с этим peer, создаем его.
-		n.pcMutex.Lock()
-		if _, exists := n.peerConnections[sig.From]; !exists {
-			pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
-				ICEServers: []webrtc.ICEServer{
-					{URLs: []string{"stun:stun.l.google.com:19302"}},
-				},
-			})
-			if err != nil {
-				log.Println("Ошибка создания PeerConnection:", err)
-				n.pcMutex.Unlock()
-				return
-			}
-			n.peerConnections[sig.From] = pc
-			n.setupPCHandlers(pc, sig.From)
-		}
-		pc := n.peerConnections[sig.From]
-		n.pcMutex.Unlock()
+	if actualSign, ok := n.signMap[from]; !ok || bytes.Compare(givenSign, actualSign) != 0 {
+		return
+	}
 
-		offer := webrtc.SessionDescription{
-			Type: webrtc.SDPTypeOffer,
-			SDP:  sig.SDP,
-		}
-		if err := pc.SetRemoteDescription(offer); err != nil {
-			log.Println("Ошибка установки remote description:", err)
-			return
-		}
-		answer, err := pc.CreateAnswer(nil)
+	log.Printf("Получен offer от %s", from)
+	// Если еще нет соединения с этим peer, создаем его.
+	n.pcMutex.Lock()
+	if _, exists := n.peerConnections[from]; !exists {
+		pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
+			ICEServers: []webrtc.ICEServer{
+				{URLs: []string{"stun:stun.l.google.com:19302"}},
+			},
+		})
 		if err != nil {
-			log.Println("Ошибка создания answer:", err)
+			log.Println("Ошибка создания PeerConnection:", err)
+			n.pcMutex.Unlock()
 			return
 		}
-		if err = pc.SetLocalDescription(answer); err != nil {
-			log.Println("Ошибка установки локального описания:", err)
-			return
-		}
-		<-webrtc.GatheringCompletePromise(pc)
-		answerMsg := SignalMsg{
-			Type: TypeAnswer,
-			SDP:  pc.LocalDescription().SDP,
-			To:   sig.From,
-		}
-		sendSignal(conn, answerMsg)
-	case TypeAnswer:
-		log.Printf("Получен answer от %s", sig.From)
-		n.pcMutex.Lock()
-		pc, exists := n.peerConnections[sig.From]
-		n.pcMutex.Unlock()
-		if !exists {
-			log.Printf("Нет PeerConnection для %s", sig.From)
-			return
-		}
-		answer := webrtc.SessionDescription{
-			Type: webrtc.SDPTypeAnswer,
-			SDP:  sig.SDP,
-		}
-		if err := pc.SetRemoteDescription(answer); err != nil {
-			log.Println("Ошибка установки remote description:", err)
-		}
-	case TypeCandidate:
-		// Обработка ICE кандидатов (если реализовано отдельно)
-		log.Printf("Получен кандидат от %s: %s", sig.From, sig.Candidate)
-	default:
-		log.Printf("Неизвестный тип сигнала: %s", sig.Type)
+		n.peerConnections[from] = pc
+		n.setupPCHandlers(pc, from, func() {
+			n.members.SendToTheHead(message.Event{Type: message.ConnectionEstablished, Payload: bts[0]})
+		})
 	}
+	pc := n.peerConnections[from]
+	n.pcMutex.Unlock()
+
+	offer := webrtc.SessionDescription{
+		Type: webrtc.SDPTypeOffer,
+		SDP:  remoteSdp,
+	}
+	if err := pc.SetRemoteDescription(offer); err != nil {
+		log.Println("Ошибка установки remote description:", err)
+		return
+	}
+	answer, err := pc.CreateAnswer(nil)
+	if err != nil {
+		log.Println("Ошибка создания answer:", err)
+		return
+	}
+	if err = pc.SetLocalDescription(answer); err != nil {
+		log.Println("Ошибка установки локального описания:", err)
+		return
+	}
+	<-webrtc.GatheringCompletePromise(pc)
+	iam := []byte(n.config.MemberID)
+	localSdp := []byte(pc.LocalDescription().SDP)
+	payload := slice.ConcatWithDel(',', bts[0], iam, localSdp)
+	n.members.SendToTheHead(message.Event{
+		Type:    message.SendAsnwer,
+		Payload: payload,
+	})
 }
 
+func (n *Node) handleAnswer(connectWith, sdp string) {
+	log.Printf("Получен answer от %s", connectWith)
+	n.pcMutex.Lock()
+	pc, exists := n.peerConnections[connectWith]
+	n.pcMutex.Unlock()
+	if !exists {
+		log.Printf("Нет PeerConnection для %s", connectWith)
+		return
+	}
+	answer := webrtc.SessionDescription{
+		Type: webrtc.SDPTypeAnswer,
+		SDP:  sdp,
+	}
+	if err := pc.SetRemoteDescription(answer); err != nil {
+		log.Println("Ошибка установки remote description:", err)
+	}
+}

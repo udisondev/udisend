@@ -20,7 +20,7 @@ func (n *Node) AttachHead(ctx context.Context,
 		log.Fatal(err)
 	}
 	h := http.Header{}
-	h.Add("memberID", n.config.ID)
+	h.Add("memberID", n.config.MemberID)
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), h)
 	if err != nil {
 		log.Fatal("Ошибка подключения к сигнальному серверу:", err)

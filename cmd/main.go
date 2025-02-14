@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -34,6 +35,6 @@ func main() {
 
 	err := node.New(*cfg).Serve(ctx)
 	if err != nil {
-
+		log.Println("Ошибка запуска сервера")
 	}
 }

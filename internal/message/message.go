@@ -36,14 +36,16 @@ type Type uint8
 const (
 	ConnectionSignRequested Type = 0
 	ConnectionSignProvided       = 1
-	DoConnect                    = 2
-	IceOffered                   = 3
-	IceAnswered                  = 4
-	ConnectionEstablished        = 5
-	ErrReadMessage               = 6
-	Disconnected                 = 7
-	IamShotdown                  = 8
-	HeadMemberID                     = 9
+	MakeOffer                    = 2
+	SendOffer                    = 3
+	AnswerOffer                  = 4
+	SendAsnwer                   = 5
+	OfferAnswered               = 6
+	ConnectionEstablished        = 7
+	ErrReadMessage               = 8
+	Disconnected                 = 9
+	IamShotdown                  = 10
+	HeadMemberID                 = 11
 )
 
 func Inbox(income <-chan Income, dispatcher func(in Income)) {
