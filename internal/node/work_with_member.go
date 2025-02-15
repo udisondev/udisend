@@ -38,8 +38,9 @@ func (n *Node) WorkWithMember(
 
 		membCtx, disconnect := context.WithCancelCause(context.Background())
 		memb := member.New(memberID, false, conn, disconnect)
+		log.Printf("Member=%s connected to ws\n", memberID)
 		n.members.Push(memb)
 
-		memb.Listen(ctx, membCtx, n.income)
+		go memb.Listen(ctx, membCtx, n.income)
 	}
 }

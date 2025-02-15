@@ -55,42 +55,39 @@ func (m *Struct) Listen(
 	membCtx context.Context,
 	income chan<- message.Income,
 ) {
+	for {
+		select {
+		case <-membCtx.Done():
+			cause := ctx.Err()
+			e := message.Event{Type: message.Disconnected, Payload: []byte(cause.Error())}
+			m.conn.WriteMessage(websocket.BinaryMessage, e.Marshal())
+			m.DisconnectWithCause(cause)
+			return
 
-	go func() {
-		for {
-			select {
-			case <-membCtx.Done():
-				cause := ctx.Err()
-				e := message.Event{Type: message.Disconnected, Payload: []byte(cause.Error())}
-				m.conn.WriteMessage(websocket.BinaryMessage, e.Marshal())
-				m.DisconnectWithCause(cause)
-				return
+		case <-ctx.Done():
+			e := message.Event{Type: message.IamShotdown}
+			m.conn.WriteMessage(websocket.BinaryMessage, e.Marshal())
+			m.DisconnectWithCause(errors.New("shotdown"))
 
-			case <-ctx.Done():
-				e := message.Event{Type: message.IamShotdown}
-				m.conn.WriteMessage(websocket.BinaryMessage, e.Marshal())
-				m.DisconnectWithCause(errors.New("shotdown"))
-
-			default:
-				_, in, err := m.conn.ReadMessage()
-				log.Printf("raw in: %s", string(in))
-				if err != nil {
-					log.Printf("error read message: %v\n", err)
-					income <- message.Income{
-						From:  m.id,
-						Event: message.Event{Type: message.ErrReadMessage},
-					}
-				}
-				if len(in) < 2 {
-					continue
-				}
+		default:
+			_, in, err := m.conn.ReadMessage()
+			log.Printf("raw in: %s", string(in))
+			if err != nil {
+				log.Printf("error read message: %v\n", err)
 				income <- message.Income{
 					From:  m.id,
-					Event: message.Event{Type: message.Type(in[0]), Payload: in[1:]},
+					Event: message.Event{Type: message.ErrReadMessage},
 				}
 			}
+			if len(in) < 2 {
+				continue
+			}
+			income <- message.Income{
+				From:  m.id,
+				Event: message.Event{Type: message.Type(in[0]), Payload: in[1:]},
+			}
 		}
-	}()
+	}
 }
 
 func (s *Struct) DisconnectWithCause(cause error) {
@@ -146,7 +143,7 @@ func (s *Set) DisconnectiWithCause(member string, cause error) {
 	s.mu.Unlock()
 }
 
-func (s *Set) DisconnectAllWithCause( cause error) {
+func (s *Set) DisconnectAllWithCause(cause error) {
 	s.mu.Lock()
 	for _, m := range s.members {
 		m.disconnect(cause)
