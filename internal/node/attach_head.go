@@ -2,9 +2,9 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"time"
 	"udisend/internal/member"
 	"udisend/internal/message"
@@ -14,13 +14,9 @@ import (
 
 
 func (n *Node) AttachHead(ctx context.Context) {
-	u, err := url.Parse(n.config.Parent)
-	if err != nil {
-		log.Fatal(err)
-	}
 	h := http.Header{}
 	h.Add("memberID", n.config.MemberID)
-	conn, _, err := websocket.DefaultDialer.Dial(u.String(), h)
+	conn, _, err := websocket.DefaultDialer.Dial(fmt.Sprintf("ws://%s/ws", n.config.Parent), h)
 	if err != nil {
 		log.Fatal("Ошибка подключения к сигнальному серверу:", err)
 		return

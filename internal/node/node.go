@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,7 @@ func (n *Node) Serve(ctx context.Context) error {
 		"/ws",
 		n.WorkWithMember(ctx),
 	)
+	log.Printf("Listen on: %s\n", n.config.GetAddress())
 	err := http.ListenAndServe(n.config.GetAddress(), nil)
 
 	return err
