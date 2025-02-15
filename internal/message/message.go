@@ -2,6 +2,7 @@ package message
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sync"
 )
@@ -47,6 +48,37 @@ const (
 	IamShotdown                  = 10
 	HeadMemberID                 = 11
 )
+
+func (t Type) String() string {
+	switch t {
+	case ConnectionSignRequested:
+		return "ConnectionSignRequested"
+	case ConnectionSignProvided:
+		return "ConnectionSignProvided"
+	case MakeOffer:
+		return "MakeOffer"
+	case SendOffer:
+		return "SendOffer"
+	case AnswerOffer:
+		return "AnswerOffer"
+	case SendAsnwer:
+		return "SendAsnwer"
+	case OfferAnswered:
+		return "OfferAnswered"
+	case ConnectionEstablished:
+		return "ConnectionEstablished"
+	case ErrReadMessage:
+		return "ErrReadMessage"
+	case Disconnected:
+		return "Disconnected"
+	case IamShotdown:
+		return "IamShotdown"
+	case HeadMemberID:
+		return "HeadMemberID"
+	default:
+		return fmt.Sprintf("Type(%d)", t)
+	}
+}
 
 func Inbox(income <-chan Income, dispatcher func(in Income)) {
 	for in := range income {

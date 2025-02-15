@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"time"
 	"udisend/internal/message"
 	"udisend/internal/schedule"
@@ -12,6 +13,8 @@ import (
 )
 
 func (n *Node) Dispatch(in message.Income) {
+	log.Printf("Received message from=%s, type=%s, payload=%s", in.From, in.Event.Type.String(), string(in.Event.Payload))
+
 	n.React(in)
 	bts := slice.SplitBy(in.Event.Payload, ',')
 	switch in.Event.Type {

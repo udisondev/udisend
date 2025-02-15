@@ -27,6 +27,10 @@ type Set struct {
 	mu      sync.Mutex
 }
 
+func NewSet() *Set {
+	return &Set{}
+}
+
 func New(ID string, isHead bool, conn *websocket.Conn, disconnect func(cause error)) *Struct {
 	return &Struct{
 		id:         ID,
@@ -48,12 +52,10 @@ func (m *Struct) send(out message.Event) error {
 func (m *Struct) Listen(
 	ctx context.Context,
 	membCtx context.Context,
-) <-chan message.Income {
-	income := make(chan message.Income)
+	income chan<- message.Income,
+) {
 
 	go func() {
-		defer close(income)
-
 		for {
 			select {
 			case <-membCtx.Done():
@@ -83,8 +85,6 @@ func (m *Struct) Listen(
 			}
 		}
 	}()
-
-	return income
 }
 
 func (s *Struct) DisconnectWithCause(cause error) {
@@ -151,5 +151,14 @@ func (s *Set) DisconnectiWithCause(member string, cause error) {
 		m.DisconnectWithCause(cause)
 		delete(s.members, member)
 	}
+	s.mu.Unlock()
+}
+
+func (s *Set) DisconnectAllWithCause( cause error) {
+	s.mu.Lock()
+	for _, m := range s.members {
+		m.disconnect(cause)
+	}
+	s.members = nil
 	s.mu.Unlock()
 }

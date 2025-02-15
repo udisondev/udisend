@@ -15,7 +15,6 @@ import (
 
 func (n *Node) WorkWithMember(
 	ctx context.Context,
-	inbox func(ch <-chan message.Income),
 ) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		memberID := r.Header.Get("memberID")
@@ -41,6 +40,6 @@ func (n *Node) WorkWithMember(
 		memb := member.New(memberID, false, conn, disconnect)
 		n.members.Push(memb)
 
-		inbox(memb.Listen(ctx, membCtx))
+		memb.Listen(ctx, membCtx, n.income)
 	}
 }

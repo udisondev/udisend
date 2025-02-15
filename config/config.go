@@ -40,13 +40,13 @@ func GetConfig() *Config {
 	if err != nil {
 		log.Fatalf("Error parse 'MIN_CLUSTER_CONNECTIONS' env: %v", err)
 	}
-	minCrossClusterConnections, err := strconv.Atoi(os.Getenv("MIN_CROSS_CCLUSTER_CONNECTIONS"))
+	minCrossClusterConnections, err := strconv.Atoi(os.Getenv("MIN_CROSS_CLUSTER_CONNECTIONS"))
 	if err != nil {
-		log.Fatalf("Error parse 'MIN_CROSS_CCLUSTER_CONNECTIONS' env: %v", err)
+		log.Fatalf("Error parse 'MIN_CROSS_CLUSTER_CONNECTIONS' env: %v", err)
 	}
 
 	config := &Config{
-		MemberID: os.Getenv("NICK_NAME"),
+		MemberID: os.Getenv("MEMBER_ID"),
 		Port:     os.Getenv("PORT"),
 		Parent:   os.Getenv("PARENT"),
 		Address:  os.Getenv("ADDRESS"),

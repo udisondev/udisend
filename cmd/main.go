@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 	"udisend/config"
@@ -20,7 +20,6 @@ func main() {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	go func() {
 		sig := <-sigs
-
 		fmt.Println("Получен сигнал:", sig)
 		// Здесь можно выполнить все необходимые действия для graceful shutdown:
 		// закрыть соединения, завершить горутины, освободить ресурсы и т.д.
@@ -33,8 +32,23 @@ func main() {
 	// Подписываемся на SIGINT и SIGTERM.
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-	err := node.New(*cfg).Serve(ctx)
-	if err != nil {
-		log.Println("Ошибка запуска сервера")
+	n := node.New(ctx, *cfg)
+
+	wg := sync.WaitGroup{}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		n.Serve(ctx)
+	}()
+
+	if !cfg.IsTURN {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n.AttachHead(ctx)
+		}()
 	}
+
+	wg.Wait()
 }

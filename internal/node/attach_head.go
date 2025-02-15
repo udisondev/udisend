@@ -13,8 +13,7 @@ import (
 )
 
 
-func (n *Node) AttachHead(ctx context.Context,
-	inbox func(ch <-chan message.Income)) {
+func (n *Node) AttachHead(ctx context.Context) {
 	u, err := url.Parse(n.config.Parent)
 	if err != nil {
 		log.Fatal(err)
@@ -28,8 +27,8 @@ func (n *Node) AttachHead(ctx context.Context,
 	}
 	defer conn.Close()
 
-	var headUdID string
-waitHeadUdID:
+	var memberID string
+waitMemberID:
 	for {
 		select {
 		case <-time.After(time.Minute):
@@ -43,13 +42,13 @@ waitHeadUdID:
 				continue
 			}
 
-			headUdID = string(resp[1:])
-			break waitHeadUdID
+			memberID = string(resp[1:])
+			break waitMemberID
 		}
 	}
 
 	membCtx, disconnect := context.WithCancelCause(context.Background())
-	memb := member.New(headUdID, true, conn, disconnect)
+	memb := member.New(memberID, true, conn, disconnect)
 	n.members.Push(memb)
-	inbox(memb.Listen(ctx, membCtx))
+	memb.Listen(ctx, membCtx, n.income)
 }
