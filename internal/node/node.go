@@ -40,6 +40,9 @@ func New(ctx context.Context, cfg config.Config) *Node {
 		config:  cfg,
 		income:  income,
 		members: members,
+		peerConnections: map[string]*webrtc.PeerConnection{},
+		dataChannels: map[string]*webrtc.DataChannel{},
+		signMap: map[string][]byte{},
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},

@@ -28,7 +28,9 @@ type Set struct {
 }
 
 func NewSet() *Set {
-	return &Set{}
+	return &Set{
+		members: map[string]*Struct{},
+	}
 }
 
 func New(ID string, isHead bool, conn *websocket.Conn, disconnect func(cause error)) *Struct {
