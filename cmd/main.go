@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"sync"
@@ -43,12 +44,15 @@ func main() {
 	}()
 
 	if !cfg.IsTURN {
+		log.Printf("I'am not a TURN going to connect to the head: %s\n", cfg.Parent)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			n.AttachHead(ctx)
 		}()
 	}
+	
+	log.Println("wait close")
 
 	wg.Wait()
 }

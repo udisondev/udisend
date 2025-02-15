@@ -38,7 +38,7 @@ func New(ctx context.Context, cfg config.Config) *Node {
 	}()
 	return &Node{
 		config:  cfg,
-		income: income,
+		income:  income,
 		members: members,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
@@ -47,15 +47,20 @@ func New(ctx context.Context, cfg config.Config) *Node {
 }
 
 func (n *Node) Serve(ctx context.Context) error {
-	message.Inbox(n.income, n.Dispatch)
+	log.Println("ready to serve")
+	go func() {
+		message.Inbox(n.income, n.Dispatch)
+	}()
 
+	log.Printf("Listen on: %s\n", n.config.GetAddress())
 	http.HandleFunc(
 		"/ws",
 		n.WorkWithMember(ctx),
 	)
-	log.Printf("Listen on: %s\n", n.config.GetAddress())
 	err := http.ListenAndServe(n.config.GetPort(), nil)
+	if err != nil {
+		log.Printf("error listen: %v\n", err)
+	}
 
 	return err
 }
-
