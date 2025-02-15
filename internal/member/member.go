@@ -81,6 +81,9 @@ func (m *Struct) Listen(
 						Event: message.Event{Type: message.ErrReadMessage},
 					}
 				}
+				if len(in) < 2 {
+					continue
+				}
 				income <- message.Income{
 					From:  m.id,
 					Event: message.Event{Type: message.Type(in[0]), Payload: in[1:]},
