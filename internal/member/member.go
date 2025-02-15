@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/rsa"
 	"errors"
-	"maps"
-	"slices"
 	"sync"
 	"udisend/internal/message"
 
@@ -104,20 +102,6 @@ func (m *Set) Push(memb *Struct) {
 	m.mu.Lock()
 	m.members[memb.id] = memb
 	m.mu.Unlock()
-}
-func (m *Set) Pop() *Struct {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return slices.SortedFunc(maps.Values(m.members), func(a, b *Struct) int {
-		switch {
-		case len(a.relations) < len(b.relations):
-			return -1
-		case len(a.relations) > len(b.relations):
-			return 1
-		default:
-			return 0
-		}
-	})[0]
 }
 
 var ErrNotFound = errors.New("not found")
