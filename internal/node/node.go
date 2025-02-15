@@ -54,7 +54,7 @@ func (n *Node) Serve(ctx context.Context) error {
 		n.WorkWithMember(ctx),
 	)
 	log.Printf("Listen on: %s\n", n.config.GetAddress())
-	err := http.ListenAndServe(n.config.GetAddress(), nil)
+	err := http.ListenAndServe(n.config.GetPort(), nil)
 
 	return err
 }
