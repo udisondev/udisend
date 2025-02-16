@@ -64,6 +64,10 @@ func (s *Set) Listen(
 	s.members[ID] = &memb
 	s.mu.Unlock()
 
+	if isHead {
+		s.head = &memb
+	}
+
 	go func() {
 		<-membCtx.Done()
 		log.Printf("Member=%s disconnected\n", ID)
@@ -141,7 +145,6 @@ func (s *Set) SendTo(member string, out message.Event) error {
 
 func (s *Set) SendToTheHead(out message.Event) {
 	s.head.conn.WriteMessage(websocket.BinaryMessage, out.Marshal())
-
 }
 
 func (s *Set) Broadcast(out message.Event) {
