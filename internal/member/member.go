@@ -101,15 +101,6 @@ func (m *Set) Len() int {
 	return len(m.members)
 }
 
-func (m *Set) Push(memb *Struct) {
-	if memb.isHead {
-		m.head = memb
-	}
-	m.mu.Lock()
-	m.members[memb.id] = memb
-	m.mu.Unlock()
-}
-
 var ErrNotFound = errors.New("not found")
 
 func (s *Set) SendTo(member string, out message.Event) error {
