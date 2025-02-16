@@ -79,6 +79,10 @@ func (t Type) String() string {
 		return "HeadMemberID"
 	case ForYou:
 		return "ForYou"
+	case NewConnection:
+		return "NewConnection"
+	case InteractionFailed:
+		return "InteractionFailed"
 	default:
 		return fmt.Sprintf("Type(%d)", t)
 	}

@@ -17,15 +17,15 @@ type Set struct {
 }
 
 type TCP struct {
-	id   string
-	conn *websocket.Conn
+	id         string
+	conn       *websocket.Conn
 	disconnect func()
 }
 
 type ICE struct {
-	id string
-	pc *webrtc.PeerConnection
-	dc *webrtc.DataChannel
+	id         string
+	pc         *webrtc.PeerConnection
+	dc         *webrtc.DataChannel
 	disconnect func()
 }
 
@@ -38,9 +38,9 @@ type Member interface {
 
 func NewICE(ID string, pc *webrtc.PeerConnection, dc *webrtc.DataChannel, dicsonnect func()) ICE {
 	return ICE{
-		id: ID,
-		pc: pc,
-		dc: dc,
+		id:         ID,
+		pc:         pc,
+		dc:         dc,
 		disconnect: dicsonnect,
 	}
 }
@@ -60,8 +60,8 @@ func (m *ICE) Disconnect(cause string) {
 }
 
 func (m *ICE) Listen(ctx context.Context) <-chan message.Income {
-	out := make(chan message.Income)
-	
+	out := make(chan message.Income, 1)
+
 	go func() {
 		<-ctx.Done()
 		close(out)
@@ -71,7 +71,7 @@ func (m *ICE) Listen(ctx context.Context) <-chan message.Income {
 		out <- message.Income{
 			From: m.ID(),
 			Event: message.Event{
-				Type: message.Type(msg.Data[0]),
+				Type:    message.Type(msg.Data[0]),
 				Payload: msg.Data[1:],
 			},
 		}
@@ -82,8 +82,8 @@ func (m *ICE) Listen(ctx context.Context) <-chan message.Income {
 
 func NewTCP(ID string, conn *websocket.Conn, disconnect func()) TCP {
 	return TCP{
-		id:   ID,
-		conn: conn,
+		id:         ID,
+		conn:       conn,
 		disconnect: disconnect,
 	}
 }
@@ -102,10 +102,11 @@ func (m *TCP) Disconnect(cause string) {
 }
 
 func (m *TCP) Listen(ctx context.Context) <-chan message.Income {
-	out := make(chan message.Income)
+	out := make(chan message.Income, 1)
 
 	go func() {
 		defer close(out)
+		out <- message.Income{From: m.ID(), Event: message.Event{Type: message.NewConnection}}
 		for {
 			select {
 			case <-ctx.Done():
@@ -117,7 +118,7 @@ func (m *TCP) Listen(ctx context.Context) <-chan message.Income {
 					out <- message.Income{
 						From: m.ID(),
 						Event: message.Event{
-							Type: message.InteractionFailed,
+							Type:    message.InteractionFailed,
 							Payload: []byte(err.Error()),
 						},
 					}

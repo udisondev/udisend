@@ -42,6 +42,7 @@ func (n *Node) createOfferFor(
 		mCtx, disconnect := context.WithCancel(ctx)
 		m := member.NewICE(dest, pc, dc, disconnect)
 		callback := n.members.Add(&m, false)
+		n.income <- message.Income{From: m.ID(), Event: message.Event{Type: message.NewConnection}}
 		for {
 			select {
 			case <-mCtx.Done():
