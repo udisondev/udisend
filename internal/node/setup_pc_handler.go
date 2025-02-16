@@ -13,7 +13,7 @@ func (n *Node) setupPCHandlers(pc *webrtc.PeerConnection, with string, callback 
 		log.Printf("Получен DataChannel от %s: %s", with, dc.Label())
 		dc.OnOpen(func() {
 			callback()
-			log.Printf("DataChannel для %s открыт", with)
+			log.Printf("<setupPCHandlers> DataChannel для %s открыт", with)
 		})
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			log.Printf("Прямое сообщение получено от %s: %s", with, string(msg.Data))

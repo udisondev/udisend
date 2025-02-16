@@ -37,9 +37,10 @@ func (n *Node) createOfferFor(
 	n.dataChannels[dest] = dc
 	n.dcMutex.Unlock()
 	dc.OnOpen(func() {
-		log.Printf("DataChannel для %s открыт", dest)
+		log.Printf("<createOfferFor> DataChannel для %s открыт\n", dest)
 	})
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		log.Printf("<createOfferFor> received msg: %s\n", string(msg.Data))
 		n.income <- message.Income{
 			From: dest,
 			Event: message.Event{
