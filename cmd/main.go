@@ -1,16 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 	"udisend/config"
+	"udisend/internal/message"
 	"udisend/internal/node"
 )
 
@@ -51,8 +54,32 @@ func main() {
 			n.AttachHead(ctx)
 		}()
 	}
-	
-	log.Println("wait close")
+
+	input := make(chan message.Outcome)
+	defer close(input)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		n.ListenMe(input)
+	}()
+
+	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Printf("Чтобы отправить личное сообщение введите: /<recepient> ваше сообщение")
+	wg.Add(1)
+	go func() {
+		for {
+			text := scanner.Text()
+			del := strings.Index(text, " ")
+			fmt.Print("\033[1A\033[2K")
+			fmt.Printf("You: %s", text[del+1:])
+			input <- message.Outcome{
+				To: text[1:del],
+				Content: []byte(text[del+1:]),
+			}
+			
+		}
+	}()
 
 	wg.Wait()
 }

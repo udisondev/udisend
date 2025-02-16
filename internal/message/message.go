@@ -27,26 +27,27 @@ type (
 	}
 
 	Outcome struct {
-		To    string
-		Event Event
+		To      string
+		Content []byte
 	}
 )
 
 type Type uint8
 
 const (
-	ConnectionSignRequested Type = 0
-	ConnectionSignProvided       = 1
-	MakeOffer                    = 2
-	SendOffer                    = 3
-	AnswerOffer                  = 4
-	SendAsnwer                   = 5
-	OfferAnswered               = 6
-	ConnectionEstablished        = 7
-	ErrReadMessage               = 8
-	Disconnected                 = 9
-	IamShotdown                  = 10
-	HeadMemberID                 = 11
+	ConnectionSignRequested Type = 0x00
+	ConnectionSignProvided       = 0x01
+	MakeOffer                    = 0x02
+	SendOffer                    = 0x03
+	AnswerOffer                  = 0x04
+	SendAsnwer                   = 0x05
+	OfferAnswered                = 0x06
+	ConnectionEstablished        = 0x09
+	ErrReadMessage               = 0x0A
+	Disconnected                 = 0x0B
+	IamShotdown                  = 0x0C
+	HeadMemberID                 = 0x0D
+	ForYou                       = 0x0E
 )
 
 func (t Type) String() string {

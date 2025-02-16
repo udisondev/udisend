@@ -95,6 +95,8 @@ func (n *Node) Dispatch(in message.Income) {
 		})
 	case message.OfferAnswered:
 		n.handleAnswer(string(bts[0]), string(bts[1]))
+	case message.ForYou:
+		log.Printf("%s: %s\n", in.From, string(in.Event.Payload))
 	}
 }
 

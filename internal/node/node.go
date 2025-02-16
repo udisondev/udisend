@@ -37,12 +37,12 @@ func New(ctx context.Context, cfg config.Config) *Node {
 		members.DisconnectAllWithCause(ctx.Err())
 	}()
 	return &Node{
-		config:  cfg,
-		income:  income,
-		members: members,
+		config:          cfg,
+		income:          income,
+		members:         members,
 		peerConnections: map[string]*webrtc.PeerConnection{},
-		dataChannels: map[string]*webrtc.DataChannel{},
-		signMap: map[string][]byte{},
+		dataChannels:    map[string]*webrtc.DataChannel{},
+		signMap:         map[string][]byte{},
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -66,4 +66,13 @@ func (n *Node) Serve(ctx context.Context) error {
 	}
 
 	return err
+}
+
+func (n *Node) ListenMe(input <-chan message.Outcome) {
+	for in := range input {
+		n.members.SendTo(in.To, message.Event{
+			Type:    message.ForYou,
+			Payload: in.Content,
+		})
+	}
 }
