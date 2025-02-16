@@ -77,7 +77,6 @@ func main() {
 				To: text[1:del],
 				Content: []byte(text[del+1:]),
 			}
-			
 		}
 	}()
 

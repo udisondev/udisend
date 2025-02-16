@@ -1,10 +1,8 @@
 package message
 
 import (
-	"context"
 	"fmt"
 	"slices"
-	"sync"
 )
 
 type (
@@ -89,45 +87,4 @@ func Inbox(income <-chan Income, dispatcher func(in Income)) {
 
 func (e Event) Marshal() []byte {
 	return slices.Concat([]byte{byte(e.Type)}, e.Payload)
-}
-
-func Outbox(outbox <-chan Outcome) func(ctx context.Context, memberID string) <-chan Event {
-	mu := sync.Mutex{}
-	receivers := make(map[string]chan Event)
-
-	go func() {
-		for e := range outbox {
-			if receiverOutbox, ok := receivers[e.To]; ok {
-				receiverOutbox <- e.Event
-			}
-		}
-
-		mu.Lock()
-		for _, ch := range receivers {
-			close(ch)
-		}
-
-		receivers = nil
-		mu.Unlock()
-	}()
-
-	return func(ctx context.Context, memberID string) <-chan Event {
-		sub := make(chan Event)
-		mu.Lock()
-		receivers[memberID] = sub
-		mu.Unlock()
-
-		go func() {
-			<-ctx.Done()
-			mu.Lock()
-			if _, ok := receivers[memberID]; ok {
-				delete(receivers, memberID)
-			}
-			mu.Unlock()
-			close(sub)
-		}()
-
-		return sub
-
-	}
 }
