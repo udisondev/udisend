@@ -69,7 +69,16 @@ func main() {
 	wg.Add(1)
 	go func() {
 		for {
+			scanner.Scan()
 			text := scanner.Text()
+			if len(text) < 4 {
+				fmt.Println("Ваше сообщение не может быть короче 4х символов!")
+				continue
+			}
+			if !strings.HasPrefix(text, "/") {
+				fmt.Println("Ваше сообщение должно начинаться с '/'!")
+				continue
+			}
 			del := strings.Index(text, " ")
 			fmt.Print("\033[1A\033[2K")
 			fmt.Printf("You: %s", text[del+1:])
