@@ -33,7 +33,7 @@ type (
 type Type uint8
 
 const (
-	ConnectionSignRequested Type = 0x00
+	ProvideConnectionSign Type = 0x00
 	ConnectionSignProvided       = 0x01
 	MakeOffer                    = 0x02
 	SendOffer                    = 0x03
@@ -46,11 +46,12 @@ const (
 	IamShotdown                  = 0x0C
 	HeadMemberID                 = 0x0D
 	ForYou                       = 0x0E
+	NewConnection                = 0x0F
 )
 
 func (t Type) String() string {
 	switch t {
-	case ConnectionSignRequested:
+	case ProvideConnectionSign:
 		return "ConnectionSignRequested"
 	case ConnectionSignProvided:
 		return "ConnectionSignProvided"

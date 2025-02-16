@@ -26,6 +26,20 @@ type Set struct {
 	mu      sync.Mutex
 }
 
+func (s *Set) ConnectWithOther(from string) {
+	s.mu.Lock()
+	for membID, memb := range s.members {
+		if membID == from {
+			continue
+		}
+		memb.send(message.Event{
+			Type: message.ProvideConnectionSign,
+			Payload: []byte(from),
+		})
+	}
+	s.mu.Unlock()
+}
+
 func NewSet() *Set {
 	return &Set{
 		members: map[string]*Struct{},
@@ -75,7 +89,13 @@ func interactWith(
 	m *Struct,
 	income chan<- message.Income,
 ) {
-	log.Printf("Member=%s connected to ws\n", m.id)
+	log.Printf("Member=%s connected\n", m.id)
+	income <- message.Income{
+		From: m.id,
+		Event: message.Event{
+			Type: message.NewConnection,
+		},
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -101,15 +121,6 @@ func interactWith(
 
 func (m *Set) Len() int {
 	return len(m.members)
-}
-
-func (m *Set) Push(memb *Struct) {
-	if memb.isHead {
-		m.head = memb
-	}
-	m.mu.Lock()
-	m.members[memb.id] = memb
-	m.mu.Unlock()
 }
 
 var ErrNotFound = errors.New("not found")
@@ -140,12 +151,10 @@ func (s *Set) Broadcast(out message.Event) {
 }
 
 func (s *Set) DisconnectiWithCause(member string, cause error) {
-	s.mu.Lock()
 	if m, ok := s.members[member]; ok {
 		m.disconnect(cause)
 		delete(s.members, member)
 	}
-	s.mu.Unlock()
 }
 
 func (s *Set) DisconnectAllWithCause(cause error) {

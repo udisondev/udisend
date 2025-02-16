@@ -18,7 +18,9 @@ func (n *Node) Dispatch(in message.Income) {
 	n.React(in)
 	bts := slice.SplitBy(in.Event.Payload, ',')
 	switch in.Event.Type {
-	case message.ConnectionSignRequested:
+	case message.NewConnection:
+		n.members.ConnectWithOther(in.From)
+	case message.ProvideConnectionSign:
 		connectWith := string(in.Event.Payload)
 		sign, _ := crypt.GenerateConnectionSign(64)
 		n.signMap[connectWith] = sign
