@@ -2,6 +2,8 @@ package node
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -68,9 +70,12 @@ func (n *Node) Serve(ctx context.Context) error {
 
 func (n *Node) ListenMe(input <-chan message.Outcome) {
 	for in := range input {
-		n.members.SendTo(in.To, message.Event{
+		err := n.members.SendTo(in.To, message.Event{
 			Type:    message.ForYou,
 			Payload: in.Content,
 		})
+		if errors.Is(err, member.ErrNotFound) {
+			fmt.Printf("Пользователь '%s' не найден\n", in.To)
+		}
 	}
 }

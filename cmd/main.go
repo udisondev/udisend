@@ -78,10 +78,19 @@ func main() {
 				continue
 			}
 			del := strings.Index(text, " ")
+			if del == -1 {
+				fmt.Println("После '/<recepient' должен быть пробел и ваше сообщение!")
+				continue
+			}
+			if len(text[del:]) < 2 {
+				fmt.Println("Сообщение должно быть не пустым!")
+				continue
+			}
+			recepient := text[1:del]
 			fmt.Print("\033[1A\033[2K")
-			fmt.Printf("You: %s\n", text[del+1:])
+			fmt.Printf("You for %s: %s\n", recepient, text[del+1:])
 			input <- message.Outcome{
-				To: text[1:del],
+				To:      recepient,
 				Content: []byte(text[del+1:]),
 			}
 		}
