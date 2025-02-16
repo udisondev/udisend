@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"time"
-	"udisend/internal/member"
 	"udisend/internal/message"
 
 	"github.com/gorilla/websocket"
