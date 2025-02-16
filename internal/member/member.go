@@ -73,11 +73,8 @@ func (m *Struct) Listen(
 			_, in, err := m.conn.ReadMessage()
 			log.Printf("raw in: %s", string(in))
 			if err != nil {
-				log.Printf("error read message: %v\n", err)
-				income <- message.Income{
-					From:  m.id,
-					Event: message.Event{Type: message.ErrReadMessage},
-				}
+				m.disconnect(err)
+				return
 			}
 			if len(in) < 2 {
 				continue

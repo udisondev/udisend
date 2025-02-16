@@ -74,6 +74,8 @@ func (t Type) String() string {
 		return "IamShotdown"
 	case HeadMemberID:
 		return "HeadMemberID"
+	case ForYou:
+		return "ForYou"
 	default:
 		return fmt.Sprintf("Type(%d)", t)
 	}
