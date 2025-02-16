@@ -36,6 +36,5 @@ func (n *Node) WorkWithMember(
 
 		log.Printf("Member=%s connected to ws\n", memberID)
 		n.members.Add(ctx, memberID, false, n.income, conn)
-		select {}
 	}
 }

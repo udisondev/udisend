@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rsa"
 	"errors"
-	"fmt"
 	"sync"
 	"udisend/internal/message"
 
@@ -36,10 +35,11 @@ func (s *Set) Add(
 	ctx context.Context,
 	ID string,
 	isHead bool,
-	income chan<- message.Income,
+	income chan<-message.Income,
 	conn *websocket.Conn,
 ) {
 	membCtx, disconnect := context.WithCancelCause(ctx)
+
 	memb := Struct{
 		id:         ID,
 		isHead:     isHead,
@@ -47,18 +47,11 @@ func (s *Set) Add(
 		disconnect: disconnect,
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.members[ID] = &memb
-
-	if _, ok := s.members[ID]; ok {
-		fmt.Printf("Member=%s added to list\n", memb.id)
-	} else {
-		fmt.Printf("Member=%s not found\n", memb.id)
-	}
+	s.mu.Unlock()
 
 	go func() {
 		<-membCtx.Done()
-		fmt.Printf("Member=%s disconnected\n", ID)
 		cause := membCtx.Err().Error()
 		memb.send(message.Event{
 			Type:    message.Disconnected,
@@ -66,9 +59,8 @@ func (s *Set) Add(
 		})
 		memb.conn.Close()
 		s.mu.Lock()
-		defer s.mu.Unlock()
-
 		delete(s.members, ID)
+		s.mu.Unlock()
 	}()
 
 	go memb.Listen(membCtx, income)
@@ -94,7 +86,6 @@ func (m *Struct) Listen(
 		default:
 			_, in, err := m.conn.ReadMessage()
 			if err != nil {
-				fmt.Printf("Error listen member=%s: %v\n", m.id, err)
 				m.disconnect(err)
 				return
 			}
@@ -113,8 +104,6 @@ func (m *Set) Len() int {
 var ErrNotFound = errors.New("not found")
 
 func (s *Set) SendTo(member string, out message.Event) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	m, ok := s.members[member]
 	if !ok {
 		return ErrNotFound
@@ -146,9 +135,9 @@ func (s *Set) DisconnectiWithCause(member string, cause error) {
 
 func (s *Set) DisconnectAllWithCause(cause error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, m := range s.members {
 		m.disconnect(cause)
 	}
 	s.members = nil
+	s.mu.Unlock()
 }
