@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"time"
+	"udisend/internal/member"
 	"udisend/internal/message"
 
 	"github.com/gorilla/websocket"
@@ -41,5 +42,20 @@ waitMemberID:
 		}
 	}
 
-	n.members.Listen(ctx, memberID, n.income, true, conn)
+	mCtx, disconnect := context.WithCancel(ctx)
+	m := member.NewTCP(memberID, conn, disconnect)
+	callback := n.members.Add(&m, true)
+	for {
+		select {
+		case <- mCtx.Done():
+			callback()
+			return
+		case in, ok := <- m.Listen(mCtx):
+			if !ok {
+				return
+			}
+		n.income <- in
+		
+		}
+	}
 }

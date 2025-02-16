@@ -12,7 +12,7 @@ import (
 	"udisend/pkg/slice"
 )
 
-func (n *Node) Dispatch(in message.Income) {
+func (n *Node) Dispatch(ctx context.Context, in message.Income) {
 	log.Printf("Received message from=%s, type=%s, payload=%s", in.From, in.Event.Type.String(), string(in.Event.Payload))
 
 	n.React(in)
@@ -82,7 +82,7 @@ func (n *Node) Dispatch(in message.Income) {
 			n.members.DisconnectiWithCause(string(bts[0]), fmt.Errorf("connection with '%s' has not established", in.From))
 		})
 	case message.MakeOffer:
-		n.createOfferFor(string(bts[0]), bts[1])
+		n.createOfferFor(ctx, string(bts[0]), bts[1])
 	case message.SendOffer:
 		n.members.SendTo(string(bts[0]), message.Event{
 			Type:    message.AnswerOffer,

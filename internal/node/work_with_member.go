@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"udisend/internal/member"
 	"udisend/internal/message"
 	"udisend/pkg/check"
 
@@ -34,6 +35,22 @@ func (n *Node) WorkWithMember(
 			return
 		}
 
-		n.members.Listen(ctx, memberID, n.income, true, conn)
+		mCtx, disconnect := context.WithCancel(ctx)
+		m := member.NewTCP(memberID, conn, disconnect)
+		callback := n.members.Add(&m, false)
+		for {
+			select {
+			case <-mCtx.Done():
+				callback()
+				return
+			case in, ok := <-m.Listen(mCtx):
+				if !ok {
+					return
+				}
+				n.income <- in
+
+			}
+		}
+
 	}
 }

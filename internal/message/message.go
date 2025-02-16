@@ -1,6 +1,7 @@
 package message
 
 import (
+	"context"
 	"fmt"
 	"slices"
 )
@@ -33,20 +34,21 @@ type (
 type Type uint8
 
 const (
-	ProvideConnectionSign Type = 0x00
-	ConnectionSignProvided       = 0x01
-	MakeOffer                    = 0x02
-	SendOffer                    = 0x03
-	AnswerOffer                  = 0x04
-	SendAsnwer                   = 0x05
-	OfferAnswered                = 0x06
-	ConnectionEstablished        = 0x09
-	ErrReadMessage               = 0x0A
-	Disconnected                 = 0x0B
-	IamShotdown                  = 0x0C
-	HeadMemberID                 = 0x0D
-	ForYou                       = 0x0E
-	NewConnection                = 0x0F
+	ProvideConnectionSign  Type = 0x00
+	ConnectionSignProvided      = 0x01
+	MakeOffer                   = 0x02
+	SendOffer                   = 0x03
+	AnswerOffer                 = 0x04
+	SendAsnwer                  = 0x05
+	OfferAnswered               = 0x06
+	ConnectionEstablished       = 0x09
+	ErrReadMessage              = 0x0A
+	Disconnected                = 0x0B
+	IamShotdown                 = 0x0C
+	HeadMemberID                = 0x0D
+	ForYou                      = 0x0E
+	NewConnection               = 0x0F
+	InteractionFailed           = 0x10
 )
 
 func (t Type) String() string {
@@ -82,9 +84,9 @@ func (t Type) String() string {
 	}
 }
 
-func Inbox(income <-chan Income, dispatcher func(in Income)) {
+func Inbox(ctx context.Context, income <-chan Income, dispatcher func(ctx context.Context, in Income)) {
 	for in := range income {
-		dispatcher(in)
+		dispatcher(ctx, in)
 	}
 }
 

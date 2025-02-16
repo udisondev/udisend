@@ -29,6 +29,7 @@ type Node struct {
 	dcMutex         sync.Mutex
 	income          chan message.Income
 	signMap         map[string][]byte
+	ctx             context.Context
 }
 
 func New(ctx context.Context, cfg config.Config) *Node {
@@ -53,7 +54,7 @@ func New(ctx context.Context, cfg config.Config) *Node {
 
 func (n *Node) Serve(ctx context.Context) error {
 	go func() {
-		message.Inbox(n.income, n.Dispatch)
+		message.Inbox(ctx, n.income, n.Dispatch)
 	}()
 
 	http.HandleFunc(

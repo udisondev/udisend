@@ -1,15 +1,17 @@
 package node
 
 import (
+	"context"
 	"log"
+	"udisend/internal/member"
 	"udisend/internal/message"
 	"udisend/pkg/slice"
 
 	"github.com/pion/webrtc/v4"
 )
 
-
 func (n *Node) createOfferFor(
+	ctx context.Context,
 	dest string,
 	sign []byte,
 ) {
@@ -37,16 +39,21 @@ func (n *Node) createOfferFor(
 	n.dataChannels[dest] = dc
 	n.dcMutex.Unlock()
 	dc.OnOpen(func() {
-		log.Printf("<createOfferFor> DataChannel для %s открыт\n", dest)
-	})
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		log.Printf("<createOfferFor> received msg: %s\n", string(msg.Data))
-		n.income <- message.Income{
-			From: dest,
-			Event: message.Event{
-				Type:    message.Type(msg.Data[0]),
-				Payload: msg.Data[1:],
-			},
+		mCtx, disconnect := context.WithCancel(ctx)
+		m := member.NewICE(dest, pc, dc, disconnect)
+		callback := n.members.Add(&m, false)
+		for {
+			select {
+			case <-mCtx.Done():
+				callback()
+				return
+			case in, ok := <-m.Listen(mCtx):
+				if !ok {
+					callback()
+					return
+				}
+			n.income <- in
+			}
 		}
 	})
 
