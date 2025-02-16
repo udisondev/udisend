@@ -63,7 +63,7 @@ func main() {
 	}()
 
 	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Printf("Чтобы отправить личное сообщение введите: /<recepient> ваше сообщение")
+	fmt.Println("Чтобы отправить личное сообщение введите: /<recepient> ваше сообщение")
 	wg.Add(1)
 	go func() {
 		for {
