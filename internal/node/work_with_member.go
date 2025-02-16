@@ -5,13 +5,11 @@ import (
 	"log"
 	"net/http"
 	"slices"
-	"udisend/internal/member"
 	"udisend/internal/message"
 	"udisend/pkg/check"
 
 	"github.com/gorilla/websocket"
 )
-
 
 func (n *Node) WorkWithMember(
 	ctx context.Context,
@@ -36,11 +34,7 @@ func (n *Node) WorkWithMember(
 			return
 		}
 
-		membCtx, disconnect := context.WithCancelCause(context.Background())
-		memb := member.New(memberID, false, conn, disconnect)
 		log.Printf("Member=%s connected to ws\n", memberID)
-		n.members.Push(memb)
-
-		go memb.Listen(ctx, membCtx, n.income)
+		n.members.Push(ctx, n.income, memberID, false, conn)
 	}
 }

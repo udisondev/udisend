@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"time"
-	"udisend/internal/member"
 	"udisend/internal/message"
 
 	"github.com/gorilla/websocket"
@@ -43,8 +42,5 @@ waitMemberID:
 		}
 	}
 
-	membCtx, disconnect := context.WithCancelCause(context.Background())
-	memb := member.New(memberID, true, conn, disconnect)
-	n.members.Push(memb)
-	memb.Listen(ctx, membCtx, n.income)
+	n.members.Push(ctx, n.income, memberID, true, conn)
 }
