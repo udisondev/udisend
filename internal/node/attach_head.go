@@ -45,6 +45,7 @@ waitMemberID:
 	mCtx, disconnect := context.WithCancel(ctx)
 	m := member.NewTCP(memberID, conn, disconnect)
 	callback := n.members.Add(&m, true)
+
 	for {
 		select {
 		case <- mCtx.Done():

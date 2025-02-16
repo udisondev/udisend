@@ -103,7 +103,6 @@ func (m *TCP) Disconnect(cause string) {
 
 func (m *TCP) Listen(ctx context.Context) <-chan message.Income {
 	out := make(chan message.Income, 1)
-	out <- message.Income{From: m.ID(), Event: message.Event{Type: message.NewConnection}}
 
 	go func() {
 		defer close(out)

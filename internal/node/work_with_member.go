@@ -38,6 +38,8 @@ func (n *Node) WorkWithMember(
 		mCtx, disconnect := context.WithCancel(ctx)
 		m := member.NewTCP(memberID, conn, disconnect)
 		callback := n.members.Add(&m, false)
+		n.income <- message.Income{From: m.ID(), Event: message.Event{Type: message.NewConnection}}
+
 		for {
 			select {
 			case <-mCtx.Done():
