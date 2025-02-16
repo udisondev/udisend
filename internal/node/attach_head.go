@@ -11,7 +11,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-
 func (n *Node) AttachHead(ctx context.Context) {
 	h := http.Header{}
 	h.Add("memberID", n.config.MemberID)
@@ -41,6 +40,5 @@ waitMemberID:
 			break waitMemberID
 		}
 	}
-
-	n.members.Push(ctx, n.income, memberID, true, conn)
+	n.members.Add(ctx, memberID, false, n.income, conn)
 }

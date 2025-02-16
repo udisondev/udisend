@@ -35,6 +35,6 @@ func (n *Node) WorkWithMember(
 		}
 
 		log.Printf("Member=%s connected to ws\n", memberID)
-		n.members.Push(ctx, n.income, memberID, false, conn)
+		n.members.Add(ctx, memberID, false, n.income, conn)
 	}
 }

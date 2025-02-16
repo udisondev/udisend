@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rsa"
 	"errors"
-	"log"
 	"sync"
 	"udisend/internal/message"
 
@@ -62,7 +61,7 @@ func (s *Set) Add(
 		s.mu.Lock()
 		delete(s.members, ID)
 		s.mu.Unlock()
-	}
+	}()
 
 	go memb.Listen(membCtx, income)
 }
