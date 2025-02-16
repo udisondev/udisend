@@ -47,7 +47,6 @@ func main() {
 	}()
 
 	if !cfg.IsTURN {
-		log.Printf("I'am not a TURN going to connect to the head: %s\n", cfg.Parent)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -81,7 +80,7 @@ func main() {
 			}
 			del := strings.Index(text, " ")
 			fmt.Print("\033[1A\033[2K")
-			fmt.Printf("You: %s", text[del+1:])
+			fmt.Printf("You: %s\n", text[del+1:])
 			input <- message.Outcome{
 				To: text[1:del],
 				Content: []byte(text[del+1:]),

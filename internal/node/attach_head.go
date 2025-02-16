@@ -38,8 +38,6 @@ waitMemberID:
 				continue
 			}
 
-			log.Printf("received head memberID=%s", string(resp[1:]))
-
 			memberID = string(resp[1:])
 			break waitMemberID
 		}

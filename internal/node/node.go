@@ -50,12 +50,10 @@ func New(ctx context.Context, cfg config.Config) *Node {
 }
 
 func (n *Node) Serve(ctx context.Context) error {
-	log.Println("ready to serve")
 	go func() {
 		message.Inbox(n.income, n.Dispatch)
 	}()
 
-	log.Printf("Listen on: %s\n", n.config.GetAddress())
 	http.HandleFunc(
 		"/ws",
 		n.WorkWithMember(ctx),
