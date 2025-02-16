@@ -32,13 +32,33 @@ func NewSet() *Set {
 	}
 }
 
-func New(ID string, isHead bool, conn *websocket.Conn, disconnect func(cause error)) *Struct {
-	return &Struct{
+func (s *Set) Listen(
+	ctx context.Context,
+	ID string,
+	income chan<- message.Income,
+	isHead bool,
+	conn *websocket.Conn,
+) {
+	membCtx, disconnect := context.WithCancelCause(ctx)
+	memb := Struct{
 		id:         ID,
 		publicKey:  rsa.PublicKey{},
 		conn:       conn,
 		disconnect: disconnect,
 	}
+	s.mu.Lock()
+	s.members[ID] = &memb
+	s.mu.Unlock()
+
+	go func() {
+		<-membCtx.Done()
+		log.Printf("Member=%s disconnected\n", ID)
+		s.mu.Lock()
+		delete(s.members, ID)
+		s.mu.Unlock()
+	}()
+
+	interactWith(membCtx, &memb, income)
 }
 
 func (m *Struct) send(out message.Event) error {
@@ -50,24 +70,16 @@ func (m *Struct) send(out message.Event) error {
 	return nil
 }
 
-func (m *Struct) Listen(
+func interactWith(
 	ctx context.Context,
-	membCtx context.Context,
+	m *Struct,
 	income chan<- message.Income,
 ) {
+	log.Printf("Member=%s connected to ws\n", m.id)
 	for {
 		select {
-		case <-membCtx.Done():
-			cause := ctx.Err()
-			e := message.Event{Type: message.Disconnected, Payload: []byte(cause.Error())}
-			m.conn.WriteMessage(websocket.BinaryMessage, e.Marshal())
-			m.DisconnectWithCause(cause)
-			return
-
 		case <-ctx.Done():
-			e := message.Event{Type: message.IamShotdown}
-			m.conn.WriteMessage(websocket.BinaryMessage, e.Marshal())
-			m.DisconnectWithCause(errors.New("shotdown"))
+			return
 
 		default:
 			_, in, err := m.conn.ReadMessage()
@@ -85,10 +97,6 @@ func (m *Struct) Listen(
 			}
 		}
 	}
-}
-
-func (s *Struct) DisconnectWithCause(cause error) {
-	s.disconnect(cause)
 }
 
 func (m *Set) Len() int {
@@ -134,7 +142,7 @@ func (s *Set) Broadcast(out message.Event) {
 func (s *Set) DisconnectiWithCause(member string, cause error) {
 	s.mu.Lock()
 	if m, ok := s.members[member]; ok {
-		m.DisconnectWithCause(cause)
+		m.disconnect(cause)
 		delete(s.members, member)
 	}
 	s.mu.Unlock()

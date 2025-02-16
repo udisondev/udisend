@@ -12,7 +12,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-
 func (n *Node) AttachHead(ctx context.Context) {
 	h := http.Header{}
 	h.Add("memberID", n.config.MemberID)
@@ -43,8 +42,5 @@ waitMemberID:
 		}
 	}
 
-	membCtx, disconnect := context.WithCancelCause(context.Background())
-	memb := member.New(memberID, true, conn, disconnect)
-	n.members.Push(memb)
-	memb.Listen(ctx, membCtx, n.income)
+	n.members.Listen(ctx, memberID, n.income, true, conn)
 }
