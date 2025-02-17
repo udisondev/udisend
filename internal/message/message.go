@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"udisend/pkg/span"
 )
 
 type (
@@ -89,6 +90,8 @@ func (t Type) String() string {
 }
 
 func Inbox(ctx context.Context, income <-chan Income, dispatcher func(ctx context.Context, in Income)) {
+	ctx = span.Extend(ctx, "node.Inbox")
+
 	for in := range income {
 		dispatcher(ctx, in)
 	}

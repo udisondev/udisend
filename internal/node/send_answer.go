@@ -13,13 +13,14 @@ import (
 
 func (n *Node) answerSignal(ctx context.Context, m message.Event) {
 	ctx = span.Extend(ctx, "node.answerSignal")
+	logger.Debug(ctx, "Answering signal...")
 
 	bts := slice.SplitBy(m.Payload, ',')
 	from := string(bts[0])
 	givenSign := bts[1]
 	remoteSdp := string(bts[2])
 
-	logger.Debug(ctx, "Offer received", "from", from)
+	logger.Debug(ctx, "Offer received", "from", from, "sdp", remoteSdp)
 
 	actualSign, ok := n.signMap[from]
 	logger.Debug(ctx, "Compare sign", "given", givenSign, "actualSign", actualSign)

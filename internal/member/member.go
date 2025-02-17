@@ -114,7 +114,6 @@ func (m *TCP) Listen(ctx context.Context) <-chan message.Income {
 				return
 			default:
 				_, in, err := m.conn.ReadMessage()
-				log.Printf("raw in: %s", string(in))
 				if err != nil {
 					out <- message.Income{
 						From: m.ID(),
@@ -124,9 +123,6 @@ func (m *TCP) Listen(ctx context.Context) <-chan message.Income {
 						},
 					}
 					return
-				}
-				if len(in) < 2 {
-					continue
 				}
 				out <- message.Income{
 					From:  m.id,
