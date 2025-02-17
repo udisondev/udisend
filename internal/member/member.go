@@ -3,7 +3,6 @@ package member
 import (
 	"context"
 	"errors"
-	"log"
 	"sync"
 	"udisend/internal/message"
 	"udisend/pkg/check/logger"
