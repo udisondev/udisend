@@ -2,23 +2,28 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 	"udisend/internal/member"
 	"udisend/internal/message"
+	"udisend/pkg/check/logger"
+	"udisend/pkg/span"
 
 	"github.com/gorilla/websocket"
 )
 
 func (n *Node) AttachHead(ctx context.Context) {
+	ctx = span.Extend(ctx, "node.AttachHead")
+
 	h := http.Header{}
 	h.Add("memberID", n.config.MemberID)
-	conn, _, err := websocket.DefaultDialer.Dial(fmt.Sprintf("ws://%s/ws", n.config.Parent), h)
+	addr := fmt.Sprintf("ws://%s/ws", n.config.Parent)
+	conn, _, err := websocket.DefaultDialer.Dial(addr, h)
 	if err != nil {
-		log.Fatal("Ошибка подключения к сигнальному серверу:", err)
-		return
+		logger.Error(ctx, "Error connection to the head", "address", addr)
+		panic(err)
 	}
 	defer conn.Close()
 
@@ -27,12 +32,14 @@ waitMemberID:
 	for {
 		select {
 		case <-time.After(time.Minute):
-			log.Fatalf("Head MemberID not received!")
+			panic(errors.New("Head MemberID not received!"))
+
 		default:
 			_, resp, err := conn.ReadMessage()
 			if err != nil {
-				log.Fatalf("Error attach to the head: %v", err)
+				panic(fmt.Errorf("Error attach to the head: %v", err))
 			}
+
 			if message.Type(resp[0]) != message.HeadMemberID {
 				continue
 			}
@@ -48,15 +55,15 @@ waitMemberID:
 
 	for {
 		select {
-		case <- mCtx.Done():
+		case <-mCtx.Done():
 			callback()
 			return
-		case in, ok := <- m.Listen(mCtx):
+		case in, ok := <-m.Listen(mCtx):
 			if !ok {
 				return
 			}
-		n.income <- in
-		
+			n.income <- in
+
 		}
 	}
 }

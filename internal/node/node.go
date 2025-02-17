@@ -11,6 +11,7 @@ import (
 	"udisend/config"
 	"udisend/internal/member"
 	"udisend/internal/message"
+	"udisend/pkg/span"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
@@ -53,6 +54,7 @@ func New(ctx context.Context, cfg config.Config) *Node {
 }
 
 func (n *Node) Serve(ctx context.Context) error {
+	ctx = span.Extend(ctx, "node.Serve")
 	go func() {
 		message.Inbox(ctx, n.income, n.Dispatch)
 	}()
