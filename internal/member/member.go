@@ -33,7 +33,7 @@ type ICE struct {
 type Member interface {
 	ID() string
 	Write([]byte) error
-	Disconnect(cause string)
+	Close(cause string)
 	Listen(ctx context.Context) <-chan message.Income
 }
 
@@ -54,7 +54,8 @@ func (m *ICE) Write(b []byte) error {
 	return m.dc.Send(b)
 }
 
-func (m *ICE) Disconnect(cause string) {
+func (m *ICE) Close(cause string) {
+	m.disconnect()
 	m.Write(message.Event{Type: message.Disconnected, Payload: []byte(cause)}.Marshal())
 	m.pc.Close()
 	m.dc.Close()
@@ -97,13 +98,14 @@ func (m *TCP) Write(b []byte) error {
 	return m.conn.WriteMessage(websocket.BinaryMessage, b)
 }
 
-func (m *TCP) Disconnect(cause string) {
+func (m *TCP) Close(cause string) {
+	m.disconnect()
 	m.Write(message.Event{Type: message.Disconnected, Payload: []byte(cause)}.Marshal())
 	m.conn.Close()
 }
 
 func (m *TCP) Listen(ctx context.Context) <-chan message.Income {
-	out := make(chan message.Income, 1)
+	out := make(chan message.Income)
 
 	go func() {
 		defer close(out)
@@ -113,6 +115,7 @@ func (m *TCP) Listen(ctx context.Context) <-chan message.Income {
 				return
 			default:
 				_, in, err := m.conn.ReadMessage()
+				logger.Debug(ctx, "Read bytes", "raw", string(in))
 				if err != nil {
 					out <- message.Income{
 						From: m.ID(),
@@ -201,14 +204,14 @@ func (s *Set) Broadcast(out message.Event) {
 func (s *Set) DisconnectiWithCause(member string, cause string) {
 	if v, ok := s.members.Load(member); ok {
 		m := v.(Member)
-		m.Disconnect(cause)
+		m.Close(cause)
 	}
 }
 
 func (s *Set) DisconnectAllWithCause(cause error) {
 	s.members.Range(func(_, value any) bool {
 		m := value.(Member)
-		m.Disconnect(cause.Error())
+		m.Close(cause.Error())
 		return true
 	})
 }

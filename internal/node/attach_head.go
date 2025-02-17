@@ -60,10 +60,10 @@ waitMemberID:
 			return
 		case in, ok := <-m.Listen(mCtx):
 			if !ok {
+				callback()
 				return
 			}
 			n.income <- in
-
 		}
 	}
 }

@@ -50,7 +50,6 @@ func (n *Node) WorkWithMember(
 					return
 				}
 				n.income <- in
-
 			}
 		}
 

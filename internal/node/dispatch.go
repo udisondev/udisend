@@ -16,7 +16,16 @@ import (
 
 func (n *Node) Dispatch(ctx context.Context, in message.Income) {
 	ctx = span.Extend(ctx, "node.Dispatch")
-	logger.Debug(ctx, "Received message", "from", in.From, "type", in.Event.Type.String(), "payload", string(in.Event.Payload))
+	logger.Debug(
+		ctx,
+		"Received message",
+		"from",
+		in.From,
+		"type",
+		in.Event.Type.String(),
+		"payload",
+		string(in.Event.Payload),
+	)
 
 	n.React(in)
 	bts := slice.SplitBy(in.Event.Payload, ',')
@@ -85,7 +94,10 @@ func (n *Node) Dispatch(ctx context.Context, in message.Income) {
 		n.mu.Unlock()
 
 		schedule.After(connectionCtx, time.Minute*5, func() {
-			n.members.DisconnectiWithCause(string(bts[0]), fmt.Sprintf("connection with '%s' has not established", in.From))
+			n.members.DisconnectiWithCause(
+				string(bts[0]),
+				fmt.Sprintf("connection with '%s' has not established", in.From),
+			)
 		})
 	case message.MakeOffer:
 		n.createOfferFor(ctx, string(bts[0]), bts[1])
