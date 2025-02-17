@@ -21,6 +21,7 @@ type TCP struct {
 	id         string
 	conn       *websocket.Conn
 	disconnect func()
+	wrmu       sync.Mutex
 }
 
 type ICE struct {
@@ -95,6 +96,8 @@ func (m *TCP) ID() string {
 }
 
 func (m *TCP) Write(b []byte) error {
+	m.wrmu.Lock()
+	defer m.wrmu.Unlock()
 	return m.conn.WriteMessage(websocket.BinaryMessage, b)
 }
 
@@ -139,7 +142,7 @@ func (m *TCP) Listen(ctx context.Context) <-chan message.Income {
 
 func (s *Set) ConnectWithOther(ctx context.Context, from string) {
 	ctx = span.Extend(ctx, "member.ConnectWithOther")
-	
+
 	s.members.Range(func(key, value any) bool {
 		id, member := key.(string), value.(Member)
 		if id == from {
