@@ -89,14 +89,14 @@ func (n *Node) Dispatch(ctx context.Context, in message.Income) {
 			Payload: slice.ConcatWithDel(',', bts[1:]...),
 		})
 	case message.AnswerOffer:
-		n.answerSignal(in.Event)
+		n.answerSignal(ctx, in.Event)
 	case message.SendAsnwer:
 		n.members.SendTo(string(bts[0]), message.Event{
 			Type:    message.OfferAnswered,
 			Payload: slice.ConcatWithDel(',', bts[1:]...),
 		})
 	case message.OfferAnswered:
-		n.handleAnswer(string(bts[0]), string(bts[1]))
+		n.handleAnswer(ctx, string(bts[0]), string(bts[1]))
 	case message.ForYou:
 		log.Printf("%s: %s\n", in.From, string(in.Event.Payload))
 	}
