@@ -72,8 +72,9 @@ func (n *Node) Serve(ctx context.Context) error {
 }
 
 func (n *Node) ListenMe(input <-chan message.Outcome) {
+	ctx := context.WithValue(context.Background(), span.Span, "keyboard")
 	for in := range input {
-		err := n.members.SendTo(in.To, message.Event{
+		err := n.members.SendTo(ctx, in.To, message.Event{
 			Type:    message.ForYou,
 			Payload: in.Content,
 		})

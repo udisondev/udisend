@@ -10,9 +10,11 @@ import (
 	"udisend/internal/schedule"
 	"udisend/pkg/crypt"
 	"udisend/pkg/slice"
+	"udisend/pkg/span"
 )
 
 func (n *Node) Dispatch(ctx context.Context, in message.Income) {
+	ctx = span.Extend(ctx, "node.Dispatch")
 	log.Printf("Received message from=%s, type=%s, payload=%s", in.From, in.Event.Type.String(), string(in.Event.Payload))
 
 	n.React(in)
@@ -48,12 +50,12 @@ func (n *Node) Dispatch(ctx context.Context, in message.Income) {
 			delete(n.signMap, connectWith)
 		})
 
-		n.members.SendTo(in.From, message.Event{
+		n.members.SendTo(ctx, in.From, message.Event{
 			Type:    message.ConnectionSignProvided,
 			Payload: slice.ConcatWithDel(',', in.Event.Payload, sign),
 		})
 	case message.ConnectionSignProvided:
-		n.members.SendTo(string(bts[0]), message.Event{
+		n.members.SendTo(ctx, string(bts[0]), message.Event{
 			Type:    message.MakeOffer,
 			Payload: slice.ConcatWithDel(',', []byte(in.From), bts[1]),
 		})
@@ -84,14 +86,14 @@ func (n *Node) Dispatch(ctx context.Context, in message.Income) {
 	case message.MakeOffer:
 		n.createOfferFor(ctx, string(bts[0]), bts[1])
 	case message.SendOffer:
-		n.members.SendTo(string(bts[0]), message.Event{
+		n.members.SendTo(ctx, string(bts[0]), message.Event{
 			Type:    message.AnswerOffer,
 			Payload: slice.ConcatWithDel(',', bts[1:]...),
 		})
 	case message.AnswerOffer:
 		n.answerSignal(ctx, in.Event)
 	case message.SendAsnwer:
-		n.members.SendTo(string(bts[0]), message.Event{
+		n.members.SendTo(ctx, string(bts[0]), message.Event{
 			Type:    message.OfferAnswered,
 			Payload: slice.ConcatWithDel(',', bts[1:]...),
 		})

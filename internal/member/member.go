@@ -6,6 +6,8 @@ import (
 	"log"
 	"sync"
 	"udisend/internal/message"
+	"udisend/pkg/check/logger"
+	"udisend/pkg/span"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
@@ -171,7 +173,10 @@ func (s *Set) Add(m Member, isHead bool) (cleanup func()) {
 
 var ErrNotFound = errors.New("not found")
 
-func (s *Set) SendTo(member string, out message.Event) error {
+func (s *Set) SendTo(ctx context.Context, member string, out message.Event) error {
+	ctx = span.Extend(ctx, "member.SendTo")
+
+	logger.Debug(ctx, "Sending message", "to", member, "type", out.Type.String())
 	v, ok := s.members.Load(member)
 	if !ok {
 		return ErrNotFound
