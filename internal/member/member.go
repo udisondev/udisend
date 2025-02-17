@@ -110,14 +110,14 @@ func (m *TCP) Close(cause string) {
 func (m *TCP) Listen(ctx context.Context) <-chan message.Income {
 	out := make(chan message.Income)
 
-	go func() {
+	go func(conn *websocket.Conn) {
 		defer close(out)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				_, in, err := m.conn.ReadMessage()
+				_, in, err := conn.ReadMessage()
 				logger.Debug(ctx, "Read bytes", "raw", string(in))
 				if err != nil {
 					out <- message.Income{
@@ -135,7 +135,7 @@ func (m *TCP) Listen(ctx context.Context) <-chan message.Income {
 				}
 			}
 		}
-	}()
+	}(m.conn)
 
 	return out
 }
