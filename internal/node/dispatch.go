@@ -8,6 +8,7 @@ import (
 	"time"
 	"udisend/internal/message"
 	"udisend/internal/schedule"
+	"udisend/pkg/check/logger"
 	"udisend/pkg/crypt"
 	"udisend/pkg/slice"
 	"udisend/pkg/span"
@@ -15,11 +16,14 @@ import (
 
 func (n *Node) Dispatch(ctx context.Context, in message.Income) {
 	ctx = span.Extend(ctx, "node.Dispatch")
-	log.Printf("Received message from=%s, type=%s, payload=%s", in.From, in.Event.Type.String(), string(in.Event.Payload))
+	logger.Debug(ctx, "Received message", "from", in.From, "type", in.Event.Type.String(), "payload", string(in.Event.Payload))
 
 	n.React(in)
 	bts := slice.SplitBy(in.Event.Payload, ',')
 	switch in.Event.Type {
+	case message.InteractionFailed: {
+		n.members.DisconnectiWithCause(in.From, "error reading")
+	}
 	case message.NewConnection:
 		n.members.ConnectWithOther(in.From)
 	case message.ProvideConnectionSign:

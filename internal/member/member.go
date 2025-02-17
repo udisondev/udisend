@@ -203,10 +203,10 @@ func (s *Set) Broadcast(out message.Event) {
 	})
 }
 
-func (s *Set) DisconnectiWithCause(member string, cause error) {
+func (s *Set) DisconnectiWithCause(member string, cause string) {
 	if v, ok := s.members.Load(member); ok {
 		m := v.(Member)
-		m.Disconnect(cause.Error())
+		m.Disconnect(cause)
 	}
 }
 
