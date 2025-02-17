@@ -85,7 +85,7 @@ func (n *Node) Dispatch(ctx context.Context, in message.Income) {
 		n.mu.Unlock()
 
 		schedule.After(connectionCtx, time.Minute*5, func() {
-			n.members.DisconnectiWithCause(string(bts[0]), fmt.Errorf("connection with '%s' has not established", in.From))
+			n.members.DisconnectiWithCause(string(bts[0]), fmt.Sprintf("connection with '%s' has not established", in.From))
 		})
 	case message.MakeOffer:
 		n.createOfferFor(ctx, string(bts[0]), bts[1])
