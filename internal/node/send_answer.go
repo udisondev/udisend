@@ -50,7 +50,10 @@ func (n *Node) answerSignal(ctx context.Context, m message.Event) {
 		n.peerConnections[from] = pc
 		n.setupPCHandlers(ctx, pc, from, func() {
 			logger.Debug(ctx, "Sending connection conformation", "to", from)
-			n.members.SendToTheHead(message.Event{Type: message.ConnectionEstablished, Payload: bts[0]})
+			err := n.members.SendToTheHead(message.Event{Type: message.ConnectionEstablished, Payload: bts[0]})
+			if err != nil {
+				logger.Error(ctx, "Error sending message for head", "type", message.ConnectionEstablished)
+			}
 		})
 	}
 	pc := n.peerConnections[from]
@@ -85,8 +88,11 @@ func (n *Node) answerSignal(ctx context.Context, m message.Event) {
 	iam := []byte(n.config.MemberID)
 	localSdp := []byte(pc.LocalDescription().SDP)
 	payload := slice.ConcatWithDel(',', bts[0], iam, localSdp)
-	n.members.SendToTheHead(message.Event{
+	err = n.members.SendToTheHead(message.Event{
 		Type:    message.SendAsnwer,
 		Payload: payload,
 	})
+	if err != nil {
+		logger.Error(ctx, "Error sending message to the head", "type", message.SendAsnwer)
+	}
 }

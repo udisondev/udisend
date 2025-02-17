@@ -137,17 +137,22 @@ func (m *TCP) Listen(ctx context.Context) <-chan message.Income {
 	return out
 }
 
-func (s *Set) ConnectWithOther(from string) {
+func (s *Set) ConnectWithOther(ctx context.Context, from string) {
+	ctx = span.Extend(ctx, "member.ConnectWithOther")
+	
 	s.members.Range(func(key, value any) bool {
 		id, member := key.(string), value.(Member)
 		if id == from {
 			return true
 		}
 
-		member.Write(message.Event{
+		err := member.Write(message.Event{
 			Type:    message.ProvideConnectionSign,
 			Payload: []byte(from),
 		}.Marshal())
+		if err != nil {
+			logger.Error(ctx, "Error sending message", "for", member.ID(), "cause", err)
+		}
 
 		return true
 	})
@@ -183,14 +188,15 @@ func (s *Set) SendTo(ctx context.Context, member string, out message.Event) erro
 
 	err := m.Write(out.Marshal())
 	if err != nil {
+		logger.Error(ctx, "Error sending message", "for", m.ID(), "cause", err)
 		return err
 	}
 
 	return nil
 }
 
-func (s *Set) SendToTheHead(out message.Event) {
-	s.head.Write(out.Marshal())
+func (s *Set) SendToTheHead(out message.Event) error {
+	return s.head.Write(out.Marshal())
 }
 
 func (s *Set) Broadcast(out message.Event) {

@@ -17,7 +17,7 @@ func (n *Node) createOfferFor(
 	sign []byte,
 ) {
 	ctx = span.Extend(ctx, "node.createOfferFor")
-	
+
 	stunServer := "stun:stun.l.google.com:19302"
 	logger.Debug(ctx, "Init new peer connection", "stun", stunServer, "candidate", dest)
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
@@ -48,7 +48,7 @@ func (n *Node) createOfferFor(
 	n.dcMutex.Unlock()
 	dc.OnOpen(func() {
 		logger.Debug(ctx, "DataChannel is opened", "with", dest)
-		
+
 		mCtx, disconnect := context.WithCancel(ctx)
 		m := member.NewICE(dest, pc, dc, disconnect)
 		callback := n.members.Add(&m, false)
@@ -88,8 +88,11 @@ func (n *Node) createOfferFor(
 	connectWith := []byte(dest)
 	sdp := []byte(pc.LocalDescription().SDP)
 	payload := slice.ConcatWithDel(',', connectWith, iam, sign, sdp)
-	n.members.SendToTheHead(message.Event{
+	err = n.members.SendToTheHead(message.Event{
 		Type:    message.SendOffer,
 		Payload: payload,
 	})
+	if err != nil {
+		logger.Error(ctx, "Error sending message to the head", "type", message.SendOffer)
+	}
 }

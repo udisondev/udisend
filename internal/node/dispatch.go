@@ -34,7 +34,7 @@ func (n *Node) Dispatch(ctx context.Context, in message.Income) {
 		n.members.DisconnectiWithCause(in.From, "error reading")
 	}
 	case message.NewConnection:
-		n.members.ConnectWithOther(in.From)
+		n.members.ConnectWithOther(ctx, in.From)
 	case message.ProvideConnectionSign:
 		connectWith := string(in.Event.Payload)
 		sign, _ := crypt.GenerateConnectionSign(64)
