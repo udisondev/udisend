@@ -21,7 +21,12 @@ func Extend(ctx context.Context, span string) context.Context {
 }
 
 func Extract(ctx context.Context) string {
-	span := ctx.Value(Span).(string)
+	val := ctx.Value(Span)
+	if val == nil {
+		return ""
+	}
+
+	span := val.(string)
 	if span == "" {
 		return ""
 	}
