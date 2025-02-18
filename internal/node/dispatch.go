@@ -1,7 +1,6 @@
 package node
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -24,54 +23,60 @@ func (n *Node) Dispatch(ctx context.Context, in message.Income) {
 		"type",
 		in.Event.Type.String(),
 		"payload",
-		string(in.Event.Payload),
+		in.Event.Text,
 	)
 
+	inValues := in.Event.SplitText()
 	n.React(in)
-	bts := slice.SplitBy(in.Event.Payload, ',')
 	switch in.Event.Type {
-	case message.InteractionFailed: {
-		n.members.DisconnectiWithCause(in.From, "error reading")
-	}
+	case message.InteractionFailed:
+		{
+			n.members.DisconnectiWithCause(in.From, "error reading")
+		}
 	case message.NewConnection:
 		n.members.ConnectWithOther(ctx, in.From)
 	case message.ProvideConnectionSign:
-		connectWith := string(in.Event.Payload)
 		sign, _ := crypt.GenerateConnectionSign(64)
-		n.signMap[connectWith] = sign
+		n.signMap[inValues[0]] = sign
 
 		connectionCtx, connectionDone := context.WithCancel(context.Background())
 		n.mu.Lock()
 		n.reacts = append(n.reacts, func(i message.Income) bool {
-			bts := slice.SplitBy(i.Event.Payload, ',')
-			from := string(bts[0])
-			if from != connectWith {
+			values := i.Event.SplitText()
+			if inValues[0] != values[0] {
 				return false
 			}
 
-			if i.Event.Type != message.AnswerOffer {
+			if i.Event.Type != message.OfferAnswered {
 				return false
 			}
 
-			bytes.Compare(i.Event.Payload, in.Event.Payload)
 			connectionDone()
+
 			return true
 		})
 		n.mu.Unlock()
 
 		schedule.After(connectionCtx, time.Minute*5, func() {
-			delete(n.signMap, connectWith)
+			delete(n.signMap, inValues[0])
 		})
 
-		n.members.SendTo(ctx, in.From, message.Event{
-			Type:    message.ConnectionSignProvided,
-			Payload: slice.ConcatWithDel(',', in.Event.Payload, sign),
-		})
+		n.members.SendTo(
+			ctx,
+			in.From,
+			message.NewEvent(message.ConnectionSignProvided).
+				AddText(inValues[0]).
+				AddText(sign),
+		)
+
 	case message.ConnectionSignProvided:
-		n.members.SendTo(ctx, string(bts[0]), message.Event{
-			Type:    message.MakeOffer,
-			Payload: slice.ConcatWithDel(',', []byte(in.From), bts[1]),
-		})
+		n.members.SendTo(
+			ctx,
+			inValues[0],
+			message.NewEvent(message.MakeOffer).
+				AddText(in.From).
+				AddText(inValues[1]),
+		)
 
 		connectionCtx, connectionDone := context.WithCancel(context.Background())
 		n.mu.Lock()
@@ -84,7 +89,9 @@ func (n *Node) Dispatch(ctx context.Context, in message.Income) {
 				return false
 			}
 
-			if bytes.Compare(i.Event.Payload, in.Event.Payload) != 0 {
+			values := i.Event.SplitText()
+
+			if inValues[0] != values[0] {
 				return false
 			}
 
@@ -95,28 +102,32 @@ func (n *Node) Dispatch(ctx context.Context, in message.Income) {
 
 		schedule.After(connectionCtx, time.Minute*5, func() {
 			n.members.DisconnectiWithCause(
-				string(bts[0]),
+				inValues[0],
 				fmt.Sprintf("connection with '%s' has not established", in.From),
 			)
 		})
 	case message.MakeOffer:
-		n.createOfferFor(ctx, string(bts[0]), bts[1])
+		n.createOfferFor(ctx, inValues[0], inValues[1])
 	case message.SendOffer:
-		n.members.SendTo(ctx, string(bts[0]), message.Event{
-			Type:    message.AnswerOffer,
-			Payload: slice.ConcatWithDel(',', bts[1:]...),
-		})
+		n.members.SendTo(
+			ctx,
+			inValues[0],
+			message.NewEvent(message.AnswerOffer).
+				AddText(inValues[1:]...),
+		)
 	case message.AnswerOffer:
 		n.answerSignal(ctx, in.Event)
 	case message.SendAsnwer:
-		n.members.SendTo(ctx, string(bts[0]), message.Event{
-			Type:    message.OfferAnswered,
-			Payload: slice.ConcatWithDel(',', bts[1:]...),
-		})
+		n.members.SendTo(
+			ctx,
+			inValues[0],
+			message.NewEvent(message.OfferAnswered).
+				AddText(inValues[1:]...),
+		)
 	case message.OfferAnswered:
-		n.handleAnswer(ctx, string(bts[0]), string(bts[1]))
+		n.handleAnswer(ctx, inValues[0], inValues[1])
 	case message.ForYou:
-		log.Printf("%s: %s\n", in.From, string(in.Event.Payload))
+		log.Printf("%s: %s\n", in.From, string(in.Event.Text))
 	}
 }
 

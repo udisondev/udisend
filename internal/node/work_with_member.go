@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"net/http"
-	"slices"
 	"udisend/internal/member"
 	"udisend/internal/message"
 	"udisend/pkg/check"
@@ -29,7 +28,12 @@ func (n *Node) WorkWithMember(
 			log.Println("Upgrade error:", err)
 			return
 		}
-		err = conn.WriteMessage(websocket.BinaryMessage, slices.Concat([]byte{message.HeadMemberID}, []byte(n.config.MemberID)))
+		err = conn.WriteMessage(
+			websocket.BinaryMessage,
+			message.NewEvent(message.HeadMemberID).
+				AddText(n.config.MemberID).
+				Marshal(),
+		)
 		if err != nil {
 			log.Printf("Error sending my memberID to member=%s", memberID)
 			return

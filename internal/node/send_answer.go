@@ -1,11 +1,9 @@
 package node
 
 import (
-	"bytes"
 	"context"
 	"udisend/internal/message"
 	"udisend/pkg/check/logger"
-	"udisend/pkg/slice"
 	"udisend/pkg/span"
 
 	"github.com/pion/webrtc/v4"
@@ -15,7 +13,7 @@ func (n *Node) answerSignal(ctx context.Context, m message.Event) {
 	ctx = span.Extend(ctx, "node.answerSignal")
 	logger.Debug(ctx, "Answering signal...")
 
-	bts := slice.SplitBy(m.Payload, ',')
+	bts := m.SplitText()
 	from := string(bts[0])
 	givenSign := bts[1]
 	remoteSdp := string(bts[2])
@@ -23,8 +21,12 @@ func (n *Node) answerSignal(ctx context.Context, m message.Event) {
 	logger.Debug(ctx, "Offer received", "from", from, "sdp", remoteSdp)
 
 	actualSign, ok := n.signMap[from]
+	if !ok {
+		return
+	}
+
 	logger.Debug(ctx, "Compare sign", "given", givenSign, "actualSign", actualSign)
-	if !ok || bytes.Compare(givenSign, actualSign) != 0 {
+	if givenSign != actualSign {
 		return
 	}
 
@@ -50,7 +52,7 @@ func (n *Node) answerSignal(ctx context.Context, m message.Event) {
 		n.peerConnections[from] = pc
 		n.setupPCHandlers(ctx, pc, from, func() {
 			logger.Debug(ctx, "Sending connection conformation", "to", from)
-			err := n.members.SendToTheHead(message.Event{Type: message.ConnectionEstablished, Payload: bts[0]})
+			err := n.members.SendToTheHead(message.Event{Type: message.ConnectionEstablished, Text: bts[0]})
 			if err != nil {
 				logger.Error(ctx, "Error sending message for head", "type", message.ConnectionEstablished)
 			}
@@ -85,13 +87,11 @@ func (n *Node) answerSignal(ctx context.Context, m message.Event) {
 	<-webrtc.GatheringCompletePromise(pc)
 	logger.Debug(ctx, "Gathering completed", "candidate", from)
 
-	iam := []byte(n.config.MemberID)
 	localSdp := []byte(pc.LocalDescription().SDP)
-	payload := slice.ConcatWithDel(',', bts[0], iam, localSdp)
-	err = n.members.SendToTheHead(message.Event{
-		Type:    message.SendAsnwer,
-		Payload: payload,
-	})
+	err = n.members.SendToTheHead(
+		message.NewEvent(message.SendAsnwer).
+			AddText(bts[0], n.config.MemberID, string(localSdp)),
+	)
 	if err != nil {
 		logger.Error(ctx, "Error sending message to the head", "type", message.SendAsnwer)
 	}

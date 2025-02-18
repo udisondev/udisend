@@ -52,12 +52,12 @@ func (m *ICE) ID() string {
 }
 
 func (m *ICE) Write(b []byte) error {
-	return m.dc.Send(b)
+	return m.dc.SendText(string(b))
 }
 
 func (m *ICE) Close(cause string) {
 	m.disconnect()
-	m.Write(message.Event{Type: message.Disconnected, Payload: []byte(cause)}.Marshal())
+	m.Write(message.Event{Type: message.Disconnected, Text: cause}.Marshal())
 	m.pc.Close()
 	m.dc.Close()
 }
@@ -71,12 +71,15 @@ func (m *ICE) Listen(ctx context.Context) <-chan message.Income {
 	}()
 
 	m.dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		e, err := message.ParseEvent(string(msg.Data))
+		if err != nil {
+			logger.Error(ctx, "Error parse event", "rawString", string(msg.Data))
+			return
+		}
+
 		out <- message.Income{
-			From: m.ID(),
-			Event: message.Event{
-				Type:    message.Type(msg.Data[0]),
-				Payload: msg.Data[1:],
-			},
+			From:  m.ID(),
+			Event: e,
 		}
 	})
 
@@ -98,12 +101,12 @@ func (m *TCP) ID() string {
 func (m *TCP) Write(b []byte) error {
 	m.wrmu.Lock()
 	defer m.wrmu.Unlock()
-	return m.conn.WriteMessage(websocket.BinaryMessage, b)
+	return m.conn.WriteMessage(websocket.TextMessage, b)
 }
 
 func (m *TCP) Close(cause string) {
 	m.disconnect()
-	m.Write(message.Event{Type: message.Disconnected, Payload: []byte(cause)}.Marshal())
+	m.Write(message.Event{Type: message.Disconnected, Text: cause}.Marshal())
 	m.conn.Close()
 }
 
@@ -117,21 +120,26 @@ func (m *TCP) Listen(ctx context.Context) <-chan message.Income {
 			case <-ctx.Done():
 				return
 			default:
-				_, in, err := conn.ReadMessage()
-				logger.Debug(ctx, "Read bytes", "raw", string(in))
+				mt, in, err := conn.ReadMessage()
+				logger.Debug(ctx, "Read bytes", "raw", string(in), "messageType", mt)
 				if err != nil {
 					out <- message.Income{
 						From: m.ID(),
 						Event: message.Event{
-							Type:    message.InteractionFailed,
-							Payload: []byte(err.Error()),
+							Type: message.InteractionFailed,
+							Text: err.Error(),
 						},
 					}
 					return
 				}
+				e, err := message.ParseEvent(string(in))
+				if err != nil {
+					logger.Error(ctx, "Error parsing event", "raw", string(in), "messageType", mt)
+					continue
+				}
 				out <- message.Income{
 					From:  m.id,
-					Event: message.Event{Type: message.Type(in[0]), Payload: in[1:]},
+					Event: e,
 				}
 			}
 		}
@@ -150,8 +158,8 @@ func (s *Set) ConnectWithOther(ctx context.Context, from string) {
 		}
 
 		err := member.Write(message.Event{
-			Type:    message.ProvideConnectionSign,
-			Payload: []byte(from),
+			Type: message.ProvideConnectionSign,
+			Text: from,
 		}.Marshal())
 		if err != nil {
 			logger.Error(ctx, "Error sending message", "for", member.ID(), "cause", err)

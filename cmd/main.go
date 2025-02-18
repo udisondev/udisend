@@ -90,8 +90,8 @@ func main() {
 			fmt.Print("\033[1A\033[2K")
 			fmt.Printf("You for %s: %s\n", recepient, text[del+1:])
 			input <- message.Outcome{
-				To:      recepient,
-				Content: []byte(text[del+1:]),
+				To:   recepient,
+				Text: text[del+1:],
 			}
 		}
 	}()

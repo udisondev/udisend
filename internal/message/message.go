@@ -1,16 +1,16 @@
+//go:generate go-enum --marshal --noprefix
 package message
 
 import (
 	"context"
-	"fmt"
-	"slices"
+	"strings"
 	"udisend/pkg/span"
 )
 
 type (
 	Event struct {
-		Type    Type
-		Payload []byte
+		Type Type
+		Text string
 	}
 
 	ConnectionSign struct {
@@ -27,67 +27,70 @@ type (
 	}
 
 	Outcome struct {
-		To      string
-		Content []byte
+		To   string
+		Text string
 	}
 )
 
-type Type uint8
-
-const (
-	ProvideConnectionSign  Type = 0x00
-	ConnectionSignProvided      = 0x01
-	MakeOffer                   = 0x02
-	SendOffer                   = 0x03
-	AnswerOffer                 = 0x04
-	SendAsnwer                  = 0x05
-	OfferAnswered               = 0x06
-	ConnectionEstablished       = 0x09
-	ErrReadMessage              = 0x0A
-	Disconnected                = 0x0B
-	IamShotdown                 = 0x0C
-	HeadMemberID                = 0x0D
-	ForYou                      = 0x0E
-	NewConnection               = 0x0F
-	InteractionFailed           = 0x10
-)
-
-func (t Type) String() string {
-	switch t {
-	case ProvideConnectionSign:
-		return "ConnectionSignRequested"
-	case ConnectionSignProvided:
-		return "ConnectionSignProvided"
-	case MakeOffer:
-		return "MakeOffer"
-	case SendOffer:
-		return "SendOffer"
-	case AnswerOffer:
-		return "AnswerOffer"
-	case SendAsnwer:
-		return "SendAsnwer"
-	case OfferAnswered:
-		return "OfferAnswered"
-	case ConnectionEstablished:
-		return "ConnectionEstablished"
-	case ErrReadMessage:
-		return "ErrReadMessage"
-	case Disconnected:
-		return "Disconnected"
-	case IamShotdown:
-		return "IamShotdown"
-	case HeadMemberID:
-		return "HeadMemberID"
-	case ForYou:
-		return "ForYou"
-	case NewConnection:
-		return "NewConnection"
-	case InteractionFailed:
-		return "InteractionFailed"
-	default:
-		return fmt.Sprintf("Type(%d)", t)
-	}
+func NewEvent(t Type) Event {
+	return Event{Type: t}
 }
+
+func (e Event) String() string {
+	return strings.Join([]string{e.Type.String(), e.Text}, "|")
+}
+
+func (e Event) Marshal() []byte {
+	return []byte(e.String())
+}
+
+func (e Event) SplitText() []string {
+	return strings.Split(e.Text, "|")
+}
+
+func (e Event) AddText(parts ...string) Event {
+	joined := strings.Join(parts, "|")
+	if e.Text != "" {
+		e.Text = e.Text + "|" + joined
+	} else {
+		e.Text = joined
+	}
+
+	return e
+}
+
+func ParseEvent(s string) (Event, error) {
+	arr := strings.Split(s, "|")
+	t, err := ParseType(arr[0])
+	if err != nil {
+		return Event{}, err
+	}
+	return Event{
+		Type: t,
+		Text: arr[1],
+	}, nil
+}
+
+// ENUM(
+//
+//	ProvideConnectionSign
+//	ConnectionSignProvide
+//	MakeOffer
+//	SendOffer
+//	AnswerOffer
+//	SendAsnwer
+//	OfferAnswered
+//	ConnectionEstablished
+//	ErrReadMessage
+//	Disconnected
+//	IamShotdown
+//	HeadMemberID
+//	ForYou
+//	NewConnection
+//	InteractionFailed
+//
+// )
+type Type string
 
 func Inbox(ctx context.Context, income <-chan Income, dispatcher func(ctx context.Context, in Income)) {
 	ctx = span.Extend(ctx, "node.Inbox")
@@ -95,8 +98,4 @@ func Inbox(ctx context.Context, income <-chan Income, dispatcher func(ctx contex
 	for in := range income {
 		dispatcher(ctx, in)
 	}
-}
-
-func (e Event) Marshal() []byte {
-	return slices.Concat([]byte{byte(e.Type)}, e.Payload)
 }

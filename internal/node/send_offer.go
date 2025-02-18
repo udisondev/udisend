@@ -5,7 +5,6 @@ import (
 	"udisend/internal/member"
 	"udisend/internal/message"
 	"udisend/pkg/check/logger"
-	"udisend/pkg/slice"
 	"udisend/pkg/span"
 
 	"github.com/pion/webrtc/v4"
@@ -14,7 +13,7 @@ import (
 func (n *Node) createOfferFor(
 	ctx context.Context,
 	dest string,
-	sign []byte,
+	sign string,
 ) {
 	ctx = span.Extend(ctx, "node.createOfferFor")
 
@@ -84,14 +83,10 @@ func (n *Node) createOfferFor(
 	<-webrtc.GatheringCompletePromise(pc)
 	logger.Debug(ctx, "Gathering completed", "candidate", dest)
 
-	iam := []byte(n.config.MemberID)
-	connectWith := []byte(dest)
-	sdp := []byte(pc.LocalDescription().SDP)
-	payload := slice.ConcatWithDel(',', connectWith, iam, sign, sdp)
-	err = n.members.SendToTheHead(message.Event{
-		Type:    message.SendOffer,
-		Payload: payload,
-	})
+	err = n.members.SendToTheHead(
+		message.NewEvent(message.SendOffer).
+			AddText(dest, n.config.MemberID, sign, pc.LocalDescription().SDP),
+	)
 	if err != nil {
 		logger.Error(ctx, "Error sending message to the head", "type", message.SendOffer)
 	}

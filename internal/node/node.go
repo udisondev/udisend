@@ -29,7 +29,7 @@ type Node struct {
 	dataChannels    map[string]*webrtc.DataChannel
 	dcMutex         sync.Mutex
 	income          chan message.Income
-	signMap         map[string][]byte
+	signMap         map[string]string
 	ctx             context.Context
 }
 
@@ -46,7 +46,7 @@ func New(ctx context.Context, cfg config.Config) *Node {
 		members:         members,
 		peerConnections: map[string]*webrtc.PeerConnection{},
 		dataChannels:    map[string]*webrtc.DataChannel{},
-		signMap:         map[string][]byte{},
+		signMap:         map[string]string{},
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -76,8 +76,8 @@ func (n *Node) ListenMe(input <-chan message.Outcome) {
 
 	for in := range input {
 		err := n.members.SendTo(ctx, in.To, message.Event{
-			Type:    message.ForYou,
-			Payload: in.Content,
+			Type: message.ForYou,
+			Text: in.Text,
 		})
 		if errors.Is(err, member.ErrNotFound) {
 			fmt.Printf("Пользователь '%s' не найден\n", in.To)

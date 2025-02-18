@@ -14,10 +14,11 @@ func Sicn(message, secret string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func GenerateConnectionSign(n int) ([]byte, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return nil, err
-	}
-	return b, nil
+func GenerateConnectionSign(n int) (string, error) {
+    b := make([]byte, n)
+    if _, err := rand.Read(b); err != nil {
+        return "", err
+    }
+    return string(b), nil
 }
+
