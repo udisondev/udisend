@@ -50,7 +50,7 @@ waitMemberID:
 				continue
 			}
 
-			memberID = string(resp[1:])
+			memberID = e.Text
 			break waitMemberID
 		}
 	}
@@ -62,10 +62,12 @@ waitMemberID:
 	for {
 		select {
 		case <-mCtx.Done():
+			logger.Debug(ctx, "Connection is closed", "member", memberID)
 			callback()
 			return
 		case in, ok := <-m.Listen(mCtx):
 			if !ok {
+			logger.Debug(ctx, "Not listen yet", "member", memberID)
 				callback()
 				return
 			}
