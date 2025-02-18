@@ -35,12 +35,18 @@ waitMemberID:
 			panic(errors.New("Head MemberID not received!"))
 
 		default:
-			_, resp, err := conn.ReadMessage()
+			mt, resp, err := conn.ReadMessage()
 			if err != nil {
 				panic(fmt.Errorf("Error attach to the head: %v", err))
 			}
 
-			if message.Type(resp[0]) != message.HeadMemberID {
+			e, err := message.ParseEvent(string(resp))
+			if err != nil {
+				logger.Error(ctx, "Error parsing event", "raw", string(resp), "messageType", mt)
+				continue
+			}
+
+			if e.Type != message.HeadMemberID {
 				continue
 			}
 
