@@ -86,7 +86,7 @@ func (n *Node) send(out Outcome) error {
 func (n *Node) attachHead() {
 	h := http.Header{}
 	h.Add("memberID", *memberID)
-	u := url.URL{Scheme: "ws", Host: *addr, Path: "/ws"}
+	u := url.URL{Scheme: "ws", Host: *entryPoint, Path: "/ws"}
 
 	log.Printf("connecting to %s", u.String())
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), h)
