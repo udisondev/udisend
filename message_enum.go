@@ -16,6 +16,24 @@ const (
 	ForYou MessageType = "ForYou"
 	// EntrypoinMemberID is a MessageType of type EntrypoinMemberID.
 	EntrypoinMemberID MessageType = "EntrypoinMemberID"
+	// NewConnection is a MessageType of type NewConnection.
+	NewConnection MessageType = "NewConnection"
+	// ProvideConnectionSign is a MessageType of type ProvideConnectionSign.
+	ProvideConnectionSign MessageType = "ProvideConnectionSign"
+	// SendConnectionSign is a MessageType of type SendConnectionSign.
+	SendConnectionSign MessageType = "SendConnectionSign"
+	// MakeOffer is a MessageType of type MakeOffer.
+	MakeOffer MessageType = "MakeOffer"
+	// SendOffer is a MessageType of type SendOffer.
+	SendOffer MessageType = "SendOffer"
+	// HandleOffer is a MessageType of type HandleOffer.
+	HandleOffer MessageType = "HandleOffer"
+	// SendAnswer is a MessageType of type SendAnswer.
+	SendAnswer MessageType = "SendAnswer"
+	// HandleAnswer is a MessageType of type HandleAnswer.
+	HandleAnswer MessageType = "HandleAnswer"
+	// ConnectionEstablished is a MessageType of type ConnectionEstablished.
+	ConnectionEstablished MessageType = "ConnectionEstablished"
 )
 
 var ErrInvalidMessageType = errors.New("not a valid MessageType")
@@ -33,8 +51,17 @@ func (x MessageType) IsValid() bool {
 }
 
 var _MessageTypeValue = map[string]MessageType{
-	"ForYou":            ForYou,
-	"EntrypoinMemberID": EntrypoinMemberID,
+	"ForYou":                ForYou,
+	"EntrypoinMemberID":     EntrypoinMemberID,
+	"NewConnection":         NewConnection,
+	"ProvideConnectionSign": ProvideConnectionSign,
+	"SendConnectionSign":    SendConnectionSign,
+	"MakeOffer":             MakeOffer,
+	"SendOffer":             SendOffer,
+	"HandleOffer":           HandleOffer,
+	"SendAnswer":            SendAnswer,
+	"HandleAnswer":          HandleAnswer,
+	"ConnectionEstablished": ConnectionEstablished,
 }
 
 // ParseMessageType attempts to convert a string to a MessageType.

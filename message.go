@@ -9,8 +9,17 @@ import (
 
 /*
 ENUM(
-ForYou,
-EntrypoinMemberID,
+	ForYou,
+	EntrypoinMemberID,
+	NewConnection,
+	ProvideConnectionSign,
+	SendConnectionSign,
+	MakeOffer,
+	SendOffer,
+	HandleOffer,
+	SendAnswer,
+	HandleAnswer,
+	ConnectionEstablished,
 )
 */
 type MessageType string 

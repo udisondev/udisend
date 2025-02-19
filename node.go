@@ -72,7 +72,7 @@ func (n *Node) dispatch(message Income) {
 	log.Println("New message", message.String())
 	switch message.Type {
 	case ForYou:
-		fmt.Printf("%s: %s", message.From, message.Text)
+		fmt.Printf("%s: %s\n", message.From, message.Text)
 	}
 }
 
@@ -103,8 +103,6 @@ func (n *Node) attachHead() {
 
 	for {
 		_, b, err := conn.ReadMessage()
-		log.Printf("received raw=%s\n", string(b))
-
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
