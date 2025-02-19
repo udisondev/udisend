@@ -5,9 +5,17 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"log"
+	"net/http"
+	"net/url"
 	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 var (
@@ -17,6 +25,9 @@ var (
 // Node maintains the set of active clients and broadcasts messages to the
 // clients.
 type Node struct {
+	memberID string
+
+	entryPoint string
 	// Registered members.
 	members sync.Map
 
@@ -28,11 +39,11 @@ type Node struct {
 
 	// Unregister requests from clients.
 	unregister chan string
-
 }
 
-func newNode() *Node {
+func newNode(memberID string) *Node {
 	return &Node{
+		memberID:   memberID,
 		inbox:      make(chan Income),
 		register:   make(chan *Member),
 		unregister: make(chan string),
@@ -69,6 +80,62 @@ func (n *Node) send(out Outcome) error {
 		return ErrMemberNotFound
 	}
 	m := v.(*Member)
-	m.send <- out.Message 
+	m.send <- out.Message
 	return nil
+}
+
+func (n *Node) AttachHead(ctx context.Context) {
+	h := http.Header{}
+	h.Add("memberID", *memberID)
+	u := url.URL{Scheme: "ws", Host: *addr, Path: "/ws"}
+
+	log.Printf("connecting to %s", u.String())
+	conn, _, err := websocket.DefaultDialer.Dial(u.String(), h)
+	if err != nil {
+		panic(err)
+	}
+
+	defer conn.Close()
+
+	var memberID string
+	conn.SetReadLimit(maxMessageSize)
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+
+waitMemberID:
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			_, b, err := conn.ReadMessage()
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					log.Printf("error: %v", err)
+				}
+				return
+			}
+			var message Message
+			b = bytes.TrimSpace(bytes.Replace(b, newline, space, -1))
+			err = message.Unmarshal(b)
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					log.Printf("error: %v", err)
+				}
+				return
+			}
+
+			if message.Type != EntrypoinMemberID {
+				continue
+			}
+
+			memberID = message.Text
+			break waitMemberID
+		}
+	}
+
+	client := &Member{id: memberID, node: n, conn: conn, send: make(chan Message, 256)}
+	client.node.register <- client
+
+	go client.writePump()
+	go client.readPump()
 }

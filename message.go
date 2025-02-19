@@ -8,7 +8,8 @@ import (
 
 /*
 ENUM(
-ForYou
+ForYou,
+EntrypoinMemberID,
 )
 */
 type MessageType string 

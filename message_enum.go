@@ -14,6 +14,8 @@ import (
 const (
 	// ForYou is a MessageType of type ForYou.
 	ForYou MessageType = "ForYou"
+	// EntrypoinMemberID is a MessageType of type EntrypoinMemberID.
+	EntrypoinMemberID MessageType = "EntrypoinMemberID"
 )
 
 var ErrInvalidMessageType = errors.New("not a valid MessageType")
@@ -31,7 +33,8 @@ func (x MessageType) IsValid() bool {
 }
 
 var _MessageTypeValue = map[string]MessageType{
-	"ForYou": ForYou,
+	"ForYou":            ForYou,
+	"EntrypoinMemberID": EntrypoinMemberID,
 }
 
 // ParseMessageType attempts to convert a string to a MessageType.
