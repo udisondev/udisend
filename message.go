@@ -1,0 +1,62 @@
+//go:generate go-enum --noprefix --marshal
+package main
+
+import (
+	"bytes"
+	"strings"
+)
+
+/*
+ENUM(
+ForYou
+)
+*/
+type MessageType string 
+
+type Income struct {
+	From string
+	Message
+}
+
+type Message struct {
+	Type MessageType
+	Text string
+}
+
+type Outcome struct {
+	To string
+	Message
+}
+
+func ParseMessage(text string) (Message, error) {
+	del := strings.Index(text, "|")
+	t, err := ParseMessageType(text[:del])
+	if err != nil {
+		return Message{}, ErrInvalidMessageType
+	}
+
+	return Message{
+		Type: t,
+		Text: text[del+1:],
+	}, nil
+}
+
+func (m *Message) Unmarshal(b []byte)  error {
+	del := bytes.Index(b, []byte{'|'})
+	err := m.Type.UnmarshalText(b[:del])
+	if err != nil {
+		return err
+	}
+	m.Text = string(b[del+1:])
+	return nil
+}
+
+func (m Message) Marshal() ([]byte, error) {
+	b, err := m.Type.MarshalText()
+	if err != nil {
+		return nil, err
+	}
+	b = append(b, '|')
+	b = append(b, []byte(m.Text)...)
+	return b, nil
+}
