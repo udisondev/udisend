@@ -109,6 +109,7 @@ func (c *Member) writePump() {
 
 			w, err := c.conn.NextWriter(websocket.TextMessage)
 			if err != nil {
+				log.Println("error receive writer", err.Error())
 				return
 			}
 			b, err := message.Marshal()
@@ -116,7 +117,10 @@ func (c *Member) writePump() {
 				log.Printf("error: %v\n", err)
 				continue
 			}
-			w.Write(b)
+			_, err = w.Write(b)
+			if err != nil {
+				log.Println("error write message", err.Error())
+			}
 
 			if err := w.Close(); err != nil {
 				return
@@ -131,6 +135,7 @@ func (c *Member) writePump() {
 }
 
 func serveWs(node *Node, w http.ResponseWriter, r *http.Request) {
+	log.Println("New connection")
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
@@ -140,8 +145,8 @@ func serveWs(node *Node, w http.ResponseWriter, r *http.Request) {
 	connectedMemberID := r.Header.Get("memberID")
 
 	if strings.TrimSpace(connectedMemberID) == "" {
-		conn.Close()
 		http.Error(w, "please provide your memberID as a header", 400)
+		conn.Close()
 		return
 	}
 
@@ -151,11 +156,15 @@ func serveWs(node *Node, w http.ResponseWriter, r *http.Request) {
 	go memeber.writePump()
 	go memeber.readPump()
 
-	node.send(Outcome{
+	err = node.send(Outcome{
 		To: connectedMemberID,
 		Message: Message{
 			Type: EntrypoinMemberID,
 			Text: node.memberID,
 		},
 	})
+
+	if err != nil {
+		log.Println("Error sending message", err.Error())
+	}
 }

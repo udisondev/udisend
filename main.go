@@ -26,6 +26,7 @@ func main() {
 	node := newNode(*memberID)
 	go node.run()
 
+	fmt.Printf("entrypoint is: %s\n", *entryPoint)
 	if *entryPoint != "" {
 		node.attachHead()
 	}
@@ -56,13 +57,16 @@ func main() {
 			recepient := text[1:del]
 			fmt.Print("\033[1A\033[2K")
 			fmt.Printf("You for %s: %s\n", recepient, text[del+1:])
-			node.send(Outcome{
+			err := node.send(Outcome{
 				To: recepient,
 				Message: Message{
 					Type: ForYou,
 					Text: text[del+1:],
 				},
 			})
+			if err != nil {
+				log.Println("Error sending message", err.Error())
+			}
 		}
 	}()
 

@@ -53,8 +53,10 @@ func (n *Node) run() {
 	for {
 		select {
 		case member := <-n.register:
+			log.Println("New member", "ID", member.id)
 			n.members.Store(member.id, member)
 		case memberID := <-n.unregister:
+			log.Println("Member disconnected", "ID", memberID)
 			if v, ok := n.members.Load(memberID); ok {
 				m := v.(*Member)
 				n.members.Delete(memberID)
@@ -67,6 +69,7 @@ func (n *Node) run() {
 }
 
 func (n *Node) dispatch(message Income) {
+	log.Println("New message", message.String())
 	switch message.Type {
 	case ForYou:
 		fmt.Printf("%s: %s", message.From, message.Text)
@@ -102,6 +105,8 @@ func (n *Node) attachHead() {
 
 	for {
 		_, b, err := conn.ReadMessage()
+		log.Printf("received raw=%s\n", string(b))
+
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)

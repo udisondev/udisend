@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 )
 
@@ -27,6 +28,10 @@ type Message struct {
 type Outcome struct {
 	To string
 	Message
+}
+
+func (i Income) String() string {
+	return fmt.Sprintf("From: %s, Type: %s, Text: %s", i.From, i.Type.String(), i.Text)
 }
 
 func ParseMessage(text string) (Message, error) {
