@@ -9,6 +9,7 @@ import (
 
 /*
 ENUM(
+
 	ForYou,
 	EntrypoinMemberID,
 	NewConnection,
@@ -20,9 +21,10 @@ ENUM(
 	SendAnswer,
 	HandleAnswer,
 	ConnectionEstablished,
+
 )
 */
-type MessageType string 
+type MessageType string
 
 type Income struct {
 	From string
@@ -37,6 +39,19 @@ type Message struct {
 type Outcome struct {
 	To string
 	Message
+}
+
+type ConnectionSign struct {
+	From, To, Sign string
+}
+
+func ParseConnectionSign(text string) ConnectionSign {
+	parts := strings.Split(text, "|")
+	return ConnectionSign{
+		From: parts[0],
+		To:  parts[1],
+		Sign: parts[2],
+	}
 }
 
 func (i Income) String() string {
@@ -56,7 +71,7 @@ func ParseMessage(text string) (Message, error) {
 	}, nil
 }
 
-func (m *Message) Unmarshal(b []byte)  error {
+func (m *Message) Unmarshal(b []byte) error {
 	del := bytes.Index(b, []byte{'|'})
 	err := m.Type.UnmarshalText(b[:del])
 	if err != nil {
