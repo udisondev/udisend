@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-var addr = flag.String("addr", ":8080", "http service address")
+var addr = flag.String("addr", ":8000", "http service address")
 var memberID = flag.String("member_id", "", "your memberID")
 var entryPoint = flag.String("entry_point", "", "chat entrypoint")
 
@@ -26,7 +26,9 @@ func main() {
 	node := newNode(*memberID)
 	go node.run()
 
-	node.attachHead()
+	if *entryPoint != "" {
+		node.attachHead()
+	}
 
 	keyboard := bufio.NewScanner(os.Stdin)
 	fmt.Println("Чтобы отправить личное сообщение введите: /<recepient> ваше сообщение")
