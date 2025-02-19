@@ -97,8 +97,6 @@ func (n *Node) attachHead() {
 		panic(err)
 	}
 
-	defer conn.Close()
-
 	var memberID string
 	conn.SetReadLimit(maxMessageSize)
 	conn.SetReadDeadline(time.Now().Add(pongWait))
