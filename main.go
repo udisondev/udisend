@@ -26,10 +26,42 @@ func main() {
 	node := newNode()
 	go node.run()
 
+	keyboard := bufio.NewScanner(os.Stdin)
+	fmt.Println("Чтобы отправить личное сообщение введите: /<recepient> ваше сообщение")
 	go func() {
-		keyboard := bufio.NewScanner(os.Stdin)
-		text := keyboard.Text()
+		for {
+			keyboard.Scan()
+			text := keyboard.Text()
+			if len(text) < 4 {
+				fmt.Println("Ваше сообщение не может быть короче 4х символов!")
+				continue
+			}
+			if !strings.HasPrefix(text, "/") {
+				fmt.Println("Ваше сообщение должно начинаться с '/'!")
+				continue
+			}
+			del := strings.Index(text, " ")
+			if del == -1 {
+				fmt.Println("После '/<recepient' должен быть пробел и ваше сообщение!")
+				continue
+			}
+			if len(text[del:]) < 2 {
+				fmt.Println("Сообщение должно быть не пустым!")
+				continue
+			}
+			recepient := text[1:del]
+			fmt.Print("\033[1A\033[2K")
+			fmt.Printf("You for %s: %s\n", recepient, text[del+1:])
+			node.send(Outcome{
+				To: recepient,
+				Message: Message{
+					Type: ForYou,
+					Text: text[del+1:],
+				},
+			})
+		}
 	}()
+
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		serveWs(node, w, r)
 	})
