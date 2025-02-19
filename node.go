@@ -55,16 +55,6 @@ func (n *Node) run() {
 		case member := <-n.register:
 			log.Println("New member", "ID", member.id)
 			n.members.Store(member.id, member)
-			err := n.send(Outcome{
-				To: member.id,
-				Message: Message{
-					Type: EntrypoinMemberID,
-					Text: n.memberID,
-				},
-			})
-			if err != nil {
-				log.Println("Error sending message", err.Error())
-			}
 		case memberID := <-n.unregister:
 			log.Println("Member disconnected", "ID", memberID)
 			if v, ok := n.members.Load(memberID); ok {
@@ -142,8 +132,8 @@ func (n *Node) attachHead() {
 	}
 
 	client := &Member{id: memberID, node: n, conn: conn, send: make(chan Message, 256)}
-	client.node.register <- client
-
 	go client.writePump()
 	go client.readPump()
+
+	client.node.register <- client
 }

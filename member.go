@@ -67,8 +67,8 @@ func (m *Member) readPump() {
 	for {
 		_, b, err := m.conn.ReadMessage()
 		if err != nil {
+			log.Printf("error: %v", err)
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
 			}
 			break
 		}
@@ -76,8 +76,8 @@ func (m *Member) readPump() {
 		b = bytes.TrimSpace(bytes.Replace(b, newline, space, -1))
 		err = message.Unmarshal(b)
 		if err != nil {
+			log.Printf("error: %v", err)
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
 			}
 			break
 		}
@@ -156,5 +156,17 @@ func serveWs(node *Node, w http.ResponseWriter, r *http.Request) {
 
 	memeber.node.register <- memeber
 
+	<-time.After(1*time.Second)
+
+	err = node.send(Outcome{
+		To: connectedMemberID,
+		Message: Message{
+			Type: EntrypoinMemberID,
+			Text: node.memberID,
+		},
+	})
+	if err != nil {
+		log.Println("Error sending message", err.Error())
+	}
 
 }
