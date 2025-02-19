@@ -151,20 +151,10 @@ func serveWs(node *Node, w http.ResponseWriter, r *http.Request) {
 	}
 
 	memeber := &Member{id: connectedMemberID, node: node, conn: conn, send: make(chan Message, 256)}
-	memeber.node.register <- memeber
-
 	go memeber.writePump()
 	go memeber.readPump()
 
-	err = node.send(Outcome{
-		To: connectedMemberID,
-		Message: Message{
-			Type: EntrypoinMemberID,
-			Text: node.memberID,
-		},
-	})
+	memeber.node.register <- memeber
 
-	if err != nil {
-		log.Println("Error sending message", err.Error())
-	}
+
 }
