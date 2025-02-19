@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -129,15 +130,32 @@ func (c *Member) writePump() {
 	}
 }
 
-func serveWs(hub *Node, w http.ResponseWriter, r *http.Request) {
+func serveWs(node *Node, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
 		return
 	}
-	client := &Member{node: hub, conn: conn, send: make(chan Message, 256)}
-	client.node.register <- client
 
-	go client.writePump()
-	go client.readPump()
+	connectedMemberID := r.Header.Get("memberID")
+
+	if strings.TrimSpace(connectedMemberID) == "" {
+		conn.Close()
+		http.Error(w, "please provide your memberID as a header", 400)
+		return
+	}
+
+	memeber := &Member{id: connectedMemberID, node: node, conn: conn, send: make(chan Message, 256)}
+	memeber.node.register <- memeber
+
+	go memeber.writePump()
+	go memeber.readPump()
+
+	node.send(Outcome{
+		To: connectedMemberID,
+		Message: Message{
+			Type: EntrypoinMemberID,
+			Text: node.memberID,
+		},
+	})
 }
