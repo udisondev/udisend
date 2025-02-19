@@ -6,7 +6,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -84,7 +83,7 @@ func (n *Node) send(out Outcome) error {
 	return nil
 }
 
-func (n *Node) AttachHead(ctx context.Context) {
+func (n *Node) attachHead() {
 	h := http.Header{}
 	h.Add("memberID", *memberID)
 	u := url.URL{Scheme: "ws", Host: *addr, Path: "/ws"}
@@ -101,36 +100,30 @@ func (n *Node) AttachHead(ctx context.Context) {
 	conn.SetReadLimit(maxMessageSize)
 	conn.SetReadDeadline(time.Now().Add(pongWait))
 
-waitMemberID:
 	for {
-		select {
-		case <-ctx.Done():
+		_, b, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("error: %v", err)
+			}
 			return
-		default:
-			_, b, err := conn.ReadMessage()
-			if err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					log.Printf("error: %v", err)
-				}
-				return
-			}
-			var message Message
-			b = bytes.TrimSpace(bytes.Replace(b, newline, space, -1))
-			err = message.Unmarshal(b)
-			if err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					log.Printf("error: %v", err)
-				}
-				return
-			}
-
-			if message.Type != EntrypoinMemberID {
-				continue
-			}
-
-			memberID = message.Text
-			break waitMemberID
 		}
+		var message Message
+		b = bytes.TrimSpace(bytes.Replace(b, newline, space, -1))
+		err = message.Unmarshal(b)
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("error: %v", err)
+			}
+			return
+		}
+
+		if message.Type != EntrypoinMemberID {
+			continue
+		}
+
+		memberID = message.Text
+		break
 	}
 
 	client := &Member{id: memberID, node: n, conn: conn, send: make(chan Message, 256)}

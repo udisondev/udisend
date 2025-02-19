@@ -23,8 +23,10 @@ func main() {
 
 	fmt.Printf("Wellcome %s!\n", *memberID)
 
-	node := newNode()
+	node := newNode(*memberID)
 	go node.run()
+
+	node.attachHead()
 
 	keyboard := bufio.NewScanner(os.Stdin)
 	fmt.Println("Чтобы отправить личное сообщение введите: /<recepient> ваше сообщение")
