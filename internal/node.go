@@ -10,8 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"udisend/internal/message"
+
+	"github.com/gorilla/websocket"
+	"github.com/pion/webrtc/v4"
 )
 
 var (
@@ -30,19 +32,23 @@ type Node struct {
 	inbox chan message.Income
 
 	// Register requests from the clients.
-	register chan *Member
+	register chan Member
 
 	// Unregister requests from clients.
 	unregister chan string
 
 	reacts []func(message.Income) bool
+
+	pcMutex sync.Mutex
+
+	peerConnections map[string]*webrtc.PeerConnection
 }
 
 func New(memberID string) *Node {
 	return &Node{
 		memberID:   memberID,
 		inbox:      make(chan message.Income),
-		register:   make(chan *Member),
+		register:   make(chan Member),
 		unregister: make(chan string),
 	}
 }
@@ -51,15 +57,15 @@ func (n *Node) Run() {
 	for {
 		select {
 		case member := <-n.register:
-			log.Println("New member", "ID", member.id)
-			n.members.Store(member.id, member)
-		n.inbox <- message.Income{
-				From: member.id,
+			log.Println("New member", "ID", member.ID())
+			n.members.Store(member.ID(), member)
+			n.inbox <- message.Income{
+				From: member.ID(),
 			}
 		case memberID := <-n.unregister:
 			log.Println("Member disconnected", "ID", memberID)
 			if v, ok := n.members.Load(memberID); ok {
-				m := v.(*Member)
+				m := v.(*TCPMember)
 				n.members.Delete(memberID)
 				close(m.send)
 			}
@@ -74,7 +80,7 @@ func (n *Node) Send(out message.Outcome) error {
 	if !ok {
 		return fmt.Errorf("memberID=%s: %w", out.To, ErrMemberNotFound)
 	}
-	m := v.(*Member)
+	m := v.(*TCPMember)
 	m.send <- out.Message
 	return nil
 }
@@ -120,9 +126,18 @@ func (n *Node) AttachHead(entrypoint string) {
 		break
 	}
 
-	client := &Member{id: memberID, node: n, conn: conn, send: make(chan message.Message, 256)}
-	go client.writePump()
-	go client.readPump()
+	memb := &TCPMember{
+		id: memberID,
+		disconnectSignal: func() {
+			n.unregister <- memberID
+		},
+		conn:  conn,
+		inbox: make(chan<- message.Income),
+		send:  make(chan message.Message, 256),
+	}
 
-	client.node.register <- client
+	go memb.readPump()
+	go memb.writePump()
+
+	n.register <- memb
 }

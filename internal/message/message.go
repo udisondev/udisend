@@ -42,15 +42,31 @@ type Outcome struct {
 }
 
 type ConnectionSign struct {
-	From, To, Sign string
+	From, To, Sign, Stun string
+}
+
+type Offer struct {
+	To, From, Sign, SDP string
+}
+
+func ParseOffer(text string) Offer {
+	parts := strings.Split(text, "|")
+	return Offer{
+		To:   parts[0],
+		From: parts[1],
+		Sign: parts[2],
+		SDP:  parts[3],
+	}
+
 }
 
 func ParseConnectionSign(text string) ConnectionSign {
 	parts := strings.Split(text, "|")
 	return ConnectionSign{
 		From: parts[0],
-		To:  parts[1],
+		To:   parts[1],
 		Sign: parts[2],
+		Stun: parts[3],
 	}
 }
 
