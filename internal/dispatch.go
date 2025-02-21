@@ -339,7 +339,7 @@ func (n *Node) handleOffer(in message.Income) {
 }
 
 func (n *Node) requestSignsFor(ID string) {
-	log.Panicln("Going to request connection sign for ", ID)
+	log.Println("Going to request connection sign for ", ID)
 
 	n.members.Range(func(key, value any) bool {
 		membID := key.(string)
