@@ -114,6 +114,7 @@ func (n *Node) AttachHead(entrypoint string) {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
 			}
+			conn.Close()
 			return
 		}
 		var in message.Message
@@ -123,6 +124,7 @@ func (n *Node) AttachHead(entrypoint string) {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
 			}
+			conn.Close()
 			return
 		}
 

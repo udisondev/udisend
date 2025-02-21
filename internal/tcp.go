@@ -31,8 +31,6 @@ func (m *TCPMember) readPump() {
 	defer m.Close()
 
 	m.conn.SetReadLimit(maxMessageSize)
-	m.conn.SetReadDeadline(time.Now().Add(pongWait))
-	m.conn.SetPongHandler(func(string) error { m.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
 		mt, b, err := m.conn.ReadMessage()
 		log.Println("Receive messageType", mt, "raw", string(b))
