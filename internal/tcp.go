@@ -35,7 +35,7 @@ func (m *TCPMember) readPump() {
 	m.conn.SetPongHandler(func(string) error { m.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
 		mt, b, err := m.conn.ReadMessage()
-		log.Println("Receive messageType ", mt, "raw ", string(b))
+		log.Println("Receive messageType", mt, "raw", string(b))
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
@@ -45,7 +45,7 @@ func (m *TCPMember) readPump() {
 		var in message.Message
 		b = bytes.TrimSpace(bytes.Replace(b, newline, space, -1))
 		err = in.Unmarshal(b)
-		log.Println("Unmarshalled message ", in.String())
+		log.Println("Unmarshalled message", in.String())
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
