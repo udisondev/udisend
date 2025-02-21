@@ -133,7 +133,7 @@ func ServeWs(node *Node, w http.ResponseWriter, r *http.Request) {
 			node.unregister <- connectedMemberID
 		},
 		conn:  conn,
-		inbox: make(chan<- message.Income),
+		inbox: node.inbox,
 		send:  make(chan message.Message, 256),
 	}
 
