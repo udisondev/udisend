@@ -84,6 +84,13 @@ func (n *Node) generateConnectionSign(in message.Income) {
 		return
 	}
 
+	n.signMap[in.Text] = message.ConnectionSign{
+		From: n.memberID,
+		To:   in.Text,
+		Sign: sign,
+		Stun: n.stunServer,
+	}
+
 	n.Send(message.Outcome{
 		To: in.From,
 		Message: message.Message{
