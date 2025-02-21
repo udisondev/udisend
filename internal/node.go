@@ -48,11 +48,13 @@ type Node struct {
 
 func New(memberID string) *Node {
 	return &Node{
-		memberID:   memberID,
-		inbox:      make(chan message.Income, 256),
-		register:   make(chan Member),
-		unregister: make(chan string),
-		stunServer: "stun:stun.l.google.com:19302",
+		memberID:        memberID,
+		inbox:           make(chan message.Income, 256),
+		register:        make(chan Member),
+		unregister:      make(chan string),
+		stunServer:      "stun:stun.l.google.com:19302",
+		peerConnections: make(map[string]*ICEMember),
+		signMap:         make(map[string]message.ConnectionSign),
 	}
 }
 
