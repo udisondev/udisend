@@ -33,7 +33,7 @@ func (m *TCPMember) readPump() {
 	m.conn.SetReadLimit(maxMessageSize)
 	for {
 		mt, b, err := m.conn.ReadMessage()
-		log.Println("Receive messageType", mt, "raw", string(b))
+		log.Println("Receive messageType", mt, "raw", string(b), "from", m.id)
 		if err != nil {
 			log.Println("Error reading", err.Error())
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -51,13 +51,6 @@ func (m *TCPMember) readPump() {
 		}
 
 		log.Println("Unmarshalled message", in.String())
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
-			}
-			break
-		}
-
 		if in.Type == message.Ping {
 			m.Send(message.Message{Type: message.Pong})
 			continue
@@ -86,7 +79,7 @@ func (m *TCPMember) writePump() {
 	for {
 		select {
 		case message, ok := <-m.send:
-			log.Println("Going to send ", message.Text, " to", m.id)
+			log.Println("Going to send", message.String())
 			if !ok {
 				// The hub closed the channel.
 				m.conn.WriteMessage(websocket.CloseMessage, []byte{})
