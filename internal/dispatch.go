@@ -218,7 +218,7 @@ func (n *Node) makeOffer(in message.Income) {
 			Type: message.SendOffer,
 			Text: strings.Join([]string{
 				n.memberID,
-				connSign.To,
+				connSign.From,
 				connSign.Sign,
 				connSign.Stun,
 				encode(pc.LocalDescription()),
