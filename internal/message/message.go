@@ -53,6 +53,10 @@ type Offer struct {
 	From, To, Sign, Stun, SDP string
 }
 
+func (m Message) String() string {
+	return fmt.Sprintf("Type: %s, Text: %s", m.Type.String(), m.Text)
+}
+
 func ParseAnswer(text string) Answer {
 	parts := strings.Split(text, "|")
 	return Answer{
@@ -85,7 +89,7 @@ func ParseConnectionSign(text string) ConnectionSign {
 }
 
 func (i Income) String() string {
-	return fmt.Sprintf("From: %s, Type: %s, Text: %s", i.From, i.Type.String(), i.Text)
+	return fmt.Sprintf("From: %s, Message: %s", i.From, i.Message)
 }
 
 func ParseMessage(text string) (Message, error) {

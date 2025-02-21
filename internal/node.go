@@ -73,7 +73,10 @@ func (n *Node) Run() {
 				n.members.Delete(memberID)
 				m.Close()
 			}
-		case message := <-n.inbox:
+		case message, ok := <-n.inbox:
+			if !ok {
+				return
+			}
 			n.dispatch(message)
 		}
 	}
