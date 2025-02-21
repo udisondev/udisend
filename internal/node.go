@@ -86,6 +86,7 @@ func (n *Node) Send(out message.Outcome) error {
 	}
 	m := v.(Member)
 	m.Send(out.Message)
+
 	return nil
 }
 

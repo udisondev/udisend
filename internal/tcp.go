@@ -74,6 +74,7 @@ func (c *TCPMember) writePump() {
 	for {
 		select {
 		case message, ok := <-c.send:
+			log.Println("Going to send ", message.Text, " to", c.id)
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
 				// The hub closed the channel.
