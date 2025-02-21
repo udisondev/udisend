@@ -234,14 +234,17 @@ func (n *Node) handleOffer(in message.Income) {
 
 	actual, ok := n.signMap[offer.From]
 	if !ok {
+		log.Println("Not found a sign for", offer.From)
 		return
 	}
 
 	if actual.Sign != offer.Sign {
+		log.Println("Signs are not equal", "actual", actual.Sign, "given", offer.Sign)
 		return
 	}
 
 	if offer.Stun != actual.Stun {
+		log.Println("Found different stun servers", "actual", actual.Stun, "given", offer.Stun)
 		return
 	}
 
@@ -327,6 +330,7 @@ func (n *Node) handleOffer(in message.Income) {
 		panic(err)
 	}
 
+	log.Println("SDP generated", answer.SDP)
 	<-gatherComplete
 
 	n.Send(message.Outcome{
