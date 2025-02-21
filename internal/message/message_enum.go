@@ -34,6 +34,10 @@ const (
 	HandleAnswer MessageType = "HandleAnswer"
 	// ConnectionEstablished is a MessageType of type ConnectionEstablished.
 	ConnectionEstablished MessageType = "ConnectionEstablished"
+	// Ping is a MessageType of type Ping.
+	Ping MessageType = "Ping"
+	// Pong is a MessageType of type Pong.
+	Pong MessageType = "Pong"
 )
 
 var ErrInvalidMessageType = errors.New("not a valid MessageType")
@@ -62,6 +66,8 @@ var _MessageTypeValue = map[string]MessageType{
 	"SendAnswer":             SendAnswer,
 	"HandleAnswer":           HandleAnswer,
 	"ConnectionEstablished":  ConnectionEstablished,
+	"Ping":                   Ping,
+	"Pong":                   Pong,
 }
 
 // ParseMessageType attempts to convert a string to a MessageType.

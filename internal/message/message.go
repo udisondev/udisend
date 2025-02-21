@@ -21,6 +21,8 @@ ENUM(
 	SendAnswer,
 	HandleAnswer,
 	ConnectionEstablished,
+	Ping,
+	Pong,
 
 )
 */

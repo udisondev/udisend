@@ -41,9 +41,15 @@ func (m *TCPMember) readPump() {
 			}
 			break
 		}
+
 		var in message.Message
 		b = bytes.TrimSpace(bytes.Replace(b, newline, space, -1))
 		err = in.Unmarshal(b)
+		if err != nil {
+			log.Panicln("Broken income", "memberID", m.id, "cause", err.Error())
+			continue
+		}
+
 		log.Println("Unmarshalled message", in.String())
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -51,6 +57,12 @@ func (m *TCPMember) readPump() {
 			}
 			break
 		}
+
+		if in.Type == message.Ping {
+			m.Send(message.Message{Type: message.Pong})
+			continue
+		}
+
 		m.inbox <- message.Income{From: m.id, Message: in}
 	}
 }
@@ -75,7 +87,6 @@ func (c *TCPMember) writePump() {
 		select {
 		case message, ok := <-c.send:
 			log.Println("Going to send ", message.Text, " to", c.id)
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
 				// The hub closed the channel.
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
@@ -101,10 +112,7 @@ func (c *TCPMember) writePump() {
 				return
 			}
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
+			c.Send(message.Message{Type: message.Ping})
 		}
 	}
 }
