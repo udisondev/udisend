@@ -35,6 +35,7 @@ func (m *TCPMember) readPump() {
 	m.conn.SetPongHandler(func(string) error { m.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
 		_, b, err := m.conn.ReadMessage()
+		log.Println("Receive raw ", string(b))
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
