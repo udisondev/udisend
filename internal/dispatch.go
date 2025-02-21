@@ -106,6 +106,7 @@ func (n *Node) handleAnswer(in message.Income) {
 
 	memb, ok := n.peerConnections[answer.From]
 	if !ok {
+		log.Println("Peer connection not found!")
 		return
 	}
 
