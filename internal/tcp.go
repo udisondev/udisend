@@ -46,7 +46,7 @@ func (m *TCPMember) readPump() {
 		b = bytes.TrimSpace(bytes.Replace(b, newline, space, -1))
 		err = in.Unmarshal(b)
 		if err != nil {
-			log.Panicln("Broken income", "memberID", m.id, "cause", err.Error())
+			log.Println("Broken income", "memberID", m.id, "cause", err.Error())
 			continue
 		}
 
@@ -77,23 +77,23 @@ func (m *TCPMember) Close() {
 // A goroutine running writePump is started for each connection. The
 // application ensures that there is at most one writer to a connection by
 // executing all writes from this goroutine.
-func (c *TCPMember) writePump() {
+func (m *TCPMember) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		c.conn.Close()
+		m.conn.Close()
 	}()
 	for {
 		select {
-		case message, ok := <-c.send:
-			log.Println("Going to send ", message.Text, " to", c.id)
+		case message, ok := <-m.send:
+			log.Println("Going to send ", message.Text, " to", m.id)
 			if !ok {
 				// The hub closed the channel.
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				m.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			w, err := c.conn.NextWriter(websocket.TextMessage)
+			w, err := m.conn.NextWriter(websocket.TextMessage)
 			if err != nil {
 				log.Println("error receive writer", err.Error())
 				return
@@ -112,7 +112,7 @@ func (c *TCPMember) writePump() {
 				return
 			}
 		case <-ticker.C:
-			c.Send(message.Message{Type: message.Ping})
+			m.Send(message.Message{Type: message.Ping})
 		}
 	}
 }

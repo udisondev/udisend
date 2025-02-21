@@ -113,7 +113,10 @@ func (m *Message) Unmarshal(b []byte) error {
 	if err != nil {
 		return err
 	}
-	m.Text = string(b[del+1:])
+	if del < len(b)-1 {
+		m.Text = string(b[del+1:])
+	}
+
 	return nil
 }
 
