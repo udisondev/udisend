@@ -153,6 +153,14 @@ func ServeWs(node *Node, w http.ResponseWriter, r *http.Request) {
 			Text: node.memberID,
 		},
 	})
+
+	<-time.After(1 * time.Second)
+
+	node.inbox <- message.Income{
+		From:    connectedMemberID,
+		Message: message.Message{Type: message.NewConnection},
+	}
+
 	if err != nil {
 		log.Println("Error sending message", err.Error())
 	}

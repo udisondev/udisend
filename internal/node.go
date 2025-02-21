@@ -61,10 +61,6 @@ func (n *Node) Run() {
 		select {
 		case member := <-n.register:
 			n.members.Store(member.ID(), member)
-			n.inbox <- message.Income{
-				From:    member.ID(),
-				Message: message.Message{Type: message.NewConnection},
-			}
 		case memberID := <-n.unregister:
 			log.Println("Member disconnected", "ID", memberID)
 			if v, ok := n.members.Load(memberID); ok {
