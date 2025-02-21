@@ -106,8 +106,6 @@ func (n *Node) AttachHead(entrypoint string) {
 
 	var memberID string
 	conn.SetReadLimit(maxMessageSize)
-	conn.SetReadDeadline(time.Now().Add(pongWait))
-
 	for {
 		_, b, err := conn.ReadMessage()
 		if err != nil {
