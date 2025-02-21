@@ -37,6 +37,7 @@ func (m *TCPMember) readPump() {
 		mt, b, err := m.conn.ReadMessage()
 		log.Println("Receive messageType", mt, "raw", string(b))
 		if err != nil {
+			log.Println("Error reading", err.Error())
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
 			}
