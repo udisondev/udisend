@@ -31,9 +31,9 @@ func (m *TCPMember) readPump() {
 	defer m.Close()
 
 	m.conn.SetReadLimit(maxMessageSize)
+	m.conn.SetReadDeadline(time.Now().Add(pongWait))
 	for {
-		mt, b, err := m.conn.ReadMessage()
-		log.Println("Receive messageType", mt, "raw", string(b), "from", m.id)
+		_, b, err := m.conn.ReadMessage()
 		if err != nil {
 			log.Println("Error reading", err.Error())
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -50,10 +50,13 @@ func (m *TCPMember) readPump() {
 			continue
 		}
 
-		log.Println("Unmarshalled message", in.String())
 		if in.Type == message.Ping {
 			m.Send(message.Message{Type: message.Pong})
 			continue
+		}
+
+		if in.Type == message.Pong {
+			m.conn.SetReadDeadline(time.Now().Add(pongWait))
 		}
 
 		m.inbox <- message.Income{From: m.id, Message: in}
