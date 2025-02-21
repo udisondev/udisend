@@ -13,7 +13,7 @@ ENUM(
 	ForYou,
 	EntrypoinMemberID,
 	NewConnection,
-	ProvideConnectionSign,
+	GenerateConnectionSign,
 	SendConnectionSign,
 	MakeOffer,
 	SendOffer,
@@ -41,21 +41,35 @@ type Outcome struct {
 	Message
 }
 
+type Answer struct {
+	From, To, SDP string
+}
+
 type ConnectionSign struct {
 	From, To, Sign, Stun string
 }
 
 type Offer struct {
-	To, From, Sign, SDP string
+	From, To, Sign, Stun, SDP string
+}
+
+func ParseAnswer(text string) Answer {
+	parts := strings.Split(text, "|")
+	return Answer{
+		From: parts[0],
+		To:   parts[1],
+		SDP:  parts[2],
+	}
 }
 
 func ParseOffer(text string) Offer {
 	parts := strings.Split(text, "|")
 	return Offer{
-		To:   parts[0],
-		From: parts[1],
+		From: parts[0],
+		To:   parts[1],
 		Sign: parts[2],
-		SDP:  parts[3],
+		Stun: parts[3],
+		SDP:  parts[4],
 	}
 
 }

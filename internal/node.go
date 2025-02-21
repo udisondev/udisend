@@ -13,7 +13,6 @@ import (
 	"udisend/internal/message"
 
 	"github.com/gorilla/websocket"
-	"github.com/pion/webrtc/v4"
 )
 
 var (
@@ -41,7 +40,11 @@ type Node struct {
 
 	pcMutex sync.Mutex
 
-	peerConnections map[string]*webrtc.PeerConnection
+	peerConnections map[string]*ICEMember
+
+	signMap map[string]message.ConnectionSign
+
+	stunServer string
 }
 
 func New(memberID string) *Node {
@@ -50,6 +53,7 @@ func New(memberID string) *Node {
 		inbox:      make(chan message.Income),
 		register:   make(chan Member),
 		unregister: make(chan string),
+		stunServer: "stun:stun.l.google.com:19302",
 	}
 }
 
@@ -65,9 +69,9 @@ func (n *Node) Run() {
 		case memberID := <-n.unregister:
 			log.Println("Member disconnected", "ID", memberID)
 			if v, ok := n.members.Load(memberID); ok {
-				m := v.(*TCPMember)
+				m := v.(Member)
 				n.members.Delete(memberID)
-				close(m.send)
+				m.Close()
 			}
 		case message := <-n.inbox:
 			n.dispatch(message)

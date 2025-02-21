@@ -18,8 +18,8 @@ const (
 	EntrypoinMemberID MessageType = "EntrypoinMemberID"
 	// NewConnection is a MessageType of type NewConnection.
 	NewConnection MessageType = "NewConnection"
-	// ProvideConnectionSign is a MessageType of type ProvideConnectionSign.
-	ProvideConnectionSign MessageType = "ProvideConnectionSign"
+	// GenerateConnectionSign is a MessageType of type GenerateConnectionSign.
+	GenerateConnectionSign MessageType = "GenerateConnectionSign"
 	// SendConnectionSign is a MessageType of type SendConnectionSign.
 	SendConnectionSign MessageType = "SendConnectionSign"
 	// MakeOffer is a MessageType of type MakeOffer.
@@ -51,17 +51,17 @@ func (x MessageType) IsValid() bool {
 }
 
 var _MessageTypeValue = map[string]MessageType{
-	"ForYou":                ForYou,
-	"EntrypoinMemberID":     EntrypoinMemberID,
-	"NewConnection":         NewConnection,
-	"ProvideConnectionSign": ProvideConnectionSign,
-	"SendConnectionSign":    SendConnectionSign,
-	"MakeOffer":             MakeOffer,
-	"SendOffer":             SendOffer,
-	"HandleOffer":           HandleOffer,
-	"SendAnswer":            SendAnswer,
-	"HandleAnswer":          HandleAnswer,
-	"ConnectionEstablished": ConnectionEstablished,
+	"ForYou":                 ForYou,
+	"EntrypoinMemberID":      EntrypoinMemberID,
+	"NewConnection":          NewConnection,
+	"GenerateConnectionSign": GenerateConnectionSign,
+	"SendConnectionSign":     SendConnectionSign,
+	"MakeOffer":              MakeOffer,
+	"SendOffer":              SendOffer,
+	"HandleOffer":            HandleOffer,
+	"SendAnswer":             SendAnswer,
+	"HandleAnswer":           HandleAnswer,
+	"ConnectionEstablished":  ConnectionEstablished,
 }
 
 // ParseMessageType attempts to convert a string to a MessageType.

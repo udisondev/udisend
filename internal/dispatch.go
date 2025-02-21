@@ -1,164 +1,285 @@
 package node
 
 import (
-	"bytes"
-	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"time"
 	"udisend/internal/message"
 
 	"github.com/pion/randutil"
 	"github.com/pion/webrtc/v4"
+	"golang.org/x/crypto/sha3"
 )
 
 func (n *Node) dispatch(in message.Income) {
 	log.Println("New message", in.String())
-	for _, r := range n.reacts {
-		if r(in) {
 
+	var reacted []int
+	for i, r := range n.reacts {
+		if r(in) {
+			reacted = append(reacted, i)
 		}
 	}
+
+	if len(reacted) > 0 {
+		n.reacts = dropElements(n.reacts, reacted)
+	}
+
 	switch in.Type {
 	case message.ForYou:
 		fmt.Printf("%s: %s\n", in.From, in.Text)
 	case message.NewConnection:
 		n.requestSignsFor(in.From)
+	case message.GenerateConnectionSign:
+		n.generateConnectionSign(in)
 	case message.SendConnectionSign:
-		n.handleSendConnectionSign(in)
+		connectionSign := message.ParseConnectionSign(in.Text)
+		n.Send(message.Outcome{
+			To: connectionSign.To,
+			Message: message.Message{
+				Type: message.MakeOffer,
+				Text: in.Text,
+			},
+		})
 	case message.MakeOffer:
-		n.handleMakeOffer(in)
+		n.makeOffer(in)
 	case message.SendOffer:
-		n.handleSendOffer(in)
+		offer := message.ParseOffer(in.Text)
+		n.Send(message.Outcome{
+			To: offer.To,
+			Message: message.Message{
+				Type: message.HandleOffer,
+				Text: in.Text,
+			},
+		})
 	case message.HandleOffer:
-		n.handleHandleOffer(in)
+		n.handleOffer(in)
 	case message.SendAnswer:
-		n.handleSendAswer(in)
+		answer := message.ParseAnswer(in.Text)
+		n.Send(message.Outcome{
+			To: answer.To,
+			Message: message.Message{
+				Type: message.HandleAnswer,
+				Text: in.Text,
+			},
+		})
 	case message.HandleAnswer:
-		n.handleHandleAsnwer(in)
-	case message.ConnectionEstablished:
-		n.handleConnectionEstableshed(in)
+		n.handleAnswer(in)
 	}
 }
 
-func (n *Node) handleConnectionEstableshed(in message.Income) {
-	panic("unimplemented")
+func (n *Node) generateConnectionSign(in message.Income) {
+	sign, err := genSign()
+
+	log.Println("Sign generated ", sign)
+	if err != nil {
+		return
+	}
+
+	n.Send(message.Outcome{
+		To: in.From,
+		Message: message.Message{
+			Type: message.SendConnectionSign,
+			Text: strings.Join([]string{n.memberID, in.Text, sign, n.stunServer}, "|"),
+		},
+	})
 }
 
-func (n *Node) handleHandleAsnwer(in message.Income) {
-	panic("unimplemented")
-}
+func (n *Node) handleAnswer(in message.Income) {
+	answer := message.ParseAnswer(in.Text)
+	log.Println("Going to handle answer from ", answer.From)
 
-func (n *Node) handleSendAswer(in message.Income) {
-	panic("unimplemented")
-}
-
-func (n *Node) handleHandleOffer(in message.Income) {
-	offer := message.ParseOffer(in.Text)
-	actualConnSign, ok := n.connSignMap[offer.From]
+	memb, ok := n.peerConnections[answer.From]
 	if !ok {
 		return
 	}
 
-	if actualConnSign.Sign != offer.Sign {
+	descr := webrtc.SessionDescription{}
+	decode(answer.SDP, &descr)
+	if err := memb.pc.SetRemoteDescription(descr); err != nil {
+		log.Println("Error handle answer: Error set remote description: ", err.Error())
+		memb.dc.Close()
+		memb.pc.Close()
 		return
 	}
+}
 
-	// Prepare the configuration
+func (n *Node) makeOffer(in message.Income) {
+	connSign := message.ParseConnectionSign(in.Text)
+
+	log.Println("Making offer for ", connSign.From)
+
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{
-				URLs: []string{actualConnSign.Stun},
+				URLs: []string{connSign.Stun},
 			},
 		},
 	}
 
-	// Create a new RTCPeerConnection
+	pc, err := webrtc.NewPeerConnection(config)
+	if err != nil {
+		log.Println("Error init peer connection: ", err.Error())
+		return
+	}
+
+	sendChannel, err := pc.CreateDataChannel("foo", nil)
+	if err != nil {
+		log.Println("Error create data channel: ", err)
+		pc.Close()
+		return
+	}
+
+	disconnectFn := func() {
+		n.unregister <- connSign.From
+	}
+
+	sendChannel.OnClose(func() {
+		fmt.Println("sendChannel has closed")
+		disconnectFn()
+	})
+	sendChannel.OnClose(func() {
+		fmt.Println("sendChannel is closing")
+		disconnectFn()
+	})
+	sendChannel.OnError(func(err error) {
+		fmt.Println("sendChannel error", err)
+		disconnectFn()
+	})
+	sendChannel.OnOpen(func() {
+		fmt.Println("sendChannel has opened")
+
+		candidatePair, err := pc.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
+
+		fmt.Println(candidatePair)
+		fmt.Println(err)
+	})
+	sendChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
+		n.inbox <- message.Income{
+			From: in.From,
+			Message: message.Message{
+				Type: message.ForYou,
+				Text: string(msg.Data),
+			},
+		}
+		fmt.Sprintf("Message from DataChannel %s payload %s", sendChannel.Label(), string(msg.Data))
+	})
+
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		log.Println("Error create offer: ", err)
+		sendChannel.Close()
+		pc.Close()
+		return
+	}
+
+	if err := pc.SetLocalDescription(offer); err != nil {
+		log.Println("Error set local description: ", err)
+		sendChannel.Close()
+		pc.Close()
+		return
+	}
+
+	// Add handlers for setting up the connection.
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		fmt.Sprint(state)
+	})
+
+	send := make(chan message.Message, 256)
+	go func() {
+		for out := range send {
+			sendChannel.SendText(out.Text)
+		}
+	}()
+
+	memb := ICEMember{
+		id:   connSign.From,
+		send: send,
+		dc:   sendChannel,
+		pc:   pc,
+		disconncectSignal: func() {
+			n.unregister <- connSign.From
+		},
+	}
+
+	n.peerConnections[memb.id] = &memb
+
+	n.Send(message.Outcome{
+		To: in.From,
+		Message: message.Message{
+			Type: message.SendOffer,
+			Text: strings.Join([]string{
+				n.memberID,
+				connSign.To,
+				connSign.Sign,
+				connSign.Stun,
+				encode(pc.LocalDescription()),
+			}, "|"),
+		},
+	})
+
+}
+
+func (n *Node) handleOffer(in message.Income) {
+	offer := message.ParseOffer(in.Text)
+	log.Println("Going to handle offer from ", offer.From)
+
+	actual, ok := n.signMap[offer.From]
+	if !ok {
+		return
+	}
+
+	if actual.Sign != offer.Sign {
+		return
+	}
+
+	if offer.Stun != actual.Stun {
+		return
+	}
+
+	config := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{
+				URLs: []string{n.stunServer},
+			},
+		},
+	}
+
 	peerConnection, err := webrtc.NewPeerConnection(config)
 	if err != nil {
 		panic(err)
 	}
+
 	defer func() {
-		if err := peerConnection.Close(); err != nil {
-			fmt.Printf("cannot close peerConnection: %v\n", err)
+		if cErr := peerConnection.Close(); cErr != nil {
+			fmt.Printf("cannot close peerConnection: %v\n", cErr)
 		}
 	}()
 
-		sdp := webrtc.SessionDescription{}
-		if err := json.Unmarshal([]byte(offer.SDP), &sdp); err != nil {
-			panic(err)
-		}
-
-		if err := peerConnection.SetRemoteDescription(sdp); err != nil {
-			panic(err)
-		}
-
-		// Create an answer to send to the other process
-		answer, err := peerConnection.CreateAnswer(nil)
-		if err != nil {
-			panic(err)
-		}
-
-		// Send our answer to the HTTP server listening in the other process
-		payload, err := json.Marshal(answer)
-		if err != nil {
-			panic(err)
-		}
-		resp, err := http.Post( //nolint:noctx
-			fmt.Sprintf("http://%s/sdp", *offerAddr),
-			"application/json; charset=utf-8",
-			bytes.NewReader(payload),
-		) // nolint:noctx
-		if err != nil {
-			panic(err)
-		} else if closeErr := resp.Body.Close(); closeErr != nil {
-			panic(closeErr)
-		}
-
-		// Sets the LocalDescription, and starts our UDP listeners
-		err = peerConnection.SetLocalDescription(answer)
-		if err != nil {
-			panic(err)
-		}
-
-		candidatesMux.Lock()
-		for _, c := range pendingCandidates {
-			onICECandidateErr := signalCandidate(*offerAddr, c)
-			if onICECandidateErr != nil {
-				panic(onICECandidateErr)
-			}
-		}
-		candidatesMux.Unlock()
-
-	// Set the handler for Peer connection state
-	// This will notify you when the peer has connected/disconnected
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		fmt.Printf("Peer Connection State has changed: %s\n", state.String())
 
 		if state == webrtc.PeerConnectionStateFailed {
-			// Wait until PeerConnection has had no network activity for 30 seconds or another failure.
-			// It may be reconnected using an ICE Restart.
-			// Use webrtc.PeerConnectionStateDisconnected if you are interested in detecting faster timeout.
-			// Note that the PeerConnection may come back from PeerConnectionStateDisconnected.
 			fmt.Println("Peer Connection has gone to failed exiting")
 			os.Exit(0)
 		}
 
 		if state == webrtc.PeerConnectionStateClosed {
-			// PeerConnection was explicitly closed. This usually happens from a DTLS CloseNotify
 			fmt.Println("Peer Connection has gone to closed exiting")
 			os.Exit(0)
 		}
 	})
 
-	// Register data channel creation handling
 	peerConnection.OnDataChannel(func(dataChannel *webrtc.DataChannel) {
 		fmt.Printf("New DataChannel %s %d\n", dataChannel.Label(), dataChannel.ID())
 
-		// Register channel opening handling
 		dataChannel.OnOpen(func() {
 			fmt.Printf(
 				"Data channel '%s'-'%d' open. Random messages will now be sent to any connected DataChannels every 5 seconds\n",
@@ -168,185 +289,119 @@ func (n *Node) handleHandleOffer(in message.Income) {
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
 			for range ticker.C {
-				message, sendTextErr := randutil.GenerateCryptoRandomString(
-					15, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
-				)
-				if sendTextErr != nil {
-					panic(sendTextErr)
+				message, sendErr := randutil.GenerateCryptoRandomString(15, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+				if sendErr != nil {
+					panic(sendErr)
 				}
 
-				// Send the message as text
 				fmt.Printf("Sending '%s'\n", message)
-				if sendTextErr = dataChannel.SendText(message); sendTextErr != nil {
-					panic(sendTextErr)
+				if sendErr = dataChannel.SendText(message); sendErr != nil {
+					panic(sendErr)
 				}
 			}
 		})
 
-		// Register text message handling
 		dataChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
 			fmt.Printf("Message from DataChannel '%s': '%s'\n", dataChannel.Label(), string(msg.Data))
 		})
 	})
 
-	// Start HTTP server that accepts requests from the offer process to exchange SDP and Candidates
-	// nolint: gosec
-	panic(http.ListenAndServe(*answerAddr, nil))
-}
+	sd := webrtc.SessionDescription{}
+	decode(offer.SDP, &sd)
 
-func (n *Node) handleSendOffer(in message.Income) {
-	connSign := message.ParseConnectionSign(in.Text)
-	log.Println("Init new peer connection", "stun", connSign.Stun, "candidate", connSign.From)
-	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{
-				URLs: []string{connSign.Stun},
-			},
-		},
-	}
-
-	// Create a new RTCPeerConnection
-	peerConnection, err := webrtc.NewPeerConnection(config)
-	if err != nil {
-		panic(err)
-	}
-	defer func() {
-		if cErr := peerConnection.Close(); cErr != nil {
-			fmt.Printf("cannot close peerConnection: %v\n", cErr)
-		}
-	}()
-
-	dataChannel, err := peerConnection.CreateDataChannel("data", nil)
+	err = peerConnection.SetRemoteDescription(sd)
 	if err != nil {
 		panic(err)
 	}
 
-	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		fmt.Printf("Peer Connection State has changed: %s\n", state.String())
-
-		if state == webrtc.PeerConnectionStateFailed {
-			// Wait until PeerConnection has had no network activity for 30 seconds or another failure.
-			// It may be reconnected using an ICE Restart.
-			// Use webrtc.PeerConnectionStateDisconnected if you are interested in detecting faster timeout.
-			// Note that the PeerConnection may come back from PeerConnectionStateDisconnected.
-			fmt.Println("Peer Connection has gone to failed exiting")
-		}
-
-		if state == webrtc.PeerConnectionStateClosed {
-			// PeerConnection was explicitly closed. This usually happens from a DTLS CloseNotify
-			fmt.Println("Peer Connection has gone to closed exiting")
-		}
-	})
-
-	dataChannel.OnOpen(func() {
-		fmt.Printf(
-			"Data channel '%s'-'%d' open. Random messages will now be sent to any connected DataChannels every 5 seconds\n",
-			dataChannel.Label(), dataChannel.ID(),
-		)
-
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			message, sendTextErr := randutil.GenerateCryptoRandomString(
-				15, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
-			)
-			if sendTextErr != nil {
-				panic(sendTextErr)
-			}
-
-			fmt.Printf("Sending '%s'\n", message)
-			if sendTextErr = dataChannel.SendText(message); sendTextErr != nil {
-				panic(sendTextErr)
-			}
-		}
-	})
-
-	dataChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
-		fmt.Printf("Message from DataChannel '%s': '%s'\n", dataChannel.Label(), string(msg.Data))
-	})
-
-	offer, err := peerConnection.CreateOffer(nil)
+	answer, err := peerConnection.CreateAnswer(nil)
 	if err != nil {
 		panic(err)
 	}
 
-	if err = peerConnection.SetLocalDescription(offer); err != nil {
+	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
+
+	err = peerConnection.SetLocalDescription(answer)
+	if err != nil {
 		panic(err)
 	}
+
+	<-gatherComplete
 
 	n.Send(message.Outcome{
 		To: in.From,
 		Message: message.Message{
-			Type: message.SendOffer,
-			Text: offer.SDP,
+			Type: message.SendAnswer,
+			Text: strings.Join([]string{n.memberID, offer.From, encode(peerConnection.LocalDescription())}, "|"),
 		},
-	})
-}
-
-func (n *Node) handleMakeOffer(in message.Income) {
-	panic("unimplemented")
-}
-
-func (n *Node) handleSendConnectionSign(in message.Income) {
-	connSign := message.ParseConnectionSign(in.Text)
-
-	n.Send(message.Outcome{
-		To: connSign.To,
-		Message: message.Message{
-			Type: message.MakeOffer,
-			Text: in.Text,
-		},
-	})
-
-	signCtx, cancelDisconnect := context.WithCancel(context.Background())
-
-	go func() {
-		select {
-		case <-signCtx.Done():
-		case <-time.After(5 * time.Minute):
-			n.disconnectMember(connSign.To)
-		}
-	}()
-
-	n.reacts = append(n.reacts, func(checked message.Income) bool {
-		if checked.Message.Type != message.ConnectionEstablished {
-			return false
-		}
-		if checked.From != connSign.From {
-			return false
-		}
-		if checked.Text != connSign.To {
-			return false
-		}
-
-		cancelDisconnect()
-		return true
 	})
 }
 
 func (n *Node) requestSignsFor(ID string) {
+	log.Panicln("Going to request connection sign for ", ID)
+
 	n.members.Range(func(key, value any) bool {
 		membID := key.(string)
 		if membID == ID {
 			return true
 		}
 
-		m := value.(*TCPMember)
-		m.send <- message.Message{
-			Type: message.ProvideConnectionSign,
-			Text: ID,
-		}
+		m := value.(Member)
+		m.Send(
+			message.Message{
+				Type: message.GenerateConnectionSign,
+				Text: ID,
+			},
+		)
+
 		return true
 	})
-
 }
 
-func (n *Node) disconnectMember(ID string) {
-	v, ok := n.members.Load(ID)
-	if !ok {
-		return
+func encode(obj *webrtc.SessionDescription) string {
+	b, err := json.Marshal(obj)
+	if err != nil {
+		panic(err)
 	}
-	n.members.Delete(ID)
-	m := v.(*TCPMember)
-	close(m.send)
+
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+func decode(in string, obj *webrtc.SessionDescription) {
+	b, err := base64.StdEncoding.DecodeString(in)
+	if err != nil {
+		panic(err)
+	}
+
+	if err = json.Unmarshal(b, obj); err != nil {
+		panic(err)
+	}
+}
+
+func genSign() (string, error) {
+	randomBytes := make([]byte, 32)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", err
+	}
+
+	hash := sha3.Sum256(randomBytes)
+
+	return hex.EncodeToString(hash[:]), nil
+}
+
+func dropElements[T any](src []T, idx []int) []T {
+	sort.Ints(idx)
+	out := make([]T, len(src)-len(idx))
+	cur := 0
+	for _, i := range idx {
+		if i == cur {
+			cur = i + 1
+			continue
+		}
+
+		out = append(out, src[cur:i]...)
+		cur = i + 1
+	}
+
+	return out
 }

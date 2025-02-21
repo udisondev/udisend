@@ -7,11 +7,10 @@ import (
 )
 
 type ICEMember struct {
-	id   string
-	node *Node
-	send chan message.Message
-	dc   *webrtc.DataChannel
-	pc   *webrtc.PeerConnection
+	id                string
+	send              chan message.Message
+	dc                *webrtc.DataChannel
+	pc                *webrtc.PeerConnection
 	disconncectSignal func()
 }
 
@@ -20,6 +19,7 @@ func (m *ICEMember) Send(out message.Message) {
 }
 
 func (m *ICEMember) Close() {
+	close(m.send)
 	m.disconncectSignal()
 	m.dc.Close()
 	m.pc.Close()
@@ -28,4 +28,3 @@ func (m *ICEMember) Close() {
 func (m *ICEMember) ID() string {
 	return m.id
 }
-
