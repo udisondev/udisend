@@ -84,8 +84,8 @@ func (n *Node) Send(out message.Outcome) error {
 	if !ok {
 		return fmt.Errorf("memberID=%s: %w", out.To, ErrMemberNotFound)
 	}
-	m := v.(*TCPMember)
-	m.send <- out.Message
+	m := v.(Member)
+	m.Send(out.Message)
 	return nil
 }
 
