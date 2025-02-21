@@ -25,12 +25,12 @@ func main() {
 
 	fmt.Printf("Wellcome %s!\n", *memberID)
 
-	node := node.New(*memberID)
-	go node.Run()
+	n := node.New(*memberID)
+	go n.Run()
 
 	fmt.Printf("entrypoint is: %s\n", *entryPoint)
 	if *entryPoint != "" {
-		node.AttachHead(*entryPoint)
+		n.AttachHead(*entryPoint)
 	}
 
 	keyboard := bufio.NewScanner(os.Stdin)
@@ -59,7 +59,7 @@ func main() {
 			recepient := text[1:del]
 			fmt.Print("\033[1A\033[2K")
 			fmt.Printf("You for %s: %s\n", recepient, text[del+1:])
-			err := node.Send(message.Outcome{
+			err := n.Send(message.Outcome{
 				To: recepient,
 				Message: message.Message{
 					Type: message.ForYou,
@@ -73,7 +73,7 @@ func main() {
 	}()
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWs(node, w, r)
+		node.ServeWs(n, w, r)
 	})
 	err := http.ListenAndServe(*addr, nil)
 	if err != nil {

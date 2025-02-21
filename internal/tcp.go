@@ -12,11 +12,11 @@ import (
 )
 
 type TCPMember struct {
-	id string
+	id               string
 	disconnectSignal func()
-	conn *websocket.Conn
-	inbox chan <- message.Income
-	send chan message.Message
+	conn             *websocket.Conn
+	inbox            chan<- message.Income
+	send             chan message.Message
 }
 
 func (m *TCPMember) ID() string {
@@ -108,7 +108,7 @@ func (c *TCPMember) writePump() {
 	}
 }
 
-func serveWs(node *Node, w http.ResponseWriter, r *http.Request) {
+func ServeWs(node *Node, w http.ResponseWriter, r *http.Request) {
 	log.Println("New connection")
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
