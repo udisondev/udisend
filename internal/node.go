@@ -140,7 +140,7 @@ func (n *Node) AttachHead(entrypoint string) {
 			n.unregister <- memberID
 		},
 		conn:  conn,
-		inbox: make(chan<- message.Income),
+		inbox: n.inbox,
 		send:  make(chan message.Message, 256),
 	}
 
