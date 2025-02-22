@@ -60,6 +60,8 @@ func (n *Node) Run() {
 	for {
 		select {
 		case member := <-n.register:
+			log.Println("New member connected", "ID="+member.ID())
+
 			n.membersMu.Lock()
 			n.members[member.ID()] = member
 			n.membersMu.Unlock()

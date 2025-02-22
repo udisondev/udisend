@@ -182,6 +182,7 @@ func (n *Node) makeOffer(in message.Income) {
 		send := make(chan message.Message, 256)
 		go func() {
 			for out := range send {
+				fmt.Println("Going to send to ICE")
 				sendChannel.SendText(out.Text)
 			}
 		}()
