@@ -199,13 +199,7 @@ func (n *Node) makeOffer(in message.Income) {
 			return
 		}
 
-		n.inbox <- message.Income{
-			From: in.From,
-			Message: message.Message{
-				Type: message.ForYou,
-				Text: string(msg.Data),
-			},
-		}
+		n.inbox <- message.Income{From: memb.id, Message: mess}
 	})
 
 	offer, err := pc.CreateOffer(nil)
