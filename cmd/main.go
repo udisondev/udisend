@@ -8,11 +8,12 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"udisend/internal"
 	"udisend/internal/message"
 )
 
-var addr = flag.String("addr", ":8000", "http service address")
+var addr = flag.String("addr", "", "http service address")
 var memberID = flag.String("member_id", "", "your memberID")
 var entryPoint = flag.String("entry_point", "", "chat entrypoint")
 
@@ -25,8 +26,15 @@ func main() {
 
 	fmt.Printf("Wellcome %s!\n", *memberID)
 
+	wg := sync.WaitGroup{}
+
 	n := node.New(*memberID)
-	go n.Run()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		n.Run()
+	}()
 
 	fmt.Printf("entrypoint is: %s\n", *entryPoint)
 	if *entryPoint != "" {
@@ -35,7 +43,9 @@ func main() {
 
 	keyboard := bufio.NewScanner(os.Stdin)
 	fmt.Println("Чтобы отправить личное сообщение введите: /<recepient> ваше сообщение")
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
 			keyboard.Scan()
 			text := keyboard.Text()
@@ -72,11 +82,21 @@ func main() {
 		}
 	}()
 
-	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		node.ServeWs(n, w, r)
-	})
-	err := http.ListenAndServe(*addr, nil)
-	if err != nil {
-		log.Fatal("ListenAndServe: ", err)
+	if *addr != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+				node.ServeWs(n, w, r)
+			})
+			err := http.ListenAndServe(*addr, nil)
+			if err != nil {
+				log.Fatal("ListenAndServe: ", err)
+			}
+		}()
 	}
+
+	wg.Wait()
+
 }
