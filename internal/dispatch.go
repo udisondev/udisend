@@ -13,7 +13,6 @@ import (
 	"time"
 	"udisend/internal/message"
 
-	"github.com/pion/randutil"
 	"github.com/pion/webrtc/v4"
 	"golang.org/x/crypto/sha3"
 )
@@ -84,12 +83,21 @@ func (n *Node) generateConnectionSign(in message.Income) {
 		return
 	}
 
+	n.signMapMu.Lock()
 	n.signMap[in.Text] = message.ConnectionSign{
 		From: n.memberID,
 		To:   in.Text,
 		Sign: sign,
 		Stun: n.stunServer,
 	}
+	n.signMapMu.Unlock()
+
+	go func() {
+		<-time.After(2 * time.Minute)
+		n.signMapMu.Lock()
+		delete(n.signMap, in.Text)
+		n.signMapMu.Unlock()
+	}()
 
 	n.Send(message.Outcome{
 		To: in.From,
@@ -104,7 +112,7 @@ func (n *Node) handleAnswer(in message.Income) {
 	answer := message.ParseAnswer(in.Text)
 	log.Println("Going to handle answer from ", answer.From)
 
-	memb, ok := n.peerConnections[answer.From]
+	memb, ok := n.pcMap[answer.From]
 	if !ok {
 		log.Println("Peer connection not found!")
 		return
@@ -146,22 +154,41 @@ func (n *Node) makeOffer(in message.Income) {
 		return
 	}
 
-	disconnectFn := func() {
-		n.unregister <- connSign.From
+	memb := ICEMember{
+		id: connSign.From,
+		dc: sendChannel,
+		pc: pc,
+		disconncectSignal: func() {
+			n.unregister <- connSign.From
+		},
 	}
 
+	n.pcMapMu.Lock()
+	n.pcMap[memb.id] = &memb
+	n.pcMapMu.Unlock()
+
+	go func() {
+		<-time.After(2 * time.Minute)
+		n.pcMapMu.Lock()
+		delete(n.pcMap, memb.id)
+		n.pcMapMu.Unlock()
+	}()
+
 	sendChannel.OnClose(func() {
-		fmt.Println("sendChannel has closed")
-		disconnectFn()
+		memb.Close()
 	})
+
 	sendChannel.OnOpen(func() {
-		fmt.Println("sendChannel has opened")
+		send := make(chan message.Message, 256)
+		go func() {
+			for out := range send {
+				sendChannel.SendText(out.Text)
+			}
+		}()
 
-		candidatePair, err := pc.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
-
-		fmt.Println(candidatePair)
-		fmt.Println(err)
+		n.register <- &memb
 	})
+
 	sendChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
 		var mess message.Message
 		err := mess.Unmarshal(msg.Data)
@@ -177,8 +204,6 @@ func (n *Node) makeOffer(in message.Income) {
 				Text: string(msg.Data),
 			},
 		}
-
-		fmt.Sprintf("Message from DataChannel %s payload %s", sendChannel.Label(), string(msg.Data))
 	})
 
 	offer, err := pc.CreateOffer(nil)
@@ -201,25 +226,6 @@ func (n *Node) makeOffer(in message.Income) {
 		fmt.Sprint(state)
 	})
 
-	send := make(chan message.Message, 256)
-	go func() {
-		for out := range send {
-			sendChannel.SendText(out.Text)
-		}
-	}()
-
-	memb := ICEMember{
-		id:   connSign.From,
-		send: send,
-		dc:   sendChannel,
-		pc:   pc,
-		disconncectSignal: func() {
-			n.unregister <- connSign.From
-		},
-	}
-
-	n.peerConnections[memb.id] = &memb
-
 	n.Send(message.Outcome{
 		To: in.From,
 		Message: message.Message{
@@ -237,7 +243,6 @@ func (n *Node) makeOffer(in message.Income) {
 
 func (n *Node) handleOffer(in message.Income) {
 	offer := message.ParseOffer(in.Text)
-	log.Println("Going to handle offer from ", offer.From)
 
 	actual, ok := n.signMap[offer.From]
 	if !ok {
@@ -269,8 +274,6 @@ func (n *Node) handleOffer(in message.Income) {
 	}
 
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		fmt.Printf("Peer Connection State has changed: %s\n", state.String())
-
 		if state == webrtc.PeerConnectionStateFailed {
 			fmt.Println("Peer Connection has gone to failed exiting")
 			os.Exit(0)
@@ -283,31 +286,51 @@ func (n *Node) handleOffer(in message.Income) {
 	})
 
 	peerConnection.OnDataChannel(func(dataChannel *webrtc.DataChannel) {
-		fmt.Printf("New DataChannel %s %d\n", dataChannel.Label(), dataChannel.ID())
+		memb := ICEMember{
+			id:   offer.From,
+			send: make(chan message.Message),
+			dc:   dataChannel,
+			pc:   peerConnection,
+			disconncectSignal: func() {
+				n.unregister <- offer.From
+			},
+		}
 
 		dataChannel.OnOpen(func() {
-			fmt.Printf(
-				"Data channel '%s'-'%d' open. Random messages will now be sent to any connected DataChannels every 5 seconds\n",
-				dataChannel.Label(), dataChannel.ID(),
-			)
-
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-			for range ticker.C {
-				message, sendErr := randutil.GenerateCryptoRandomString(15, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-				if sendErr != nil {
-					panic(sendErr)
+			memb.send = make(chan message.Message, 256)
+			go func() {
+				for out := range memb.send {
+					b, err := out.Marshal()
+					if err != nil {
+						log.Println("Error marshall message", "for="+memb.id, "err="+err.Error())
+						continue
+					}
+					dataChannel.Send(b)
 				}
+			}()
 
-				fmt.Printf("Sending '%s'\n", message)
-				if sendErr = dataChannel.SendText(message); sendErr != nil {
-					panic(sendErr)
-				}
-			}
+			n.register <- &memb
 		})
 
 		dataChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
-			fmt.Printf("Message from DataChannel '%s': '%s'\n", dataChannel.Label(), string(msg.Data))
+			var mess message.Message
+			err := mess.Unmarshal(msg.Data)
+			if err != nil {
+				log.Println("Error unmarshal message", "receiver="+memb.id, "content="+string(msg.Data))
+				return
+			}
+
+			n.inbox <- message.Income{
+				From: in.From,
+				Message: message.Message{
+					Type: message.ForYou,
+					Text: string(msg.Data),
+				},
+			}
+		})
+
+		dataChannel.OnClose(func() {
+			close(memb.send)
 		})
 	})
 
@@ -331,7 +354,6 @@ func (n *Node) handleOffer(in message.Income) {
 		panic(err)
 	}
 
-	log.Println("SDP generated", answer.SDP)
 	<-gatherComplete
 
 	n.Send(message.Outcome{
@@ -344,24 +366,16 @@ func (n *Node) handleOffer(in message.Income) {
 }
 
 func (n *Node) requestSignsFor(ID string) {
-	log.Println("Going to request connection sign for ", ID)
-
-	n.members.Range(func(key, value any) bool {
-		membID := key.(string)
-		if membID == ID {
-			return true
+	for memID, m := range n.members {
+		if memID == ID {
+			continue
 		}
 
-		m := value.(Member)
-		m.Send(
-			message.Message{
-				Type: message.GenerateConnectionSign,
-				Text: ID,
-			},
-		)
-
-		return true
-	})
+		m.Send(message.Message{
+			Type: message.GenerateConnectionSign,
+			Text: ID,
+		})
+	}
 }
 
 func encode(obj *webrtc.SessionDescription) string {

@@ -23,38 +23,35 @@ var (
 type Node struct {
 	memberID string
 
-	// Registered members.
-	members sync.Map
+	stunServer string
 
-	// Inbound messages from the clients.
 	inbox chan message.Income
 
-	// Register requests from the clients.
 	register chan Member
 
-	// Unregister requests from clients.
 	unregister chan string
 
 	reacts []func(message.Income) bool
 
-	pcMutex sync.Mutex
+	membersMu sync.Mutex
+	members   map[string]Member
 
-	peerConnections map[string]*ICEMember
+	pcMapMu sync.Mutex
+	pcMap   map[string]*ICEMember
 
-	signMap map[string]message.ConnectionSign
-
-	stunServer string
+	signMapMu sync.Mutex
+	signMap   map[string]message.ConnectionSign
 }
 
 func New(memberID string) *Node {
 	return &Node{
-		memberID:        memberID,
-		inbox:           make(chan message.Income, 256),
-		register:        make(chan Member),
-		unregister:      make(chan string),
-		stunServer:      "stun:stun.l.google.com:19302",
-		peerConnections: make(map[string]*ICEMember),
-		signMap:         make(map[string]message.ConnectionSign),
+		memberID:   memberID,
+		inbox:      make(chan message.Income, 256),
+		register:   make(chan Member),
+		unregister: make(chan string),
+		stunServer: "stun:stun.l.google.com:19302",
+		pcMap:      make(map[string]*ICEMember),
+		signMap:    make(map[string]message.ConnectionSign),
 	}
 }
 
@@ -62,14 +59,21 @@ func (n *Node) Run() {
 	for {
 		select {
 		case member := <-n.register:
-			n.members.Store(member.ID(), member)
+			n.membersMu.Lock()
+			n.members[member.ID()] = member
+			n.membersMu.Unlock()
 		case memberID := <-n.unregister:
-			log.Println("Member disconnected", "ID", memberID)
-			if v, ok := n.members.Load(memberID); ok {
-				m := v.(Member)
-				n.members.Delete(memberID)
-				m.Close()
+			log.Println("Member disconnected", "ID="+memberID)
+			m, ok := n.members[memberID]
+			if !ok {
+				continue
 			}
+
+			n.membersMu.Lock()
+			delete(n.members, memberID)
+			n.membersMu.Unlock()
+
+			m.Close()
 		case message, ok := <-n.inbox:
 			if !ok {
 				return
@@ -80,13 +84,12 @@ func (n *Node) Run() {
 }
 
 func (n *Node) Send(out message.Outcome) error {
-	v, ok := n.members.Load(out.To)
+	m, ok := n.members[out.To]
 	if !ok {
 		return fmt.Errorf("memberID=%s: %w", out.To, ErrMemberNotFound)
 	}
-	m := v.(Member)
-	m.Send(out.Message)
 
+	m.Send(out.Message)
 	return nil
 }
 

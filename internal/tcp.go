@@ -63,6 +63,7 @@ func (m *TCPMember) readPump() {
 }
 
 func (m *TCPMember) Close() {
+	close(m.send)
 	m.disconnectSignal()
 	m.conn.Close()
 }
