@@ -154,14 +154,6 @@ func (n *Node) makeOffer(in message.Income) {
 		fmt.Println("sendChannel has closed")
 		disconnectFn()
 	})
-	sendChannel.OnClose(func() {
-		fmt.Println("sendChannel is closing")
-		disconnectFn()
-	})
-	sendChannel.OnError(func(err error) {
-		fmt.Println("sendChannel error", err)
-		disconnectFn()
-	})
 	sendChannel.OnOpen(func() {
 		fmt.Println("sendChannel has opened")
 
@@ -171,6 +163,13 @@ func (n *Node) makeOffer(in message.Income) {
 		fmt.Println(err)
 	})
 	sendChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
+		var mess message.Message
+		err := mess.Unmarshal(msg.Data)
+		if err != nil {
+			log.Println("Error unmarshal message", "receiver="+connSign.From, "content="+string(msg.Data))
+			return
+		}
+
 		n.inbox <- message.Income{
 			From: in.From,
 			Message: message.Message{
@@ -178,6 +177,7 @@ func (n *Node) makeOffer(in message.Income) {
 				Text: string(msg.Data),
 			},
 		}
+
 		fmt.Sprintf("Message from DataChannel %s payload %s", sendChannel.Label(), string(msg.Data))
 	})
 
@@ -233,7 +233,6 @@ func (n *Node) makeOffer(in message.Income) {
 			}, "|"),
 		},
 	})
-
 }
 
 func (n *Node) handleOffer(in message.Income) {
@@ -268,12 +267,6 @@ func (n *Node) handleOffer(in message.Income) {
 	if err != nil {
 		panic(err)
 	}
-
-	defer func() {
-		if cErr := peerConnection.Close(); cErr != nil {
-			fmt.Printf("cannot close peerConnection: %v\n", cErr)
-		}
-	}()
 
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		fmt.Printf("Peer Connection State has changed: %s\n", state.String())
