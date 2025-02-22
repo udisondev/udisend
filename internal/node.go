@@ -48,6 +48,7 @@ func New(memberID string) *Node {
 		memberID:   memberID,
 		inbox:      make(chan message.Income, 256),
 		register:   make(chan Member),
+		members:    make(map[string]Member),
 		unregister: make(chan string),
 		stunServer: "stun:stun.l.google.com:19302",
 		pcMap:      make(map[string]*ICEMember),
