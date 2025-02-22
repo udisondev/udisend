@@ -369,6 +369,7 @@ func (n *Node) requestSignsFor(ID string) {
 			continue
 		}
 
+		log.Println("Request sign", "from="+memID, "to="+ID)
 		m.Send(message.Message{
 			Type: message.GenerateConnectionSign,
 			Text: ID,
