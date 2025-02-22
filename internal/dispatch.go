@@ -183,8 +183,13 @@ func (n *Node) makeOffer(in message.Income) {
 
 		go func() {
 			for out := range memb.send {
-				fmt.Println("Going to send to ICE")
-				sendChannel.SendText(strings.Join([]string{out.Type.String(), out.Text}, "|"))
+				b, err := out.Marshal()
+				if err != nil {
+					log.Println("Error marshal message to for=" + memb.id)
+					continue
+				}
+
+				sendChannel.Send(b)
 			}
 		}()
 
@@ -317,11 +322,8 @@ func (n *Node) handleOffer(in message.Income) {
 			}
 
 			n.inbox <- message.Income{
-				From: in.From,
-				Message: message.Message{
-					Type: message.ForYou,
-					Text: string(msg.Data),
-				},
+				From:    memb.id,
+				Message: mess,
 			}
 		})
 
