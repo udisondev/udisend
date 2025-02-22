@@ -20,15 +20,8 @@ import (
 func (n *Node) dispatch(in message.Income) {
 	log.Println("New message", in.String())
 
-	var reacted []int
-	for i, r := range n.reacts {
-		if r(in) {
-			reacted = append(reacted, i)
-		}
-	}
-
-	if len(reacted) > 0 {
-		n.reacts = dropElements(n.reacts, reacted)
+	for _, s := range n.scripts {
+		s.Act(in)
 	}
 
 	switch in.Type {
@@ -85,7 +78,7 @@ func (n *Node) generateConnectionSign(in message.Income) {
 
 	n.signMapMu.Lock()
 	n.signMap[in.Text] = message.ConnectionSign{
-		From: n.memberID,
+		From: n.id,
 		To:   in.Text,
 		Sign: sign,
 		Stun: n.stunServer,
@@ -103,7 +96,7 @@ func (n *Node) generateConnectionSign(in message.Income) {
 		To: in.From,
 		Message: message.Message{
 			Type: message.SendConnectionSign,
-			Text: strings.Join([]string{n.memberID, in.Text, sign, n.stunServer}, "|"),
+			Text: strings.Join([]string{n.id, in.Text, sign, n.stunServer}, "|"),
 		},
 	})
 }
@@ -232,7 +225,7 @@ func (n *Node) makeOffer(in message.Income) {
 		Message: message.Message{
 			Type: message.SendOffer,
 			Text: strings.Join([]string{
-				n.memberID,
+				n.ID,
 				connSign.From,
 				connSign.Sign,
 				connSign.Stun,
@@ -358,7 +351,7 @@ func (n *Node) handleOffer(in message.Income) {
 		To: in.From,
 		Message: message.Message{
 			Type: message.SendAnswer,
-			Text: strings.Join([]string{n.memberID, offer.From, encode(peerConnection.LocalDescription())}, "|"),
+			Text: strings.Join([]string{n.ID, offer.From, encode(peerConnection.LocalDescription())}, "|"),
 		},
 	})
 }

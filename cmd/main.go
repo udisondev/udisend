@@ -2,15 +2,17 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
-	"udisend/internal"
 	"udisend/internal/message"
+	"udisend/internal/node"
 )
 
 var addr = flag.String("addr", "", "http service address")
@@ -24,16 +26,26 @@ func main() {
 		log.Fatal("member_id must be defined and not blank")
 	}
 
-	fmt.Printf("Wellcome %s!\n", *memberID)
+	ctx, cancel := context.WithCancel(context.Background())
 
-	wg := sync.WaitGroup{}
+	killSig := make(chan os.Signal)
+	signal.Notify(killSig, os.Kill, os.Interrupt)
+
+	go func() {
+		<-killSig
+		cancel()
+	}()
+
+	fmt.Printf("Wellcome %s!\n", *memberID)
 
 	n := node.New(*memberID)
 
+	wg := sync.WaitGroup{}
 	wg.Add(1)
+
 	go func() {
 		defer wg.Done()
-		n.Run()
+		n.Run(ctx)
 	}()
 
 	fmt.Printf("entrypoint is: %s\n", *entryPoint)
@@ -88,11 +100,16 @@ func main() {
 			defer wg.Done()
 
 			http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-				node.ServeWs(n, w, r)
+				n.ServeWs(n, w, r)
 			})
+
+			http.HandleFunc("GET /id", func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(*memberID))
+			})
+
 			err := http.ListenAndServe(*addr, nil)
 			if err != nil {
-				log.Fatal("ListenAndServe: ", err)
+				log.Fatal("ListenAndServe: %v", err)
 			}
 		}()
 	}

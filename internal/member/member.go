@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package node
+package member
 
 import (
 	"time"
@@ -32,7 +32,7 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 1024,
 }
 
-type Member interface {
+type Interface interface {
 	ID() string
 	Send(out message.Message)
 	Close()
