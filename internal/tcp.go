@@ -28,7 +28,7 @@ func (m *TCPMember) Send(out message.Message) {
 }
 
 func (m *TCPMember) readPump() {
-	defer m.Close()
+	defer m.disconnectSignal()
 
 	m.conn.SetReadLimit(maxMessageSize)
 	m.conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -68,17 +68,12 @@ func (m *TCPMember) Close() {
 	m.conn.Close()
 }
 
-// writePump pumps messages from the hub to the websocket connection.
-//
-// A goroutine running writePump is started for each connection. The
-// application ensures that there is at most one writer to a connection by
-// executing all writes from this goroutine.
 func (m *TCPMember) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		m.conn.Close()
 	}()
+
 	for {
 		select {
 		case message, ok := <-m.send:
