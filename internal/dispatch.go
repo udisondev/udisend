@@ -184,7 +184,7 @@ func (n *Node) makeOffer(in message.Income) {
 		go func() {
 			for out := range memb.send {
 				fmt.Println("Going to send to ICE")
-				sendChannel.SendText(out.Text)
+				sendChannel.SendText(strings.Join([]string{out.Type.String(), out.Text}, "|"))
 			}
 		}()
 
