@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 	"udisend/internal/ctxtool"
+	"udisend/internal/logger"
 	"udisend/internal/message"
 	"udisend/internal/node"
 )
@@ -30,6 +31,7 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = ctxtool.Span(ctx, "main")
+	logger.Debugf(ctx, "Start server with <addr:%s> <member_id:%s> <entry_point:%s>", *addr, *memberID, *entryPoint)
 
 	killSig := make(chan os.Signal)
 	signal.Notify(killSig, os.Kill, os.Interrupt)

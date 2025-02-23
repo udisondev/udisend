@@ -147,11 +147,16 @@ func (n *Node) AddMember(ctx context.Context, m Member, disconnect func()) {
 			n.inbox <- m
 		}
 	}()
+
 }
 
 func (n *Node) Run(ctx context.Context) {
+	ctx = ctxtool.Span(ctx, "node.Run")
+	logger.Debugf(ctx, "Run...")
+
 	go func() {
 		<-ctx.Done()
+		logger.Debugf(ctx, "Shuting down...")
 		close(n.inbox)
 	}()
 
@@ -161,14 +166,18 @@ func (n *Node) Run(ctx context.Context) {
 }
 
 func (n *Node) Send(out message.Outcome) error {
+	logger.Debugf(nil, "Going to send message to '%s'", out.To)
+
 	m, ok := n.members[out.To]
 	if !ok {
+		logger.Debugf(nil, "Member '%s' not found", out.To)
 		return fmt.Errorf("memberID=%s: %w", out.To, ErrMemberNotFound)
 	}
 
 	select {
 	case m.send <- out.Message:
 	default:
+		logger.Debugf(nil, "Disconnecting '%s' (low throuput)", out.To)
 		m.disconnect()
 	}
 
@@ -231,4 +240,6 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	memb := member.NewTCP(connectedMemberID, conn)
 	memberCtx, disconnect := context.WithCancel(ctx)
 	n.AddMember(memberCtx, memb, disconnect)
+
+	n.inbox <- message.Income{From: connectedMemberID, Message: message.Message{Type: message.NewConnection}}
 }

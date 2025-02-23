@@ -21,7 +21,8 @@ import (
 )
 
 func (n *Node) dispatch(ctx context.Context, in message.Income) {
-	log.Println("New message", in.String())
+	ctx = ctxtool.Span(ctx, "node.dispatch")
+	logger.Debugf(ctx, "Receive message from=%s data=%s", in.From, in.Message.String())
 
 	for _, s := range n.scripts {
 		s.Act(in)
