@@ -19,7 +19,7 @@ func Debugf(ctx context.Context, msg string, args ...any) {
 	if ctx != nil {
 		msg = upgradeMsg(ctx, msg)
 	}
-	logger.Debug(msg, args...)
+	logger.Debug(msg)
 }
 
 func Infof(ctx context.Context, msg string, args ...any) {
@@ -27,7 +27,7 @@ func Infof(ctx context.Context, msg string, args ...any) {
 	if ctx != nil {
 		msg = upgradeMsg(ctx, msg)
 	}
-	logger.Info(msg, args...)
+	logger.Info(msg)
 }
 
 func Warnf(ctx context.Context, msg string, args ...any) {
@@ -35,7 +35,7 @@ func Warnf(ctx context.Context, msg string, args ...any) {
 	if ctx != nil {
 		msg = upgradeMsg(ctx, msg)
 	}
-	logger.Warn(msg, args...)
+	logger.Warn(msg)
 }
 
 func Errorf(ctx context.Context, msg string, args ...any) {
@@ -43,7 +43,7 @@ func Errorf(ctx context.Context, msg string, args ...any) {
 	if ctx != nil {
 		msg = upgradeMsg(ctx, msg)
 	}
-	logger.Error(msg, args...)
+	logger.Error(msg)
 }
 
 func upgradeMsg(ctx context.Context, msg string) string {
