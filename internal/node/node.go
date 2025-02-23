@@ -1,14 +1,13 @@
 package node
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 
 	"udisend/internal/ctxtool"
@@ -18,10 +17,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-)
-
-var (
-	ErrMemberNotFound = errors.New("member not found")
 )
 
 type Member interface {
@@ -34,6 +29,15 @@ type Script struct {
 	mu      sync.Mutex
 	done    bool
 	actions []Action
+}
+
+var (
+	ErrMemberNotFound = errors.New("member not found")
+)
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
 }
 
 func (s *Script) Act(in message.Income) bool {
@@ -94,15 +98,17 @@ type ConnectedMember struct {
 }
 
 type Node struct {
-	id         string
-	stunServer string
-	inbox      chan message.Income
-	scriptsMu  sync.Mutex
-	scripts    []*Script
-	membersMu  sync.Mutex
-	members    map[string]ConnectedMember
-	signMapMu  sync.Mutex
-	signMap    map[string]message.ConnectionSign
+	id           string
+	stunServer   string
+	inbox        chan message.Income
+	scriptsMu    sync.Mutex
+	scripts      []*Script
+	membersMu    sync.Mutex
+	members      map[string]ConnectedMember
+	waitAnswerMu sync.Mutex
+	waitAnswer   map[string]*member.AnswerICE
+	signMapMu    sync.Mutex
+	signMap      map[string]message.ConnectionSign
 }
 
 func New(myID string) *Node {
@@ -150,7 +156,7 @@ func (n *Node) Run(ctx context.Context) {
 	}()
 
 	for in := range n.inbox {
-		n.dispatch(in)
+		n.dispatch(ctx, in)
 	}
 }
 
@@ -202,4 +208,27 @@ func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 	n.AddMember(memberCtx, head, disconnect)
 
 	return nil
+}
+
+func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	ctx = ctxtool.Span(ctx, "node.ServerWs")
+	logger.Debugf(ctx, "New connection")
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Errorf(ctx, "Error upgrade request: %v", err)
+		return
+	}
+
+	connectedMemberID := r.Header.Get("memberID")
+
+	if strings.TrimSpace(connectedMemberID) == "" {
+		http.Error(w, "please provide your memberID as a header", 400)
+		conn.Close()
+		return
+	}
+
+	memb := member.NewTCP(connectedMemberID, conn)
+	memberCtx, disconnect := context.WithCancel(ctx)
+	n.AddMember(memberCtx, memb, disconnect)
 }

@@ -4,10 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
-	"net/http"
-	"strings"
-	"time"
 	"udisend/internal/ctxtool"
 	"udisend/internal/logger"
 	"udisend/internal/message"
@@ -94,58 +90,4 @@ func (m *TCP) Interact(ctx context.Context, out <-chan message.Message, disconne
 	}()
 
 	return inbox
-}
-
-func ServeWs(node *Node, w http.ResponseWriter, r *http.Request) {
-	log.Println("New connection")
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	connectedMemberID := r.Header.Get("memberID")
-
-	if strings.TrimSpace(connectedMemberID) == "" {
-		http.Error(w, "please provide your memberID as a header", 400)
-		conn.Close()
-		return
-	}
-
-	memb := &TCP{
-		id: connectedMemberID,
-		disconnectSignal: func() {
-			node.unregister <- connectedMemberID
-		},
-		conn:  conn,
-		inbox: node.inbox,
-		send:  make(chan message.Message, 256),
-	}
-
-	go memb.readPump()
-	go memb.writePump()
-
-	node.register <- memb
-
-	<-time.After(1 * time.Second)
-
-	err = node.Send(message.Outcome{
-		To: connectedMemberID,
-		Message: message.Message{
-			Type: message.EntrypoinMemberID,
-			Text: node.memberID,
-		},
-	})
-
-	<-time.After(1 * time.Second)
-
-	node.inbox <- message.Income{
-		From:    connectedMemberID,
-		Message: message.Message{Type: message.NewConnection},
-	}
-
-	if err != nil {
-		log.Println("Error sending message", err.Error())
-	}
-
 }

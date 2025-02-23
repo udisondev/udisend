@@ -16,25 +16,33 @@ func init() {
 
 func Debugf(ctx context.Context, msg string, args ...any) {
 	msg = fmt.Sprintf(msg, args...)
-	msg = upgradeMsg(ctx, msg)
+	if ctx != nil {
+		msg = upgradeMsg(ctx, msg)
+	}
 	logger.Debug(msg, args...)
 }
 
 func Infof(ctx context.Context, msg string, args ...any) {
 	msg = fmt.Sprintf(msg, args...)
-	msg = upgradeMsg(ctx, msg)
+	if ctx != nil {
+		msg = upgradeMsg(ctx, msg)
+	}
 	logger.Info(msg, args...)
 }
 
 func Warnf(ctx context.Context, msg string, args ...any) {
 	msg = fmt.Sprintf(msg, args...)
-	msg = upgradeMsg(ctx, msg)
+	if ctx != nil {
+		msg = upgradeMsg(ctx, msg)
+	}
 	logger.Warn(msg, args...)
 }
 
 func Errorf(ctx context.Context, msg string, args ...any) {
 	msg = fmt.Sprintf(msg, args...)
-	msg = upgradeMsg(ctx, msg)
+	if ctx != nil {
+		msg = upgradeMsg(ctx, msg)
+	}
 	logger.Error(msg, args...)
 }
 

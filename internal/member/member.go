@@ -7,8 +7,6 @@ package member
 import (
 	"time"
 	"udisend/internal/message"
-
-	"github.com/gorilla/websocket"
 )
 
 const (
@@ -26,11 +24,6 @@ var (
 	newline = []byte{'\n'}
 	space   = []byte{' '}
 )
-
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-}
 
 type Interface interface {
 	ID() string

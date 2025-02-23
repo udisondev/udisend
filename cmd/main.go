@@ -11,6 +11,8 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"time"
+	"udisend/internal/ctxtool"
 	"udisend/internal/message"
 	"udisend/internal/node"
 )
@@ -27,6 +29,7 @@ func main() {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	ctx = ctxtool.Span(ctx, "main")
 
 	killSig := make(chan os.Signal)
 	signal.Notify(killSig, os.Kill, os.Interrupt)
@@ -34,6 +37,8 @@ func main() {
 	go func() {
 		<-killSig
 		cancel()
+		time.Sleep(5 * time.Second)
+		os.Exit(0)
 	}()
 
 	fmt.Printf("Wellcome %s!\n", *memberID)
@@ -50,7 +55,7 @@ func main() {
 
 	fmt.Printf("entrypoint is: %s\n", *entryPoint)
 	if *entryPoint != "" {
-		n.AttachHead(*entryPoint)
+		n.AttachHead(ctx, *entryPoint)
 	}
 
 	keyboard := bufio.NewScanner(os.Stdin)
@@ -100,7 +105,7 @@ func main() {
 			defer wg.Done()
 
 			http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-				n.ServeWs(n, w, r)
+				n.ServeWs(ctx, w, r)
 			})
 
 			http.HandleFunc("GET /id", func(w http.ResponseWriter, r *http.Request) {

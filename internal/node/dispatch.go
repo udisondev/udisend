@@ -1,23 +1,26 @@
 package node
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"sort"
 	"strings"
 	"time"
+	"udisend/internal/ctxtool"
+	"udisend/internal/logger"
+	"udisend/internal/member"
 	"udisend/internal/message"
 
 	"github.com/pion/webrtc/v4"
 	"golang.org/x/crypto/sha3"
 )
 
-func (n *Node) dispatch(in message.Income) {
+func (n *Node) dispatch(ctx context.Context, in message.Income) {
 	log.Println("New message", in.String())
 
 	for _, s := range n.scripts {
@@ -42,7 +45,7 @@ func (n *Node) dispatch(in message.Income) {
 			},
 		})
 	case message.MakeOffer:
-		n.makeOffer(in)
+		n.makeOffer(ctx, in)
 	case message.SendOffer:
 		offer := message.ParseOffer(in.Text)
 		n.Send(message.Outcome{
@@ -53,7 +56,7 @@ func (n *Node) dispatch(in message.Income) {
 			},
 		})
 	case message.HandleOffer:
-		n.handleOffer(in)
+		n.handleOffer(ctx, in)
 	case message.SendAnswer:
 		answer := message.ParseAnswer(in.Text)
 		n.Send(message.Outcome{
@@ -64,7 +67,7 @@ func (n *Node) dispatch(in message.Income) {
 			},
 		})
 	case message.HandleAnswer:
-		n.handleAnswer(in)
+		n.handleAnswer(ctx, in)
 	}
 }
 
@@ -101,28 +104,31 @@ func (n *Node) generateConnectionSign(in message.Income) {
 	})
 }
 
-func (n *Node) handleAnswer(in message.Income) {
+func (n *Node) handleAnswer(ctx context.Context, in message.Income) {
 	answer := message.ParseAnswer(in.Text)
-	log.Println("Going to handle answer from ", answer.From)
+	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.handleAnswer of '%s'", answer.From))
 
-	memb, ok := n.pcMap[answer.From]
+	memb, ok := n.waitAnswer[answer.From]
 	if !ok {
-		log.Println("Peer connection not found!")
+		logger.Debugf(ctx, "has no wait answer")
 		return
 	}
 
 	descr := webrtc.SessionDescription{}
 	decode(answer.SDP, &descr)
-	if err := memb.pc.SetRemoteDescription(descr); err != nil {
-		log.Println("Error handle answer: Error set remote description: ", err.Error())
-		memb.dc.Close()
-		memb.pc.Close()
+
+	memberCtx, disconnect := context.WithCancel(ctx)
+	n.AddMember(memberCtx, memb, disconnect)
+	if err := memb.SetRemoteDescription(descr); err != nil {
+		disconnect()
+		logger.Errorf(ctx, "Error setting remote description: %v", err)
 		return
 	}
 }
 
-func (n *Node) makeOffer(in message.Income) {
+func (n *Node) makeOffer(ctx context.Context, in message.Income) {
 	connSign := message.ParseConnectionSign(in.Text)
+	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.makeOffer for '%s'", connSign.From))
 
 	log.Println("Making offer for ", connSign.From)
 
@@ -136,96 +142,56 @@ func (n *Node) makeOffer(in message.Income) {
 
 	pc, err := webrtc.NewPeerConnection(config)
 	if err != nil {
-		log.Println("Error init peer connection: ", err.Error())
+		logger.Errorf(ctx, "webrtc.NewPeerConnection <stubServer:%s>: %v", connSign.Stun, err)
 		return
 	}
 
-	sendChannel, err := pc.CreateDataChannel("foo", nil)
+	dc, err := pc.CreateDataChannel("private", nil)
 	if err != nil {
-		log.Println("Error create data channel: ", err)
+		logger.Errorf(ctx, "pc.CreateDataChannel <stubServer:%s>: %v", connSign.Stun, err)
 		pc.Close()
 		return
 	}
 
-	memb := ICEMember{
-		id: connSign.From,
-		dc: sendChannel,
-		pc: pc,
-		disconncectSignal: func() {
-			n.unregister <- connSign.From
-		},
-	}
-
-	n.pcMapMu.Lock()
-	n.pcMap[memb.id] = &memb
-	n.pcMapMu.Unlock()
-
-	go func() {
-		<-time.After(2 * time.Minute)
-		n.pcMapMu.Lock()
-		delete(n.pcMap, memb.id)
-		n.pcMapMu.Unlock()
-	}()
-
-	sendChannel.OnClose(func() {
-		memb.Close()
-	})
-
-	sendChannel.OnOpen(func() {
-		memb.send = make(chan message.Message, 256)
-
-		go func() {
-			for out := range memb.send {
-				b, err := out.Marshal()
-				if err != nil {
-					log.Println("Error marshal message to for=" + memb.id)
-					continue
-				}
-
-				sendChannel.Send(b)
-			}
-		}()
-
-		n.register <- &memb
-	})
-
-	sendChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
-		var mess message.Message
-		err := mess.Unmarshal(msg.Data)
-		if err != nil {
-			log.Println("Error unmarshal message", "receiver="+connSign.From, "content="+string(msg.Data))
-			return
-		}
-
-		n.inbox <- message.Income{From: memb.id, Message: mess}
-	})
-
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
-		log.Println("Error create offer: ", err)
-		sendChannel.Close()
+		dc.Close()
 		pc.Close()
 		return
 	}
 
 	if err := pc.SetLocalDescription(offer); err != nil {
-		log.Println("Error set local description: ", err)
-		sendChannel.Close()
+		logger.Errorf(ctx, "pc.SetLocalDescription: %v", err)
+		dc.Close()
 		pc.Close()
 		return
 	}
 
 	// Add handlers for setting up the connection.
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		fmt.Sprint(state)
+		logger.Debugf(ctx, "connection change state to '%s'", state.String())
 	})
+
+	answered := member.NewAnswerICE(connSign.From, dc, pc)
+	n.waitAnswerMu.Lock()
+	n.waitAnswer[connSign.From] = answered
+	n.waitAnswerMu.Unlock()
+
+	go func() {
+		<-time.After(2 * time.Minute)
+		n.waitAnswerMu.Lock()
+		delete(n.waitAnswer, connSign.From)
+		n.waitAnswerMu.Unlock()
+		dc.Close()
+		pc.Close()
+	}()
 
 	n.Send(message.Outcome{
 		To: in.From,
 		Message: message.Message{
 			Type: message.SendOffer,
 			Text: strings.Join([]string{
-				n.ID,
+				n.id,
 				connSign.From,
 				connSign.Sign,
 				connSign.Stun,
@@ -235,22 +201,23 @@ func (n *Node) makeOffer(in message.Income) {
 	})
 }
 
-func (n *Node) handleOffer(in message.Income) {
+func (n *Node) handleOffer(ctx context.Context, in message.Income) {
 	offer := message.ParseOffer(in.Text)
+	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.makeOffer for '%s'", offer.From))
 
 	actual, ok := n.signMap[offer.From]
 	if !ok {
-		log.Println("Not found a sign for", offer.From)
+		logger.Debugf(ctx, "has no sign")
 		return
 	}
 
 	if actual.Sign != offer.Sign {
-		log.Println("Signs are not equal", "actual", actual.Sign, "given", offer.Sign)
+		logger.Debugf(ctx, "signs are not equal actual=%s given=%s", actual.Sign, offer.Sign)
 		return
 	}
 
 	if offer.Stun != actual.Stun {
-		log.Println("Found different stun servers", "actual", actual.Stun, "given", offer.Stun)
+		logger.Debugf(ctx, "stun servers are not equal actual=%s given=%s", actual.Stun, offer.Stun)
 		return
 	}
 
@@ -262,96 +229,49 @@ func (n *Node) handleOffer(in message.Income) {
 		},
 	}
 
-	peerConnection, err := webrtc.NewPeerConnection(config)
+	pc, err := webrtc.NewPeerConnection(config)
 	if err != nil {
 		panic(err)
 	}
 
-	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		if state == webrtc.PeerConnectionStateFailed {
-			fmt.Println("Peer Connection has gone to failed exiting")
-			os.Exit(0)
-		}
-
-		if state == webrtc.PeerConnectionStateClosed {
-			fmt.Println("Peer Connection has gone to closed exiting")
-			os.Exit(0)
-		}
-	})
-
-	peerConnection.OnDataChannel(func(dataChannel *webrtc.DataChannel) {
-		memb := ICEMember{
-			id:   offer.From,
-			send: make(chan message.Message),
-			dc:   dataChannel,
-			pc:   peerConnection,
-			disconncectSignal: func() {
-				n.unregister <- offer.From
-			},
-		}
-
-		dataChannel.OnOpen(func() {
-			memb.send = make(chan message.Message, 256)
-			go func() {
-				for out := range memb.send {
-					b, err := out.Marshal()
-					if err != nil {
-						log.Println("Error marshall message", "for="+memb.id, "err="+err.Error())
-						continue
-					}
-					dataChannel.Send(b)
-				}
-			}()
-
-			n.register <- &memb
-		})
-
-		dataChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
-			var mess message.Message
-			err := mess.Unmarshal(msg.Data)
-			if err != nil {
-				log.Println("Error unmarshal message", "receiver="+memb.id, "content="+string(msg.Data))
-				return
-			}
-
-			n.inbox <- message.Income{
-				From:    memb.id,
-				Message: mess,
-			}
-		})
-
-		dataChannel.OnClose(func() {
-			close(memb.send)
-		})
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		logger.Debugf(ctx, "connection change state to '%s'", state.String())
 	})
 
 	sd := webrtc.SessionDescription{}
 	decode(offer.SDP, &sd)
 
-	err = peerConnection.SetRemoteDescription(sd)
+	err = pc.SetRemoteDescription(sd)
 	if err != nil {
 		panic(err)
 	}
 
-	answer, err := peerConnection.CreateAnswer(nil)
+	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		panic(err)
 	}
 
-	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
+	gatherComplete := webrtc.GatheringCompletePromise(pc)
 
-	err = peerConnection.SetLocalDescription(answer)
+	err = pc.SetLocalDescription(answer)
 	if err != nil {
 		panic(err)
 	}
 
 	<-gatherComplete
 
+	offered := member.NewOfferICE(offer.From, pc)
+	memberCtx, disconnect := context.WithCancel(ctx)
+	n.AddMember(memberCtx, offered, func() {
+		pc.Close()
+		disconnect()
+	})
+
 	n.Send(message.Outcome{
 		To: in.From,
 		Message: message.Message{
 			Type: message.SendAnswer,
-			Text: strings.Join([]string{n.ID, offer.From, encode(peerConnection.LocalDescription())}, "|"),
+			Text: strings.Join([]string{n.id, offer.From, encode(pc.LocalDescription())}, "|"),
 		},
 	})
 }
@@ -362,11 +282,12 @@ func (n *Node) requestSignsFor(ID string) {
 			continue
 		}
 
-		log.Println("Request sign", "from="+memID, "to="+ID)
-		m.Send(message.Message{
+		logger.Debugf(nil, "Going to request signs for=%s from=%s", ID, memID)
+
+		m.send <- message.Message{
 			Type: message.GenerateConnectionSign,
 			Text: ID,
-		})
+		}
 	}
 }
 
