@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 )
@@ -46,6 +47,39 @@ func savePublicKey(key *ecdsa.PublicKey, filename string) error {
 		Bytes: der,
 	}
 	return os.WriteFile(filename, pem.EncodeToMemory(pemBlock), 0644)
+}
+
+// publicKeyToPEM принимает публичный ключ и возвращает PEM-строку.
+func PublicKeyToPEM(pubKey *ecdsa.PublicKey) (string, error) {
+	derBytes, err := x509.MarshalPKIXPublicKey(pubKey)
+	if err != nil {
+		return "", fmt.Errorf("ошибка маршалинга публичного ключа: %w", err)
+	}
+
+	pemBlock := &pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: derBytes,
+	}
+
+	return string(pem.EncodeToMemory(pemBlock)), nil
+}
+
+func GetECDSAPublicKeyFromPEM(pemData string) (*ecdsa.PublicKey, error) {
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil {
+		return nil, errors.New("не удалось декодировать PEM блок")
+	}
+
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка парсинга публичного ключа: %w", err)
+	}
+
+	ecdsaPub, ok := pub.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, errors.New("полученный ключ не является ECDSA")
+	}
+	return ecdsaPub, nil
 }
 
 // loadPrivateKey загружает приватный ключ из PEM-файла и десериализует его.

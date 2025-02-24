@@ -42,7 +42,7 @@ func (n *Node) dispatch(ctx context.Context, in message.Income) {
 	case message.DoVerify:
 		n.doVerify(ctx, in)
 	case message.SolveChallenge:
-		n.doSign(ctx, in)
+		n.solveChallenge(ctx, in)
 	case message.TestChallenge:
 		n.checkChallenge(ctx, in)
 	case message.NewConnection:
@@ -114,7 +114,7 @@ func (n *Node) checkChallenge(ctx context.Context, in message.Income) {
 	}
 }
 
-func (n *Node) doSign(ctx context.Context, in message.Income) {
+func (n *Node) solveChallenge(ctx context.Context, in message.Income) {
 	ctx = ctxtool.Span(ctx, "node.doSign")
 	challenge, err := hex.DecodeString(in.Text)
 	if err != nil {
