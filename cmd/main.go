@@ -33,8 +33,8 @@ func main() {
 	ctx = ctxtool.Span(ctx, "main")
 	logger.Debugf(ctx, "Start server with <addr:%s> <member_id:%s> <entry_point:%s>", *addr, *memberID, *entryPoint)
 
-	killSig := make(chan os.Signal)
-	signal.Notify(killSig, os.Kill, os.Interrupt)
+	killSig := make(chan os.Signal, 1)
+	signal.Notify(killSig, os.Interrupt, os.Kill)
 
 	go func() {
 		<-killSig
@@ -55,7 +55,6 @@ func main() {
 		n.Run(ctx)
 	}()
 
-	fmt.Printf("entrypoint is: %s\n", *entryPoint)
 	if *entryPoint != "" {
 		n.AttachHead(ctx, *entryPoint)
 	}
@@ -110,13 +109,14 @@ func main() {
 				n.ServeWs(ctx, w, r)
 			})
 
-			http.HandleFunc("GET /id", func(w http.ResponseWriter, r *http.Request) {
+			http.HandleFunc("/id", func(w http.ResponseWriter, r *http.Request) {
+				logger.Debugf(ctx, "ID requested <ID:%s>", *memberID)
 				w.Write([]byte(*memberID))
 			})
 
 			err := http.ListenAndServe(*addr, nil)
 			if err != nil {
-				log.Fatal("ListenAndServe: %v", err)
+				logger.Errorf(ctx, "Error listening <addr:%s>", *addr)
 			}
 		}()
 	}
