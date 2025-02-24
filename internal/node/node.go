@@ -214,7 +214,7 @@ func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 	h.Add("memberID", n.id)
 	u := url.URL{Scheme: "ws", Host: entrypoint, Path: "/ws"}
 
-	logger.Debugf(ctx, "Websocket connection with '%s'", headID, u.String())
+	logger.Debugf(ctx, "Websocket connection with '%s'", headID)
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), h)
 	if err != nil {
 		return fmt.Errorf("connect to the entrypoint: %w", err)
