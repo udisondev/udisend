@@ -2,12 +2,16 @@ package node
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +24,10 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
+type signature struct {
+	R, S *big.Int
+}
+
 func (n *Node) dispatch(ctx context.Context, in message.Income) {
 	ctx = ctxtool.Span(ctx, "node.dispatch")
 	logger.Debugf(ctx, "Receive message from=%s data=%s", in.From, in.Message.String())
@@ -31,6 +39,12 @@ func (n *Node) dispatch(ctx context.Context, in message.Income) {
 	switch in.Type {
 	case message.ForYou:
 		fmt.Printf("%s: %s\n", in.From, in.Text)
+	case message.DoVerify:
+		n.doVerify(ctx, in)
+	case message.SolveChallenge:
+		n.doSign(ctx, in)
+	case message.TestChallenge:
+		n.checkChallenge(ctx, in)
 	case message.NewConnection:
 		n.requestSignsFor(in.From)
 	case message.GenerateConnectionSign:
@@ -68,7 +82,106 @@ func (n *Node) dispatch(ctx context.Context, in message.Income) {
 		})
 	case message.HandleAnswer:
 		n.handleAnswer(ctx, in)
+	default:
+		logger.Debugf(ctx, "unexpected message.MessageType: %#v", in.Type)
 	}
+}
+
+func (n *Node) checkChallenge(ctx context.Context, in message.Income) {
+	ctx = ctxtool.Span(ctx, "node.checkChallenge")
+	actualChallenge, ok := n.waitSigning[in.From]
+	if !ok {
+		logger.Errorf(ctx, "Has no challenge for '%s'", in.From)
+		return
+	}
+
+	sigBytes, err := hex.DecodeString(in.Text)
+	if err != nil {
+		logger.Errorf(ctx, "hex.DecodeString <text:%s>: %v", in.Text, err)
+		return
+	}
+
+	var sig signature
+	if _, err := asn1.Unmarshal(sigBytes, &sig); err != nil {
+		logger.Errorf(ctx, "asn1.Unmarshal <text:%s>: %v", in.Text, err)
+		return
+	}
+
+	hash := sha256.Sum256(actualChallenge.Value)
+	if !ecdsa.Verify(actualChallenge.PubKey, hash[:], sig.R, sig.S) {
+		logger.Errorf(ctx, "'%s' fails challenge", in.From)
+		return
+	}
+}
+
+func (n *Node) doSign(ctx context.Context, in message.Income) {
+	ctx = ctxtool.Span(ctx, "node.doSign")
+	challenge, err := hex.DecodeString(in.Text)
+	if err != nil {
+		logger.Errorf(ctx, "Error decode as hex <challenge:%s>: %v", in.Text, err)
+		return
+	}
+
+	hash := sha256.Sum256(challenge)
+
+	r, s, err := ecdsa.Sign(rand.Reader, n.privateSignKey, hash[:])
+	if err != nil {
+		logger.Errorf(ctx, "ecdsa.Sign: %v", err)
+		return
+	}
+
+	sig := signature{R: r, S: s}
+	sigBytes, err := asn1.Marshal(sig)
+	if err != nil {
+		logger.Errorf(ctx, "asn1.Marshal: %v", err)
+		return
+	}
+
+	sigHex := hex.EncodeToString(sigBytes)
+	n.Send(message.Outcome{
+		To: in.From,
+		Message: message.Message{
+			Type: message.TestChallenge,
+			Text: sigHex,
+		},
+	})
+}
+
+func (n *Node) doVerify(ctx context.Context, in message.Income) {
+	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.doVerify member=%s", in.From))
+
+	clstMemb, ok := n.myCluster.members[in.From]
+	if !ok {
+		return
+	}
+
+	challengeValue := make([]byte, 32)
+	if _, err := rand.Read(challengeValue); err != nil {
+		log.Println("Ошибка генерации случайных данных:", err)
+		return
+	}
+
+	challengeHex := hex.EncodeToString(challengeValue)
+
+	n.waitSigningMu.Lock()
+	n.waitSigning[in.From] = challenge{For: in.From, Value: challengeValue, PubKey: clstMemb.pubKey}
+	n.waitSigningMu.Unlock()
+
+	go func() {
+		<-time.After(5 * time.Second)
+		logger.Debugf(ctx, "Removing challenge for '%s'", in.From)
+		n.waitSigningMu.Lock()
+		delete(n.waitSigning, in.From)
+		n.waitSigningMu.Unlock()
+	}()
+
+	n.Send(message.Outcome{
+		To: in.From,
+		Message: message.Message{
+			Type: message.SolveChallenge,
+			Text: challengeHex,
+		},
+	})
 }
 
 func (n *Node) generateConnectionSign(in message.Income) {

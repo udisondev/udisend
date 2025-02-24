@@ -14,8 +14,16 @@ import (
 const (
 	// ForYou is a MessageType of type ForYou.
 	ForYou MessageType = "ForYou"
-	// EntrypoinMemberID is a MessageType of type EntrypoinMemberID.
-	EntrypoinMemberID MessageType = "EntrypoinMemberID"
+	// DoVerify is a MessageType of type DoVerify.
+	DoVerify MessageType = "DoVerify"
+	// ProvidePubKey is a MessageType of type ProvidePubKey.
+	ProvidePubKey MessageType = "ProvidePubKey"
+	// PubKeyProvided is a MessageType of type PubKeyProvided.
+	PubKeyProvided MessageType = "PubKeyProvided"
+	// SolveChallenge is a MessageType of type SolveChallenge.
+	SolveChallenge MessageType = "SolveChallenge"
+	// TestChallenge is a MessageType of type TestChallenge.
+	TestChallenge MessageType = "TestChallenge"
 	// NewConnection is a MessageType of type NewConnection.
 	NewConnection MessageType = "NewConnection"
 	// GenerateConnectionSign is a MessageType of type GenerateConnectionSign.
@@ -56,7 +64,11 @@ func (x MessageType) IsValid() bool {
 
 var _MessageTypeValue = map[string]MessageType{
 	"ForYou":                 ForYou,
-	"EntrypoinMemberID":      EntrypoinMemberID,
+	"DoVerify":               DoVerify,
+	"ProvidePubKey":          ProvidePubKey,
+	"PubKeyProvided":         PubKeyProvided,
+	"SolveChallenge":         SolveChallenge,
+	"TestChallenge":          TestChallenge,
 	"NewConnection":          NewConnection,
 	"GenerateConnectionSign": GenerateConnectionSign,
 	"SendConnectionSign":     SendConnectionSign,

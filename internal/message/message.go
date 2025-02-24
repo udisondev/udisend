@@ -11,10 +11,11 @@ import (
 ENUM(
 
 	ForYou,
-	EntrypoinMemberID,
-	ProvidePubSign,
-	PubSignProvided,
-	HadNoPubSign,
+	DoVerify,
+	ProvidePubKey,
+	PubKeyProvided,
+	SolveChallenge,
+	TestChallenge,
 	NewConnection,
 	GenerateConnectionSign,
 	SendConnectionSign,

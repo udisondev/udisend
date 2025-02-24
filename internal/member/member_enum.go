@@ -20,7 +20,7 @@ const (
 
 var ErrInvalidState = errors.New("not a valid State")
 
-const _StateName = "not_verifiedverifies"
+const _StateName = "not_verifiedverified"
 
 var _StateMap = map[State]string{
 	NotVerified: _StateName[0:12],

@@ -27,7 +27,7 @@ type Member interface {
 	Upgrade(member.State)
 }
 
-type Script struct {
+type script struct {
 	id      string
 	mu      sync.Mutex
 	done    bool
@@ -43,7 +43,7 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 1024,
 }
 
-func (s *Script) Act(in message.Income) bool {
+func (s *script) Act(in message.Income) bool {
 	if s.done {
 		return true
 	}
@@ -74,8 +74,8 @@ func (s *Script) Act(in message.Income) bool {
 	return false
 }
 
-func (n *Node) NewScript(ctx context.Context, acts ...Action) *Script {
-	s := Script{
+func (n *Node) NewScript(ctx context.Context, acts ...Action) *script {
+	s := script{
 		id:      uuid.New().String(),
 		actions: acts,
 	}
@@ -94,35 +94,63 @@ func (n *Node) NewScript(ctx context.Context, acts ...Action) *Script {
 
 type Action func(in message.Income) bool
 
-type ConnectedMember struct {
+type connectedMember struct {
 	send       chan<- message.Message
 	disconnect func()
 	member     Member
 }
 
+type cluster struct {
+	id      string
+	members map[string]ClusterMember
+}
+
+type ClusterMember struct {
+	id        string
+	clusterID string
+	pubKey    *ecdsa.PublicKey
+}
+
+type challenge struct {
+	For    string
+	Value  []byte
+	PubKey *ecdsa.PublicKey
+}
+
 type Node struct {
-	id             string
-	stunServer     string
-	inbox          chan message.Income
-	scriptsMu      sync.Mutex
-	scripts        []*Script
-	membersMu      sync.Mutex
-	members        map[string]ConnectedMember
-	waitAnswerMu   sync.Mutex
-	waitAnswer     map[string]*member.AnswerICE
-	signMapMu      sync.Mutex
-	signMap        map[string]message.ConnectionSign
+	id         string
+	stunServer string
+	inbox      chan message.Income
+
 	privateSignKey *ecdsa.PrivateKey
 	publicSignKey  *ecdsa.PublicKey
+
+	scriptsMu sync.Mutex
+	scripts   []*script
+
+	myCluster        cluster
+	existingClusters []string
+
+	membersMu sync.Mutex
+	members   map[string]connectedMember
+
+	waitSigningMu sync.Mutex
+	waitSigning   map[string]challenge
+
+	waitAnswerMu sync.Mutex
+	waitAnswer   map[string]*member.AnswerICE
+
+	signMapMu sync.Mutex
+	signMap   map[string]message.ConnectionSign
 }
 
 func New(myID string, privateSignKey *ecdsa.PrivateKey, publicSignKey *ecdsa.PublicKey) *Node {
 	return &Node{
 		id:             myID,
-		members:        make(map[string]ConnectedMember),
+		members:        make(map[string]connectedMember),
 		inbox:          make(chan message.Income),
 		waitAnswer:     make(map[string]*member.AnswerICE),
-		scripts:        make([]*Script, 0),
+		scripts:        make([]*script, 0),
 		stunServer:     "stun:stun.l.google.com:19302",
 		signMap:        make(map[string]message.ConnectionSign),
 		privateSignKey: privateSignKey,
@@ -135,7 +163,7 @@ func (n *Node) AddMember(ctx context.Context, m Member, disconnect func()) {
 	mout := make(chan message.Message, 256)
 
 	n.membersMu.Lock()
-	n.members[m.ID()] = ConnectedMember{
+	n.members[m.ID()] = connectedMember{
 		send:       mout,
 		member:     m,
 		disconnect: disconnect,
