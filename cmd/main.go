@@ -17,8 +17,6 @@ import (
 	"udisend/internal/logger"
 	"udisend/internal/message"
 	"udisend/internal/node"
-
-	"github.com/pion/interceptor/internal/sequencenumber"
 )
 
 var addr = flag.String("addr", "", "http service address")
