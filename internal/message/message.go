@@ -12,6 +12,9 @@ ENUM(
 
 	ForYou,
 	EntrypoinMemberID,
+	ProvidePubSign,
+	PubSignProvided,
+	HadNoPubSign,
 	NewConnection,
 	GenerateConnectionSign,
 	SendConnectionSign,
@@ -43,6 +46,21 @@ type Outcome struct {
 	Message
 }
 
+type PubSignRequest struct {
+	ID          string
+	Requester   string
+	FromCluster string
+	ToCluster   string
+}
+
+type PubSignResponse struct {
+	ID          string
+	PubSign     string
+	Requester   string
+	FromCluster string
+	ToCluster   string
+}
+
 type Answer struct {
 	From, To, SDP string
 }
@@ -57,6 +75,35 @@ type Offer struct {
 
 func (m Message) String() string {
 	return fmt.Sprintf("Type: %s, Text: %s", m.Type.String(), m.Text)
+}
+
+func ParsePubSignRequest(text string) PubSignRequest {
+	parts := strings.Split(text, "|")
+	return PubSignRequest{
+		ID:          parts[0],
+		Requester:   parts[1],
+		FromCluster: parts[2],
+		ToCluster:   parts[3],
+	}
+}
+
+func (p PubSignRequest) String() string {
+	return strings.Join([]string{p.ID, p.Requester, p.FromCluster, p.ToCluster}, "|")
+}
+
+func ParsePubSignResponse(text string) PubSignResponse {
+	parts := strings.Split(text, "|")
+	return PubSignResponse{
+		ID:          parts[0],
+		PubSign:     parts[1],
+		Requester:   parts[2],
+		FromCluster: parts[3],
+		ToCluster:   parts[4],
+	}
+}
+
+func (p PubSignResponse) String() string {
+	return strings.Join([]string{p.ID, p.PubSign, p.Requester, p.FromCluster, p.ToCluster}, "|")
 }
 
 func ParseAnswer(text string) Answer {
