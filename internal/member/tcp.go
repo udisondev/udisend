@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 	"udisend/internal/ctxtool"
 	"udisend/internal/logger"
 	"udisend/internal/message"
@@ -12,19 +13,32 @@ import (
 )
 
 type TCP struct {
-	id   string
-	conn *websocket.Conn
+	id    string
+	conn  *websocket.Conn
+	state State
+	mu    sync.Mutex
 }
 
 func NewTCP(id string, conn *websocket.Conn) *TCP {
 	return &TCP{
-		id:   id,
-		conn: conn,
+		id:    id,
+		conn:  conn,
+		state: NotVerified,
 	}
 }
 
 func (m *TCP) ID() string {
 	return m.id
+}
+
+func (m *TCP) State() State {
+	return m.state
+}
+
+func (m *TCP) Upgrade(new State) {
+	m.mu.Lock()
+	m.state = new
+	m.mu.Unlock()
 }
 
 func (m *TCP) Interact(ctx context.Context, out <-chan message.Message, disconnect func()) <-chan message.Income {

@@ -3,6 +3,7 @@ package member
 import (
 	"context"
 	"fmt"
+	"sync"
 	"udisend/internal/ctxtool"
 	"udisend/internal/logger"
 	"udisend/internal/message"
@@ -11,29 +12,55 @@ import (
 )
 
 type AnswerICE struct {
-	id string
-	dc *webrtc.DataChannel
-	pc *webrtc.PeerConnection
+	id    string
+	dc    *webrtc.DataChannel
+	pc    *webrtc.PeerConnection
+	mu    sync.Mutex
+	state State
 }
 
 type OfferICE struct {
-	id string
-	pc *webrtc.PeerConnection
+	id    string
+	pc    *webrtc.PeerConnection
+	mu    sync.Mutex
+	state State
 }
 
 func NewAnswerICE(ID string, dc *webrtc.DataChannel, pc *webrtc.PeerConnection) *AnswerICE {
 	return &AnswerICE{
-		id: ID,
-		dc: dc,
-		pc: pc,
+		id:    ID,
+		dc:    dc,
+		pc:    pc,
+		state: Verified,
 	}
 }
 
 func NewOfferICE(ID string, pc *webrtc.PeerConnection) *OfferICE {
 	return &OfferICE{
-		id: ID,
-		pc: pc,
+		id:    ID,
+		pc:    pc,
+		state: NotVerified,
 	}
+}
+
+func (m *OfferICE) State() State {
+	return m.state
+}
+
+func (m *OfferICE) Upgrade(new State) {
+	m.mu.Lock()
+	m.state = new
+	m.mu.Unlock()
+}
+
+func (m *AnswerICE) State() State {
+	return m.State()
+}
+
+func (m *AnswerICE) Upgrade(new State) {
+	m.mu.Lock()
+	m.state = new
+	m.mu.Unlock()
 }
 
 func (m *OfferICE) Interact(ctx context.Context, out <-chan message.Message, disconnect func()) <-chan message.Income {

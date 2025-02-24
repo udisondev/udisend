@@ -1,13 +1,18 @@
-// Copyright 2013 The Gorilla WebSocket Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
+//go:generate go-enum --noprefix
 package member
 
 import (
 	"time"
 	"udisend/internal/message"
 )
+
+// ENUM(
+//
+//	not_verified,
+//	verified,
+//
+// )
+type State uint8
 
 const (
 	// Time allowed to read the next pong message from the peer.

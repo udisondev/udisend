@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,8 @@ import (
 type Member interface {
 	ID() string
 	Interact(ctx context.Context, outbox <-chan message.Message, disconnect func()) <-chan message.Income
+	State() member.State
+	Upgrade(member.State)
 }
 
 type Script struct {
@@ -98,28 +101,32 @@ type ConnectedMember struct {
 }
 
 type Node struct {
-	id           string
-	stunServer   string
-	inbox        chan message.Income
-	scriptsMu    sync.Mutex
-	scripts      []*Script
-	membersMu    sync.Mutex
-	members      map[string]ConnectedMember
-	waitAnswerMu sync.Mutex
-	waitAnswer   map[string]*member.AnswerICE
-	signMapMu    sync.Mutex
-	signMap      map[string]message.ConnectionSign
+	id             string
+	stunServer     string
+	inbox          chan message.Income
+	scriptsMu      sync.Mutex
+	scripts        []*Script
+	membersMu      sync.Mutex
+	members        map[string]ConnectedMember
+	waitAnswerMu   sync.Mutex
+	waitAnswer     map[string]*member.AnswerICE
+	signMapMu      sync.Mutex
+	signMap        map[string]message.ConnectionSign
+	privateSignKey *ecdsa.PrivateKey
+	publicSignKey  *ecdsa.PublicKey
 }
 
-func New(myID string) *Node {
+func New(myID string, privateSignKey *ecdsa.PrivateKey, publicSignKey *ecdsa.PublicKey) *Node {
 	return &Node{
-		id:         myID,
-		members:    make(map[string]ConnectedMember),
-		inbox:      make(chan message.Income),
-		waitAnswer: make(map[string]*member.AnswerICE),
-		scripts:    make([]*Script, 0),
-		stunServer: "stun:stun.l.google.com:19302",
-		signMap:    make(map[string]message.ConnectionSign),
+		id:             myID,
+		members:        make(map[string]ConnectedMember),
+		inbox:          make(chan message.Income),
+		waitAnswer:     make(map[string]*member.AnswerICE),
+		scripts:        make([]*Script, 0),
+		stunServer:     "stun:stun.l.google.com:19302",
+		signMap:        make(map[string]message.ConnectionSign),
+		privateSignKey: privateSignKey,
+		publicSignKey:  publicSignKey,
 	}
 }
 

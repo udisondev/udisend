@@ -16,6 +16,7 @@ import (
 	"udisend/internal/logger"
 	"udisend/internal/message"
 	"udisend/internal/node"
+	"udisend/pkg/crypt"
 )
 
 var addr = flag.String("addr", "", "http service address")
@@ -27,6 +28,11 @@ func main() {
 	*memberID = strings.TrimSpace(*memberID)
 	if *memberID == "" {
 		log.Fatal("member_id must be defined and not blank")
+	}
+
+	privSignKey, pubSignKey, err := crypt.LoadOrGenerateKeys()
+	if err != nil {
+		log.Fatalf("error load or generate keys: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -45,7 +51,7 @@ func main() {
 
 	fmt.Printf("Wellcome %s!\n", *memberID)
 
-	n := node.New(*memberID)
+	n := node.New(*memberID, privSignKey, pubSignKey)
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
