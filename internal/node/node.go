@@ -186,6 +186,8 @@ func (n *Node) Send(out message.Outcome) error {
 
 func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 	ctx = ctxtool.Span(ctx, "node.AttachHead")
+
+	logger.Debugf(ctx, "Going to request head ID by calling GET %s/id...", entrypoint)
 	h := http.Header{}
 	resp, err := http.Get(entrypoint + "/id")
 	if err != nil {
@@ -203,9 +205,12 @@ func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 		return fmt.Errorf("reading head id: %w", err)
 	}
 
+	logger.Debugf(ctx, "Received head ID '%s'", string(headID))
+
 	h.Add("memberID", n.id)
 	u := url.URL{Scheme: "ws", Host: entrypoint, Path: "/ws"}
 
+	logger.Debugf(ctx, "Websocket connection with '%s'", headID, u.String())
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), h)
 	if err != nil {
 		return fmt.Errorf("connect to the entrypoint: %w", err)

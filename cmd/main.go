@@ -56,7 +56,11 @@ func main() {
 	}()
 
 	if *entryPoint != "" {
-		n.AttachHead(ctx, *entryPoint)
+		err := n.AttachHead(ctx, *entryPoint)
+		if err != nil {
+			logger.Errorf(ctx, "n.AttachHead: %v", err)
+			cancel()
+		}
 	}
 
 	keyboard := bufio.NewScanner(os.Stdin)
@@ -114,6 +118,7 @@ func main() {
 				w.Write([]byte(*memberID))
 			})
 
+			logger.Debugf(ctx, "Stat listening <addr:%s>", *addr)
 			err := http.ListenAndServe(*addr, nil)
 			if err != nil {
 				logger.Errorf(ctx, "Error listening <addr:%s>", *addr)
