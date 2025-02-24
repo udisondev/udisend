@@ -116,6 +116,8 @@ func New(myID string) *Node {
 		id:         myID,
 		members:    make(map[string]ConnectedMember),
 		inbox:      make(chan message.Income),
+		waitAnswer: make(map[string]*member.AnswerICE),
+		scripts:    make([]*Script, 0),
 		stunServer: "stun:stun.l.google.com:19302",
 		signMap:    make(map[string]message.ConnectionSign),
 	}
