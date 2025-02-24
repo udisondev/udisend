@@ -32,20 +32,9 @@ func main() {
 		log.Fatal("member_id must be defined and not blank")
 	}
 
-	// Опционально: получение пути к файлам можно сделать через переменные окружения.
-	pubPath := os.Getenv("PUBLIC_KEY_PATH")
-	if pubPath == "" {
-		pubPath = "public.pem" // значение по умолчанию
-	}
-	privPath := os.Getenv("PRIVATE_KEY_PATH")
-	if privPath == "" {
-		privPath = "private.pem" // значение по умолчанию
-	}
-
-	// Загрузка и разбор ключей
-	keyPair, err := crypt.LoadECDSAKeys(pubPath, privPath)
+	keyPair, err := crypt.GenerateECDSAKeys()
 	if err != nil {
-		log.Fatalf("Ошибка загрузки ECDSA ключей: %v", err)
+		panic(err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

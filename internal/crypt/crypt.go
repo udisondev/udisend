@@ -2,6 +2,8 @@ package crypt
 
 import (
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -66,4 +68,17 @@ func SerializePublicKey(pub *ecdsa.PublicKey) ([]byte, error) {
 	})
 
 	return pemBytes, nil
+}
+
+// GenerateECDSAKeys генерирует пару ключей ECDSA с кривой P256 и возвращает их в структуре.
+func GenerateECDSAKeys() (*ECDSAKeyPair, error) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ECDSAKeyPair{
+		PublicKey:  &privateKey.PublicKey,
+		PrivateKey: privateKey,
+	}, nil
 }
