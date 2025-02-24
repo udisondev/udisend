@@ -122,6 +122,12 @@ func (m *AnswerICE) Interact(ctx context.Context, out <-chan message.Message, di
 		disconnect()
 	})
 
+	m.pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		if state == webrtc.ICEConnectionStateDisconnected {
+			disconnect()
+		}
+	})
+
 	return inbox
 }
 
