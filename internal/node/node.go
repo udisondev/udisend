@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 
-	"udisend/internal/crypt"
 	"udisend/internal/ctxtool"
 	"udisend/internal/logger"
 	"udisend/internal/member"
@@ -110,10 +109,9 @@ type Node struct {
 	waitAnswer   map[string]*member.AnswerICE
 	signMapMu    sync.Mutex
 	signMap      map[string]message.ConnectionSign
-	keys         crypt.ECDSAKeyPair
 }
 
-func New(myID string, keys crypt.ECDSAKeyPair) *Node {
+func New(myID string) *Node {
 	return &Node{
 		id:         myID,
 		members:    make(map[string]ConnectedMember),
@@ -122,7 +120,6 @@ func New(myID string, keys crypt.ECDSAKeyPair) *Node {
 		scripts:    make([]*Script, 0),
 		stunServer: "stun:stun.l.google.com:19302",
 		signMap:    make(map[string]message.ConnectionSign),
-		keys:       keys,
 	}
 }
 
@@ -194,36 +191,19 @@ func (n *Node) Send(out message.Outcome) error {
 func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 	ctx = ctxtool.Span(ctx, "node.AttachHead")
 
-	logger.Debugf(ctx, "Going to request head pubkey by calling GET %s/pubkey...", entrypoint)
-	resp, err := http.Get(fmt.Sprintf("http://%s/pubkey", entrypoint))
+	logger.Debugf(ctx, "Going to request head ID by calling GET %s/id...", entrypoint)
+	h := http.Header{}
+	resp, err := http.Get(fmt.Sprintf("http://%s/id", entrypoint))
 	if err != nil {
-		return fmt.Errorf("getting head pubkey: %w", err)
+		return fmt.Errorf("getting head ID: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("getting head pubkey: %w", err)
+		return fmt.Errorf("getting head ID: %w", err)
 	}
 
 	limitReader := io.LimitReader(resp.Body, 256)
-	pubkey, err := io.ReadAll(limitReader)
-	if err != nil {
-		return fmt.Errorf("reading head pubkey: %w", err)
-	}
-
-	logger.Debugf(ctx, "Received head pubkey '%s'", string(pubkey))
-
-	logger.Debugf(ctx, "Going to request head ID by calling GET %s/id...", entrypoint)
-	resp, err = http.Get(fmt.Sprintf("http://%s/id", entrypoint))
-	if err != nil {
-		return fmt.Errorf("getting head ID: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("getting head ID: %w", err)
-	}
-
 	headID, err := io.ReadAll(limitReader)
 	if err != nil {
 		return fmt.Errorf("reading head id: %w", err)
@@ -231,7 +211,6 @@ func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 
 	logger.Debugf(ctx, "Received head ID '%s'", string(headID))
 
-	h := http.Header{}
 	h.Add("memberID", n.id)
 	u := url.URL{Scheme: "ws", Host: entrypoint, Path: "/ws"}
 

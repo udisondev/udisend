@@ -12,13 +12,10 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"udisend/internal/crypt"
 	"udisend/internal/ctxtool"
 	"udisend/internal/logger"
 	"udisend/internal/message"
 	"udisend/internal/node"
-
-	"github.com/pion/interceptor/internal/sequencenumber"
 )
 
 var addr = flag.String("addr", "", "http service address")
@@ -30,22 +27,6 @@ func main() {
 	*memberID = strings.TrimSpace(*memberID)
 	if *memberID == "" {
 		log.Fatal("member_id must be defined and not blank")
-	}
-
-	// Опционально: получение пути к файлам можно сделать через переменные окружения.
-	pubPath := os.Getenv("PUBLIC_KEY_PATH")
-	if pubPath == "" {
-		pubPath = "public.pem" // значение по умолчанию
-	}
-	privPath := os.Getenv("PRIVATE_KEY_PATH")
-	if privPath == "" {
-		privPath = "private.pem" // значение по умолчанию
-	}
-
-	// Загрузка и разбор ключей
-	keyPair, err := crypt.LoadECDSAKeys(pubPath, privPath)
-	if err != nil {
-		log.Fatalf("Ошибка загрузки ECDSA ключей: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -64,7 +45,7 @@ func main() {
 
 	fmt.Printf("Wellcome %s!\n", *memberID)
 
-	n := node.New(*memberID, *keyPair)
+	n := node.New(*memberID)
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
@@ -126,26 +107,15 @@ func main() {
 	if *addr != "" {
 		wg.Add(1)
 		go func() {
-			serveCtx := ctxtool.Span(ctx, "HTTP serve")
 			defer wg.Done()
 
 			http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-				n.ServeWs(serveCtx, w, r)
+				n.ServeWs(ctx, w, r)
 			})
 
 			http.HandleFunc("/id", func(w http.ResponseWriter, r *http.Request) {
-				logger.Debugf(serveCtx, "ID requested <ID:%s>", *memberID)
+				logger.Debugf(ctx, "ID requested <ID:%s>", *memberID)
 				w.Write([]byte(*memberID))
-			})
-
-			http.HandleFunc("/pubkey", func(w http.ResponseWriter, r *http.Request) {
-				pubkey, err := crypt.SerializePublicKey(keyPair.PublicKey)
-				if err != nil {
-					logger.Errorf(serveCtx, "Error provide pubkey: %v", err)
-					http.Error(w, "invalid pubkey", 500)
-					return
-				}
-				w.Write(pubkey)
 			})
 
 			logger.Debugf(ctx, "Stat listening <addr:%s>", *addr)
