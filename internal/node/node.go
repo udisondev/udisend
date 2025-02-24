@@ -189,7 +189,7 @@ func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 
 	logger.Debugf(ctx, "Going to request head ID by calling GET %s/id...", entrypoint)
 	h := http.Header{}
-	resp, err := http.Get(entrypoint + "/id")
+	resp, err := http.Get(fmt.Sprintf("http://%s/id", entrypoint))
 	if err != nil {
 		return fmt.Errorf("getting head ID: %w", err)
 	}
