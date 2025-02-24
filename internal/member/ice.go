@@ -90,7 +90,6 @@ func (m *AnswerICE) Interact(ctx context.Context, out <-chan message.Message, di
 	}()
 
 	m.dc.OnOpen(func() {
-		inbox <- message.Income{From: m.id, Message: message.Message{Type: message.NewConnection}}
 		go func() {
 			for msg := range out {
 				b, err := msg.Marshal()
