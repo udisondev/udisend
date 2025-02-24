@@ -122,6 +122,7 @@ func New(myID string) *Node {
 }
 
 func (n *Node) AddMember(ctx context.Context, m Member, disconnect func()) {
+	logger.Debugf(ctx, "New member '%s'", m.ID())
 	mout := make(chan message.Message, 256)
 
 	n.membersMu.Lock()
@@ -134,6 +135,7 @@ func (n *Node) AddMember(ctx context.Context, m Member, disconnect func()) {
 
 	go func() {
 		<-ctx.Done()
+		logger.Debugf(ctx, "Member '%s' disconnected", m.ID())
 		close(mout)
 		n.membersMu.Lock()
 		delete(n.members, m.ID())

@@ -32,7 +32,6 @@ func (n *Node) dispatch(ctx context.Context, in message.Income) {
 	case message.ForYou:
 		fmt.Printf("%s: %s\n", in.From, in.Text)
 	case message.NewConnection:
-		log.Println("New member", in.From)
 		n.requestSignsFor(in.From)
 	case message.GenerateConnectionSign:
 		n.generateConnectionSign(in)
