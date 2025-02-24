@@ -167,11 +167,6 @@ func (n *Node) makeOffer(ctx context.Context, in message.Income) {
 		return
 	}
 
-	// Add handlers for setting up the connection.
-	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		logger.Debugf(ctx, "connection change state to '%s'", state.String())
-	})
-
 	answered := member.NewAnswerICE(connSign.From, dc, pc)
 	n.waitAnswerMu.Lock()
 	n.waitAnswer[connSign.From] = answered
@@ -185,6 +180,8 @@ func (n *Node) makeOffer(ctx context.Context, in message.Income) {
 		dc.Close()
 		pc.Close()
 	}()
+	//
+	// Add handlers for setting up the connection.
 
 	n.Send(message.Outcome{
 		To: in.From,
