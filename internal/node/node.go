@@ -132,7 +132,7 @@ type Node struct {
 	myCluster        cluster
 	existingClusters []string
 
-	membersMu sync.Mutex
+	membersMu sync.RWMutex
 	members   map[string]connectedMember
 
 	waitSigningMu sync.Mutex
@@ -327,10 +327,23 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	memberCtx, disconnect := context.WithCancel(ctx)
 	n.AddMember(memberCtx, memb, disconnect)
 
+	_, pubKey, _ := crypt.LoadOrGenerateKeys()
+
 	n.myCluster.members[connectedMemberID] = ClusterMember{
 		id:     connectedMemberID,
-		pubKey: memberAuthKey,
+		pubKey: pubKey,
 	}
 
 	n.inbox <- message.Income{From: connectedMemberID, Message: message.Message{Type: message.DoVerify}}
+}
+
+func (n *Node) disonnect(ID string) {
+	n.membersMu.RLock()
+	m, ok := n.members[ID]
+	n.membersMu.RUnlock()
+	if !ok {
+		logger.Debugf(nil, "Has no member '%s' to disconnect", ID)
+		return
+	}
+	m.disconnect()
 }

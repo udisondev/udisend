@@ -111,11 +111,14 @@ func (n *Node) checkChallenge(ctx context.Context, in message.Income) {
 	hash := sha256.Sum256(actualChallenge.Value)
 	if !ecdsa.Verify(actualChallenge.PubKey, hash[:], sig.R, sig.S) {
 		logger.Errorf(ctx, "'%s' fails challenge", in.From)
+		n.disonnect(in.From)
 		return
 	}
+
 	logger.Debugf(ctx, "challenge successful pass")
 
 	logger.Debugf(ctx, "...End")
+	n.inbox <- message.Income{From: in.From, Message: message.Message{Type: message.NewConnection}}
 }
 
 func (n *Node) solveChallenge(ctx context.Context, in message.Income) {
