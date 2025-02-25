@@ -329,9 +329,11 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	memberCtx, disconnect := context.WithCancel(ctx)
 	n.AddMember(memberCtx, memb, disconnect)
 
+	_, pubKey, _ := crypt.LoadOrGenerateKeys()
+
 	n.myCluster.members[connectedMemberID] = ClusterMember{
 		id:     connectedMemberID,
-		pubKey: memberAuthKey,
+		pubKey: pubKey,
 	}
 
 	n.inbox <- message.Income{From: connectedMemberID, Message: message.Message{Type: message.DoVerify}}
