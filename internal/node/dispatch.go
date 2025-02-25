@@ -217,7 +217,7 @@ func (n *Node) generateConnectionSign(ctx context.Context, in message.Income) {
 	n.signMapMu.Unlock()
 
 	go func() {
-		<-time.After(2 * time.Minute)
+		<-time.After(10 * time.Second)
 		logger.Debugf(ctx, "sign removed")
 
 		n.signMapMu.Lock()
@@ -311,7 +311,7 @@ func (n *Node) makeOffer(ctx context.Context, in message.Income) {
 	n.waitAnswerMu.Unlock()
 
 	go func() {
-		<-time.After(2 * time.Minute)
+		<-time.After(10 * time.Second)
 		logger.Debugf(ctx, "No wait answer yet")
 
 		n.waitAnswerMu.Lock()
