@@ -113,6 +113,7 @@ func (n *Node) checkChallenge(ctx context.Context, in message.Income) {
 		logger.Errorf(ctx, "'%s' fails challenge", in.From)
 		return
 	}
+	logger.Debugf(ctx, "challenge successful pass")
 
 	logger.Debugf(ctx, "...End")
 }
