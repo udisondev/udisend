@@ -233,10 +233,12 @@ func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 	ctx = ctxtool.Span(ctx, "node.AttachHead")
 	logger.Debugf(ctx, "Going to request head ID by calling GET %s/id...", entrypoint)
 
-	pubKey, err := crypt.PublicKeyToPEM(n.publicSignKey)
+	authKey, err := crypt.PublicKeyToPEM(n.publicSignKey)
 	if err != nil {
 		return fmt.Errorf("crypt.PublicKeyToPEM: %v", err)
 	}
+
+	logger.Debugf(ctx, "My auth key: %s", authKey)
 
 	h := http.Header{}
 	resp, err := http.Get(fmt.Sprintf("http://%s/id", entrypoint))
@@ -258,7 +260,15 @@ func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 	logger.Debugf(ctx, "Received head ID '%s'", string(headID))
 
 	h.Add("Member-ID", n.id)
-	h.Add("Auth-Key", pubKey)
+	h.Add("Auth-Key", authKey)
+
+	_, err = crypt.GetECDSAPublicKeyFromPEM(authKey)
+	if err == nil {
+		logger.Debugf(ctx, "I can decode my auth key")
+	} else {
+		logger.Errorf(ctx, "Error decode my auth key: %v", err)
+		return err
+	}
 	u := url.URL{Scheme: "ws", Host: entrypoint, Path: "/ws"}
 
 	logger.Debugf(ctx, "Websocket connection with '%s'", headID)
