@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -149,7 +150,7 @@ func New(myID string, privateSignKey *ecdsa.PrivateKey, publicSignKey *ecdsa.Pub
 	return &Node{
 		id:             myID,
 		members:        make(map[string]connectedMember),
-		inbox:          make(chan message.Income),
+		inbox:          make(chan message.Income, 100),
 		waitAnswer:     make(map[string]*member.AnswerICE),
 		waitSigning:    make(map[string]challenge),
 		myCluster:      cluster{members: make(map[string]ClusterMember)},
@@ -184,12 +185,13 @@ func (n *Node) AddMember(ctx context.Context, m Member, disconnect func()) {
 
 	in := m.Interact(ctx, mout, disconnect)
 
-	go func() {
-		for m := range in {
-			n.inbox <- m
-		}
-	}()
-
+	for range runtime.NumCPU() {
+		go func() {
+			for m := range in {
+				n.inbox <- m
+			}
+		}()
+	}
 }
 
 func (n *Node) Run(ctx context.Context) {

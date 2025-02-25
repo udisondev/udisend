@@ -412,6 +412,9 @@ func (n *Node) handleOffer(ctx context.Context, in message.Income) {
 }
 
 func (n *Node) requestSignsFor(ID string) {
+	n.membersMu.RLock()
+	defer n.membersMu.RUnlock()
+
 	for memID, m := range n.members {
 		if memID == ID {
 			continue
