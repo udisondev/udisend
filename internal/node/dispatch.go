@@ -241,11 +241,15 @@ func (n *Node) handleAnswer(ctx context.Context, in message.Income) {
 	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.handleAnswer of '%s'", answer.From))
 	logger.Debugf(ctx, "Start...")
 
+	n.waitAnswerMu.Lock()
+	defer n.waitAnswerMu.Unlock()
+
 	memb, ok := n.waitAnswer[answer.From]
 	if !ok {
 		logger.Debugf(ctx, "Has no wait answer")
 		return
 	}
+	delete(n.waitAnswer, answer.From)
 
 	descr := webrtc.SessionDescription{}
 	decode(answer.SDP, &descr)
@@ -309,11 +313,16 @@ func (n *Node) makeOffer(ctx context.Context, in message.Income) {
 	go func() {
 		<-time.After(2 * time.Minute)
 		logger.Debugf(ctx, "No wait answer yet")
+
 		n.waitAnswerMu.Lock()
-		delete(n.waitAnswer, connSign.From)
-		n.waitAnswerMu.Unlock()
-		dc.Close()
-		pc.Close()
+		defer n.waitAnswerMu.Unlock()
+
+		_, ok := n.waitAnswer[connSign.From]
+		if ok {
+			delete(n.waitAnswer, connSign.From)
+			dc.Close()
+			pc.Close()
+		}
 	}()
 
 	n.Send(message.Outcome{
@@ -364,7 +373,8 @@ func (n *Node) handleOffer(ctx context.Context, in message.Income) {
 
 	pc, err := webrtc.NewPeerConnection(config)
 	if err != nil {
-		panic(err)
+		logger.Errorf(ctx, "webrtc.NewPeerConnection: %v", err)
+		return
 	}
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
@@ -376,19 +386,25 @@ func (n *Node) handleOffer(ctx context.Context, in message.Income) {
 
 	err = pc.SetRemoteDescription(sd)
 	if err != nil {
-		panic(err)
+		logger.Errorf(ctx, "pc.SetRemoteDesctiption: %v", err)
+		pc.Close()
+		return
 	}
 
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
-		panic(err)
+		logger.Errorf(ctx, "pc.CreateAnswer: %v", err)
+		pc.Close()
+		return
 	}
 
 	gatherComplete := webrtc.GatheringCompletePromise(pc)
 
 	err = pc.SetLocalDescription(answer)
 	if err != nil {
-		panic(err)
+		logger.Errorf(ctx, "pc.SetLocalDescription: %v", err)
+		pc.Close()
+		return
 	}
 
 	<-gatherComplete
