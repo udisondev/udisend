@@ -118,7 +118,7 @@ func (n *Node) checkChallenge(ctx context.Context, in message.Income) {
 	logger.Debugf(ctx, "challenge successful pass")
 
 	logger.Debugf(ctx, "...End")
-	n.inbox <- message.Income{From: in.From, Message: message.Message{Type: message.NewConnection}}
+	n.requestSignsFor(in.From)
 }
 
 func (n *Node) solveChallenge(ctx context.Context, in message.Income) {
