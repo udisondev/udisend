@@ -286,11 +286,6 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	}
 
 	authPubKey := r.Header.Get("Auth-Key")
-	if strings.TrimSpace(authPubKey) == "" {
-		http.Error(w, "please provide your Auth-Key as a header", 400)
-		return
-	}
-
 	logger.Debugf(ctx, "Connection=%s provided pubKey=%s", connectedMemberID, authPubKey)
 
 	memberAuthKey, err := crypt.GetECDSAPublicKeyFromPEM(authPubKey)
