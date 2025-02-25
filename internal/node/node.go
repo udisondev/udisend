@@ -291,14 +291,12 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 
 	connectedMemberID := r.Header.Get("Member-ID")
 	if strings.TrimSpace(connectedMemberID) == "" {
-		http.Error(w, "please provide your Member-ID as a header", 400)
 		return
 	}
 
 	authPubKey := r.Header.Get("Auth-Key")
 	authPubKey, err := url.QueryUnescape(authPubKey)
 	if err != nil {
-		logger.Errorf(ctx, "Error unescape auth key")
 		return
 	}
 
@@ -306,8 +304,6 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 
 	memberAuthKey, err := crypt.GetECDSAPublicKeyFromPEM(authPubKey)
 	if err != nil {
-		logger.Errorf(ctx, "Invelid Auth-Key: %v", err)
-		http.Error(w, "invalid Auth-Key", 400)
 		return
 	}
 
@@ -315,7 +311,6 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	if ok {
 		if !clstrMemb.pubKey.Equal(memberAuthKey) {
 			logger.Errorf(ctx, "Provided wrong Auth-Key")
-			http.Error(w, "wrong Auth-Key", 400)
 			return
 		}
 	}
@@ -335,5 +330,5 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 		pubKey: memberAuthKey,
 	}
 
-	n.inbox <- message.Income{From: connectedMemberID, Message: message.Message{Type: message.NewConnection}}
+	n.inbox <- message.Income{From: connectedMemberID, Message: message.Message{Type: message.DoVerify}}
 }
