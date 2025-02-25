@@ -260,7 +260,7 @@ func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 	logger.Debugf(ctx, "Received head ID '%s'", string(headID))
 
 	h.Add("Member-ID", n.id)
-	h.Add("Auth-Key", authKey)
+	h.Add("Auth-Key", url.QueryEscape(authKey))
 
 	_, err = crypt.GetECDSAPublicKeyFromPEM(authKey)
 	if err == nil {
@@ -296,6 +296,12 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	}
 
 	authPubKey := r.Header.Get("Auth-Key")
+	authPubKey, err := url.QueryUnescape(authPubKey)
+	if err != nil {
+		logger.Errorf(ctx, "Error unescape auth key")
+		return
+	}
+
 	logger.Debugf(ctx, "Connection=%s provided pubKey=%s", connectedMemberID, authPubKey)
 
 	memberAuthKey, err := crypt.GetECDSAPublicKeyFromPEM(authPubKey)
