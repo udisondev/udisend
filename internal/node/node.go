@@ -286,7 +286,7 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	}
 
 	authPubKey := r.Header.Get("Auth-Key")
-	if strings.TrimSpace(connectedMemberID) == "" {
+	if strings.TrimSpace(authPubKey) == "" {
 		http.Error(w, "please provide your Auth-Key as a header", 400)
 		return
 	}
@@ -295,23 +295,24 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 
 	memberAuthKey, err := crypt.GetECDSAPublicKeyFromPEM(authPubKey)
 	if err != nil {
-		http.Error(w, "invalid auth Auth-Key", 400)
-		return
-	}
-
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		logger.Errorf(ctx, "Error upgrade request: %v", err)
+		logger.Errorf(ctx, "Invelid Auth-Key: %v", err)
+		http.Error(w, "invalid Auth-Key", 400)
 		return
 	}
 
 	clstrMemb, ok := n.myCluster.members[connectedMemberID]
 	if ok {
 		if !clstrMemb.pubKey.Equal(memberAuthKey) {
+			logger.Errorf(ctx, "Provided wrong Auth-Key")
 			http.Error(w, "wrong Auth-Key", 400)
-			conn.Close()
 			return
 		}
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Errorf(ctx, "Error upgrade request: %v", err)
+		return
 	}
 
 	memb := member.NewTCP(connectedMemberID, conn)
