@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/big"
 	"sort"
 	"strings"
@@ -48,7 +47,7 @@ func (n *Node) dispatch(ctx context.Context, in message.Income) {
 	case message.NewConnection:
 		n.requestSignsFor(in.From)
 	case message.GenerateConnectionSign:
-		n.generateConnectionSign(in)
+		n.generateConnectionSign(ctx, in)
 	case message.SendConnectionSign:
 		connectionSign := message.ParseConnectionSign(in.Text)
 		n.Send(message.Outcome{
@@ -88,10 +87,12 @@ func (n *Node) dispatch(ctx context.Context, in message.Income) {
 }
 
 func (n *Node) checkChallenge(ctx context.Context, in message.Income) {
-	ctx = ctxtool.Span(ctx, "node.checkChallenge")
+	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.checkChallenge for=%s", in.From))
+	logger.Debugf(ctx, "Start...")
+
 	actualChallenge, ok := n.waitSigning[in.From]
 	if !ok {
-		logger.Errorf(ctx, "Has no challenge for '%s'", in.From)
+		logger.Debugf(ctx, "Has no challenge for '%s'", in.From)
 		return
 	}
 
@@ -112,10 +113,14 @@ func (n *Node) checkChallenge(ctx context.Context, in message.Income) {
 		logger.Errorf(ctx, "'%s' fails challenge", in.From)
 		return
 	}
+
+	logger.Debugf(ctx, "...End")
 }
 
 func (n *Node) solveChallenge(ctx context.Context, in message.Income) {
-	ctx = ctxtool.Span(ctx, "node.doSign")
+	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.doSign for=%s", in.From))
+	logger.Debugf(ctx, "Start...")
+
 	challenge, err := hex.DecodeString(in.Text)
 	if err != nil {
 		logger.Errorf(ctx, "Error decode as hex <challenge:%s>: %v", in.Text, err)
@@ -145,19 +150,23 @@ func (n *Node) solveChallenge(ctx context.Context, in message.Income) {
 			Text: sigHex,
 		},
 	})
+
+	logger.Debugf(ctx, "...End")
 }
 
 func (n *Node) doVerify(ctx context.Context, in message.Income) {
 	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.doVerify member=%s", in.From))
+	logger.Debugf(ctx, "Start...")
 
 	clstMemb, ok := n.myCluster.members[in.From]
 	if !ok {
+		logger.Debugf(ctx, "Has no member=%s in my cluster", in.From)
 		return
 	}
 
 	challengeValue := make([]byte, 32)
 	if _, err := rand.Read(challengeValue); err != nil {
-		log.Println("Ошибка генерации случайных данных:", err)
+		logger.Errorf(ctx, "Error generate challenge: %v", err)
 		return
 	}
 
@@ -182,13 +191,15 @@ func (n *Node) doVerify(ctx context.Context, in message.Income) {
 			Text: challengeHex,
 		},
 	})
+	logger.Debugf(ctx, "...End")
 }
 
-func (n *Node) generateConnectionSign(in message.Income) {
+func (n *Node) generateConnectionSign(ctx context.Context, in message.Income) {
+	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.generateConnectionSign for '%s'", in.Text))
+	logger.Debugf(ctx, "Start...")
 	sign, err := genSign()
-
-	log.Println("Sign generated ", sign)
 	if err != nil {
+		logger.Errorf(ctx, "Error generating: %v", err)
 		return
 	}
 
@@ -203,6 +214,8 @@ func (n *Node) generateConnectionSign(in message.Income) {
 
 	go func() {
 		<-time.After(2 * time.Minute)
+		logger.Debugf(ctx, "sign removed")
+
 		n.signMapMu.Lock()
 		delete(n.signMap, in.Text)
 		n.signMapMu.Unlock()
@@ -215,15 +228,18 @@ func (n *Node) generateConnectionSign(in message.Income) {
 			Text: strings.Join([]string{n.id, in.Text, sign, n.stunServer}, "|"),
 		},
 	})
+
+	logger.Debugf(ctx, "...End")
 }
 
 func (n *Node) handleAnswer(ctx context.Context, in message.Income) {
 	answer := message.ParseAnswer(in.Text)
 	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.handleAnswer of '%s'", answer.From))
+	logger.Debugf(ctx, "Start...")
 
 	memb, ok := n.waitAnswer[answer.From]
 	if !ok {
-		logger.Debugf(ctx, "has no wait answer")
+		logger.Debugf(ctx, "Has no wait answer")
 		return
 	}
 
@@ -237,13 +253,14 @@ func (n *Node) handleAnswer(ctx context.Context, in message.Income) {
 		logger.Errorf(ctx, "Error setting remote description: %v", err)
 		return
 	}
+
+	logger.Debugf(ctx, "...End")
 }
 
 func (n *Node) makeOffer(ctx context.Context, in message.Income) {
 	connSign := message.ParseConnectionSign(in.Text)
 	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.makeOffer for '%s'", connSign.From))
-
-	log.Println("Making offer for ", connSign.From)
+	logger.Debugf(ctx, "Start...")
 
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
@@ -287,14 +304,13 @@ func (n *Node) makeOffer(ctx context.Context, in message.Income) {
 
 	go func() {
 		<-time.After(2 * time.Minute)
+		logger.Debugf(ctx, "No wait answer yet")
 		n.waitAnswerMu.Lock()
 		delete(n.waitAnswer, connSign.From)
 		n.waitAnswerMu.Unlock()
 		dc.Close()
 		pc.Close()
 	}()
-	//
-	// Add handlers for setting up the connection.
 
 	n.Send(message.Outcome{
 		To: in.From,
@@ -309,25 +325,28 @@ func (n *Node) makeOffer(ctx context.Context, in message.Income) {
 			}, "|"),
 		},
 	})
+
+	logger.Debugf(ctx, "...End")
 }
 
 func (n *Node) handleOffer(ctx context.Context, in message.Income) {
 	offer := message.ParseOffer(in.Text)
 	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.makeOffer for '%s'", offer.From))
+	logger.Debugf(ctx, "Start...")
 
 	actual, ok := n.signMap[offer.From]
 	if !ok {
-		logger.Debugf(ctx, "has no sign")
+		logger.Debugf(ctx, "Has no sign")
 		return
 	}
 
 	if actual.Sign != offer.Sign {
-		logger.Debugf(ctx, "signs are not equal actual=%s given=%s", actual.Sign, offer.Sign)
+		logger.Debugf(ctx, "Signs are not equal actual=%s given=%s", actual.Sign, offer.Sign)
 		return
 	}
 
 	if offer.Stun != actual.Stun {
-		logger.Debugf(ctx, "stun servers are not equal actual=%s given=%s", actual.Stun, offer.Stun)
+		logger.Debugf(ctx, "Stun servers are not equal actual=%s given=%s", actual.Stun, offer.Stun)
 		return
 	}
 
@@ -345,7 +364,7 @@ func (n *Node) handleOffer(ctx context.Context, in message.Income) {
 	}
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		logger.Debugf(ctx, "connection change state to '%s'", state.String())
+		logger.Debugf(ctx, "Connection change state to '%s'", state.String())
 	})
 
 	sd := webrtc.SessionDescription{}
@@ -384,6 +403,8 @@ func (n *Node) handleOffer(ctx context.Context, in message.Income) {
 			Text: strings.Join([]string{n.id, offer.From, encode(pc.LocalDescription())}, "|"),
 		},
 	})
+
+	logger.Debugf(ctx, "...End")
 }
 
 func (n *Node) requestSignsFor(ID string) {

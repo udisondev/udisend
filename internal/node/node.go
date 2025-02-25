@@ -15,6 +15,7 @@ import (
 	"udisend/internal/logger"
 	"udisend/internal/member"
 	"udisend/internal/message"
+	"udisend/pkg/crypt"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -190,6 +191,11 @@ func (n *Node) AddMember(ctx context.Context, m Member, disconnect func()) {
 }
 
 func (n *Node) Run(ctx context.Context) {
+	n.myCluster = cluster{
+		id:      uuid.New().String(),
+		members: map[string]ClusterMember{},
+	}
+
 	ctx = ctxtool.Span(ctx, "node.Run")
 	logger.Debugf(ctx, "Run...")
 
@@ -225,8 +231,13 @@ func (n *Node) Send(out message.Outcome) error {
 
 func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 	ctx = ctxtool.Span(ctx, "node.AttachHead")
-
 	logger.Debugf(ctx, "Going to request head ID by calling GET %s/id...", entrypoint)
+
+	pubKey, err := crypt.PublicKeyToPEM(n.publicSignKey)
+	if err != nil {
+		return fmt.Errorf("crypt.PublicKeyToPEM: %v", err)
+	}
+
 	h := http.Header{}
 	resp, err := http.Get(fmt.Sprintf("http://%s/id", entrypoint))
 	if err != nil {
@@ -246,7 +257,8 @@ func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 
 	logger.Debugf(ctx, "Received head ID '%s'", string(headID))
 
-	h.Add("memberID", n.id)
+	h.Add("Member-ID", n.id)
+	h.Add("Auth-Key", pubKey)
 	u := url.URL{Scheme: "ws", Host: entrypoint, Path: "/ws"}
 
 	logger.Debugf(ctx, "Websocket connection with '%s'", headID)
@@ -273,17 +285,44 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	connectedMemberID := r.Header.Get("memberID")
-
+	connectedMemberID := r.Header.Get("Member-ID")
 	if strings.TrimSpace(connectedMemberID) == "" {
-		http.Error(w, "please provide your memberID as a header", 400)
+		http.Error(w, "please provide your Member-ID as a header", 400)
 		conn.Close()
 		return
+	}
+
+	authPubKey := r.Header.Get("Auth-Key")
+	if strings.TrimSpace(connectedMemberID) == "" {
+		http.Error(w, "please provide your Auth-Key as a header", 400)
+		conn.Close()
+		return
+	}
+
+	memberAuthKey, err := crypt.GetECDSAPublicKeyFromPEM(authPubKey)
+	if err != nil {
+		http.Error(w, "invalid auth Auth-Key", 400)
+		conn.Close()
+		return
+	}
+
+	clstrMemb, ok := n.myCluster.members[connectedMemberID]
+	if ok {
+		if !clstrMemb.pubKey.Equal(memberAuthKey) {
+			http.Error(w, "wrong Auth-Key", 400)
+			conn.Close()
+			return
+		}
 	}
 
 	memb := member.NewTCP(connectedMemberID, conn)
 	memberCtx, disconnect := context.WithCancel(ctx)
 	n.AddMember(memberCtx, memb, disconnect)
+
+	n.myCluster.members[connectedMemberID] = ClusterMember{
+		id:     connectedMemberID,
+		pubKey: memberAuthKey,
+	}
 
 	n.inbox <- message.Income{From: connectedMemberID, Message: message.Message{Type: message.NewConnection}}
 }
