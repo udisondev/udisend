@@ -258,7 +258,7 @@ func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 	logger.Debugf(ctx, "Received head ID '%s'", string(headID))
 
 	h.Add("Member-ID", n.id)
-	h.Add("Auth-Key", pubKey)
+	h.Add("Auth-Key", url.QueryEscape(pubKey))
 	u := url.URL{Scheme: "ws", Host: entrypoint, Path: "/ws"}
 
 	logger.Debugf(ctx, "Websocket connection with '%s'", headID)
