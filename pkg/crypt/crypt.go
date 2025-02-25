@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 const (
@@ -65,16 +66,21 @@ func PublicKeyToPEM(pubKey *ecdsa.PublicKey) (string, error) {
 }
 
 func GetECDSAPublicKeyFromPEM(pemData string) (*ecdsa.PublicKey, error) {
+	pemData = strings.TrimSpace(pemData)
+
+	// Декодируем PEM-блок
 	block, _ := pem.Decode([]byte(pemData))
 	if block == nil {
-		return nil, errors.New("не удалось декодировать PEM блок")
+		return nil, errors.New("не удалось декодировать PEM блок, возможно, формат некорректный")
 	}
 
+	// Парсим ключ
 	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка парсинга публичного ключа: %w", err)
 	}
 
+	// Проверяем, что это действительно ECDSA-ключ
 	ecdsaPub, ok := pub.(*ecdsa.PublicKey)
 	if !ok {
 		return nil, errors.New("полученный ключ не является ECDSA")
