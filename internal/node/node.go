@@ -258,7 +258,7 @@ func (n *Node) AttachHead(ctx context.Context, entrypoint string) error {
 	logger.Debugf(ctx, "Received head ID '%s'", string(headID))
 
 	h.Add("Member-ID", n.id)
-	h.Add("Auth-Key", url.QueryEscape(pubKey))
+	h.Add("Auth-Key", pubKey)
 	u := url.URL{Scheme: "ws", Host: entrypoint, Path: "/ws"}
 
 	logger.Debugf(ctx, "Websocket connection with '%s'", headID)
@@ -286,12 +286,6 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	}
 
 	authPubKey := r.Header.Get("Auth-Key")
-	authPubKey, err := url.QueryUnescape(authPubKey)
-	if err != nil {
-		logger.Errorf(ctx, "Error unescape 'Auth-Key': %v", err)
-		http.Error(w, "error auth-key unscaping", 400)
-		return
-	}
 	if strings.TrimSpace(authPubKey) == "" {
 		http.Error(w, "please provide your Auth-Key as a header", 400)
 		return

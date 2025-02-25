@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"udisend/internal/logger"
 )
 
 const (
@@ -67,6 +68,8 @@ func PublicKeyToPEM(pubKey *ecdsa.PublicKey) (string, error) {
 
 func GetECDSAPublicKeyFromPEM(pemData string) (*ecdsa.PublicKey, error) {
 	pemData = strings.TrimSpace(pemData)
+
+	logger.Debugf(nil, "Received pem: %s", pemData)
 
 	// Декодируем PEM-блок
 	block, _ := pem.Decode([]byte(pemData))
