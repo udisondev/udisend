@@ -151,6 +151,8 @@ func New(myID string, privateSignKey *ecdsa.PrivateKey, publicSignKey *ecdsa.Pub
 		members:        make(map[string]connectedMember),
 		inbox:          make(chan message.Income),
 		waitAnswer:     make(map[string]*member.AnswerICE),
+		waitSigning:    make(map[string]challenge),
+		myCluster:      cluster{members: make(map[string]ClusterMember)},
 		scripts:        make([]*script, 0),
 		stunServer:     "stun:stun.l.google.com:19302",
 		signMap:        make(map[string]message.ConnectionSign),
