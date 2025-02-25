@@ -3,7 +3,6 @@ package member
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
 	"fmt"
 	"sync"
 	"udisend/internal/ctxtool"
