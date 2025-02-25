@@ -279,23 +279,15 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	ctx = ctxtool.Span(ctx, "node.ServerWs")
 	logger.Debugf(ctx, "New connection")
 
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		logger.Errorf(ctx, "Error upgrade request: %v", err)
-		return
-	}
-
 	connectedMemberID := r.Header.Get("Member-ID")
 	if strings.TrimSpace(connectedMemberID) == "" {
 		http.Error(w, "please provide your Member-ID as a header", 400)
-		conn.Close()
 		return
 	}
 
 	authPubKey := r.Header.Get("Auth-Key")
 	if strings.TrimSpace(connectedMemberID) == "" {
 		http.Error(w, "please provide your Auth-Key as a header", 400)
-		conn.Close()
 		return
 	}
 
@@ -304,7 +296,12 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	memberAuthKey, err := crypt.GetECDSAPublicKeyFromPEM(authPubKey)
 	if err != nil {
 		http.Error(w, "invalid auth Auth-Key", 400)
-		conn.Close()
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Errorf(ctx, "Error upgrade request: %v", err)
 		return
 	}
 
