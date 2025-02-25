@@ -299,6 +299,8 @@ func (n *Node) ServeWs(ctx context.Context, w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	logger.Debugf(ctx, "Connection=%s provided pubKey=%s", connectedMemberID, authPubKey)
+
 	memberAuthKey, err := crypt.GetECDSAPublicKeyFromPEM(authPubKey)
 	if err != nil {
 		http.Error(w, "invalid auth Auth-Key", 400)
