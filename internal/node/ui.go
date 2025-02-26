@@ -77,7 +77,7 @@ func (n *Node) handleSend(w http.ResponseWriter, r *http.Request) {
 		To: recepient,
 		Message: message.Message{
 			Type: message.Private,
-			Text: msg,
+			Text: msg[del+1:],
 		},
 	})
 
