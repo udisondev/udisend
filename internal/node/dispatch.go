@@ -131,7 +131,7 @@ func (n *Node) solveChallenge(ctx context.Context, in message.Income) {
 	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.doSign for=%s", in.From))
 	logger.Debugf(ctx, "Start...")
 
-	challenge, err := hex.DecodeString(in.Text + "4")
+	challenge, err := hex.DecodeString(in.Text)
 	if err != nil {
 		logger.Errorf(ctx, "Error decode as hex <challenge:%s>: %v", in.Text, err)
 		return
