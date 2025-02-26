@@ -22,7 +22,8 @@ func (n *Node) handleUsers(w http.ResponseWriter, r *http.Request) {
 // handleMessages возвращает накопленные сообщения и очищает их, чтобы избежать дублирования
 func (n *Node) handleMessages(w http.ResponseWriter, r *http.Request) {
 	n.messagesMu.RLock()
-	n.membersMu.RUnlock()
+	defer n.messagesMu.RUnlock()
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	for member, msgs := range n.messages {
 		for i, msg := range msgs {

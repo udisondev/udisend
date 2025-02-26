@@ -43,7 +43,7 @@ func (n *Node) dispatch(ctx context.Context, in message.Income) {
 			msgs = make([]message.PrivateMessage, 1)
 		}
 		msgs = append(msgs, message.PrivateMessage{From: in.From, Text: in.Text})
-		n.membersMu.Unlock()
+		n.messagesMu.Unlock()
 	case message.DoVerify:
 		n.doVerify(ctx, in)
 	case message.SolveChallenge:
@@ -174,7 +174,12 @@ func (n *Node) doVerify(ctx context.Context, in message.Income) {
 		return
 	}
 
-	challengeValue := []byte(rand.Text())
+	challengeValue := make([]byte, 32)
+	if _, err := rand.Read(challengeValue); err != nil {
+		logger.Errorf(ctx, "Error generate challenge: %v", err)
+		return
+	}
+
 	challengeHex := hex.EncodeToString(challengeValue)
 
 	n.waitSigningMu.Lock()
