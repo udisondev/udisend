@@ -225,8 +225,8 @@ func (n *Node) Run(ctx context.Context) {
 				w.Write([]byte(n.id))
 			})
 
-			logger.Debugf(ctx, "Stat listening <addr:%s>", n.addr)
-			if err := http.ListenAndServe(n.addr, muxWs); err != nil {
+			logger.Debugf(ctx, "Stat listening :8000")
+			if err := http.ListenAndServe(":8000", muxWs); err != nil {
 				logger.Errorf(ctx, "Error listening <addr:%s> %v", n.addr, err)
 			}
 		}()
