@@ -174,12 +174,7 @@ func (n *Node) doVerify(ctx context.Context, in message.Income) {
 		return
 	}
 
-	challengeValue := make([]byte, 32)
-	if _, err := rand.Read(challengeValue); err != nil {
-		logger.Errorf(ctx, "Error generate challenge: %v", err)
-		return
-	}
-
+	challengeValue := []byte(rand.Text())
 	challengeHex := hex.EncodeToString(challengeValue)
 
 	n.waitSigningMu.Lock()
