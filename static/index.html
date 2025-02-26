@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <title>Чат на htmx</title>
-  <!-- Подключение htmx -->
+  
   <script src="https://unpkg.com/htmx.org@1.9.2"></script>
   <style>
     body { margin: 0; font-family: Arial, sans-serif; }
@@ -43,11 +43,11 @@
 </head>
 <body>
   <div class="container">
-    <!-- Левая колонка со списком пользователей -->
+    
     <div class="sidebar" id="userList"
-         hx-get="/chat/users"           <!-- URL для получения списка пользователей -->
-         hx-trigger="load, every 5s"     <!-- Обновление при загрузке и каждые 5 секунд -->
-         hx-swap="innerHTML">            <!-- Обновление содержимого списка -->
+         hx-get="/chat/users"           
+         hx-trigger="load, every 5s"     
+         hx-swap="innerHTML">            
       <h3>Пользователи</h3>
       <ul>
         <li>Пользователь1</li>
@@ -55,21 +55,21 @@
         <li>Пользователь3</li>
       </ul>
     </div>
-    <!-- Правая часть: область переписки и ввод сообщения -->
+    
     <div class="chat-area">
-      <!-- Область переписки -->
+      
       <div class="chat-history" id="chatHistory"
-           hx-get="/chat/messages"          <!-- URL для получения сообщений -->
-           hx-trigger="load, every 5s"       <!-- Автоматическое обновление при загрузке и каждые 5 секунд -->
-           hx-swap="beforeend">              <!-- Добавление новых сообщений в конец -->
-        <!-- Здесь будут динамически подгружаться сообщения -->
+           hx-get="/chat/messages"          
+           hx-trigger="load, every 5s"       
+           hx-swap="beforeend">              
+        
       </div>
-      <!-- Форма ввода сообщения -->
+      
       <div class="chat-input">
-        <form hx-post="/chat/send"         <!-- URL для отправки сообщений -->
-              hx-trigger="submit"          <!-- Отправка формы при сабмите -->
-              hx-target="#chatHistory"     <!-- Цель обновления - область переписки -->
-              hx-swap="beforeend">         <!-- Добавление нового сообщения в конец переписки -->
+        <form hx-post="/chat/send"         
+              hx-trigger="submit"          
+              hx-target="#chatHistory"     
+              hx-swap="beforeend">         
           <textarea name="message" placeholder="Введите сообщение..."></textarea>
           <button type="submit">Отправить</button>
         </form>
