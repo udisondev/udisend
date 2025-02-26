@@ -40,20 +40,26 @@ func (n *Node) dispatch(ctx context.Context, in message.Income) {
 		n.messagesMu.Lock()
 		msgs, ok := n.messages[in.From]
 		if !ok {
-			msgs = make([]message.PrivateMessage, 1)
+			n.messages[in.From] = make([]message.PrivateMessage, 1)
 		}
 		msgs = append(msgs, message.PrivateMessage{From: in.From, Text: in.Text})
 		n.messagesMu.Unlock()
+
 	case message.DoVerify:
 		n.doVerify(ctx, in)
+
 	case message.SolveChallenge:
 		n.solveChallenge(ctx, in)
+
 	case message.TestChallenge:
 		n.checkChallenge(ctx, in)
+
 	case message.NewConnection:
 		n.requestSignsFor(in.From)
+
 	case message.GenerateConnectionSign:
 		n.generateConnectionSign(ctx, in)
+
 	case message.SendConnectionSign:
 		connectionSign := message.ParseConnectionSign(in.Text)
 		n.Send(message.Outcome{
@@ -63,8 +69,10 @@ func (n *Node) dispatch(ctx context.Context, in message.Income) {
 				Text: in.Text,
 			},
 		})
+
 	case message.MakeOffer:
 		n.makeOffer(ctx, in)
+
 	case message.SendOffer:
 		offer := message.ParseOffer(in.Text)
 		n.Send(message.Outcome{
@@ -74,8 +82,10 @@ func (n *Node) dispatch(ctx context.Context, in message.Income) {
 				Text: in.Text,
 			},
 		})
+
 	case message.HandleOffer:
 		n.handleOffer(ctx, in)
+
 	case message.SendAnswer:
 		answer := message.ParseAnswer(in.Text)
 		n.Send(message.Outcome{
@@ -85,8 +95,10 @@ func (n *Node) dispatch(ctx context.Context, in message.Income) {
 				Text: in.Text,
 			},
 		})
+
 	case message.HandleAnswer:
 		n.handleAnswer(ctx, in)
+
 	default:
 		logger.Debugf(ctx, "unexpected message.MessageType: %#v", in.Type)
 	}
