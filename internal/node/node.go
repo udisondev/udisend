@@ -159,6 +159,7 @@ func New(myID string, privateSignKey *ecdsa.PrivateKey, publicSignKey *ecdsa.Pub
 		chatPort:       chatPort,
 		listenPort:     listenPort,
 		members:        make(map[string]connectedMember),
+		messages:       make(map[string][]message.PrivateMessage),
 		inbox:          make(chan message.Income, 100),
 		waitAnswer:     make(map[string]*member.AnswerICE),
 		waitSigning:    make(map[string]challenge),
