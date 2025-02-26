@@ -260,7 +260,7 @@ func (n *Node) Run(ctx context.Context) {
 }
 
 func (n *Node) Send(out message.Outcome) error {
-	logger.Debugf(nil, "Going to send message to '%s'", out.To)
+	logger.Debugf(nil, "Going to send message to '%s' text: %s", out.To, out.Text)
 
 	m, ok := n.members[out.To]
 	if !ok {
