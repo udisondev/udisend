@@ -120,8 +120,11 @@ type challenge struct {
 }
 
 type Node struct {
-	id         string
-	addr       string
+	id string
+
+	listenPort string
+	chatPort   string
+
 	stunServer string
 	inbox      chan message.Income
 
@@ -150,10 +153,11 @@ type Node struct {
 	signMap   map[string]message.ConnectionSign
 }
 
-func New(myID string, privateSignKey *ecdsa.PrivateKey, publicSignKey *ecdsa.PublicKey, addr string) *Node {
+func New(myID string, privateSignKey *ecdsa.PrivateKey, publicSignKey *ecdsa.PublicKey, chatPort, listenPort string) *Node {
 	return &Node{
 		id:             myID,
-		addr:           addr,
+		chatPort:       chatPort,
+		listenPort:     listenPort,
 		members:        make(map[string]connectedMember),
 		inbox:          make(chan message.Income, 100),
 		waitAnswer:     make(map[string]*member.AnswerICE),
@@ -214,7 +218,7 @@ func (n *Node) Run(ctx context.Context) {
 		close(n.inbox)
 	}()
 
-	if n.addr != "" {
+	if n.listenPort != "" {
 		go func() {
 			// Создаем отдельный multiplexer для этого сервера
 			muxWs := http.NewServeMux()
@@ -226,9 +230,9 @@ func (n *Node) Run(ctx context.Context) {
 				w.Write([]byte(n.id))
 			})
 
-			logger.Debugf(ctx, "Stat listening :8000")
-			if err := http.ListenAndServe(":8000", muxWs); err != nil {
-				logger.Errorf(ctx, "Error listening <addr:%s> %v", n.addr, err)
+			logger.Infof(ctx, "Stat listening %s", n.listenPort)
+			if err := http.ListenAndServe(n.listenPort, muxWs); err != nil {
+				logger.Errorf(ctx, "Error listening <addr:%s> %v", n.listenPort, err)
 			}
 		}()
 	}
@@ -243,8 +247,8 @@ func (n *Node) Run(ctx context.Context) {
 		muxChat.HandleFunc("/chat/messages", n.handleMessages)
 		muxChat.HandleFunc("/chat/send", n.handleSend)
 
-		logger.Infof(ctx, "Open localhost:7777 to use the chat")
-		if err := http.ListenAndServe(":7777", muxChat); err != nil {
+		logger.Infof(ctx, "Open localhost:%s to use the chat", n.chatPort)
+		if err := http.ListenAndServe(n.chatPort, muxChat); err != nil {
 			panic(err)
 		}
 	}()

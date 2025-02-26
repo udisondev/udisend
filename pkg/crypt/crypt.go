@@ -130,9 +130,17 @@ func loadPublicKey(filename string) (*ecdsa.PublicKey, error) {
 }
 
 // loadOrGenerateKeys проверяет наличие файлов с ключами, если их нет — генерирует и сохраняет, иначе загружает.
-func LoadOrGenerateKeys() (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
-	_, privErr := os.Stat(privateKeyFile)
-	_, pubErr := os.Stat(publicKeyFile)
+func LoadOrGenerateKeys(privateAuth, publicAuth string) (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
+	if privateAuth != "" {
+		privateAuth = privateKeyFile
+	}
+
+	if publicAuth == "" {
+		publicAuth = publicKeyFile
+	}
+
+	_, privErr := os.Stat(privateAuth)
+	_, pubErr := os.Stat(publicAuth)
 
 	// Если хотя бы одного файла нет, генерируем новые ключи
 	if os.IsNotExist(privErr) || os.IsNotExist(pubErr) {
