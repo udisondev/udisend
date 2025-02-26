@@ -31,7 +31,8 @@ func (n *Node) handleMessages(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			msgs[i].Read = true
-			fmt.Fprintf(w, `<div>%s:    %s</div>`, member, msg.Text)
+			timestamp := time.Now().Format(time.TimeOnly)
+			fmt.Fprintf(w, `<div>[%s] %s:    %s</div>`, timestamp, member, msg.Text)
 		}
 	}
 }
@@ -82,5 +83,5 @@ func (n *Node) handleSend(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<div>[%s] %s</div>`, timestamp, msg)
+	fmt.Fprintf(w, `<div>[%s] You: %s</div>`, timestamp, msg)
 }
