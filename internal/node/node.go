@@ -153,6 +153,7 @@ type Node struct {
 func New(myID string, privateSignKey *ecdsa.PrivateKey, publicSignKey *ecdsa.PublicKey, addr string) *Node {
 	return &Node{
 		id:             myID,
+		addr:           addr,
 		members:        make(map[string]connectedMember),
 		inbox:          make(chan message.Income, 100),
 		waitAnswer:     make(map[string]*member.AnswerICE),
