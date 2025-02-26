@@ -40,7 +40,7 @@ func (n *Node) dispatch(ctx context.Context, in message.Income) {
 		n.messagesMu.Lock()
 		msgs, ok := n.messages[in.From]
 		if !ok {
-			n.messages[in.From] = make([]message.PrivateMessage, 1)
+			n.messages[in.From] = make([]message.PrivateMessage, 0)
 		}
 		msgs = append(msgs, message.PrivateMessage{From: in.From, Text: in.Text})
 		n.messagesMu.Unlock()
