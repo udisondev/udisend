@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	// ForYou is a MessageType of type ForYou.
-	ForYou MessageType = "ForYou"
+	// Private is a MessageType of type Private.
+	Private MessageType = "Private"
 	// DoVerify is a MessageType of type DoVerify.
 	DoVerify MessageType = "DoVerify"
 	// ProvidePubKey is a MessageType of type ProvidePubKey.
@@ -63,7 +63,7 @@ func (x MessageType) IsValid() bool {
 }
 
 var _MessageTypeValue = map[string]MessageType{
-	"ForYou":                 ForYou,
+	"Private":                Private,
 	"DoVerify":               DoVerify,
 	"ProvidePubKey":          ProvidePubKey,
 	"PubKeyProvided":         PubKeyProvided,

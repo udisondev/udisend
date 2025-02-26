@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -14,7 +12,6 @@ import (
 	"time"
 	"udisend/internal/ctxtool"
 	"udisend/internal/logger"
-	"udisend/internal/message"
 	"udisend/internal/node"
 	"udisend/pkg/crypt"
 )
@@ -51,7 +48,7 @@ func main() {
 
 	fmt.Printf("Wellcome %s!\n", *memberID)
 
-	n := node.New(*memberID, privSignKey, pubSignKey)
+	n := node.New(*memberID, privSignKey, pubSignKey, *addr)
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
@@ -67,69 +64,6 @@ func main() {
 			logger.Errorf(ctx, "n.AttachHead: %v", err)
 			cancel()
 		}
-	}
-
-	keyboard := bufio.NewScanner(os.Stdin)
-	fmt.Println("Чтобы отправить личное сообщение введите: /<recepient> ваше сообщение")
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			keyboard.Scan()
-			text := keyboard.Text()
-			if len(text) < 4 {
-				fmt.Println("Ваше сообщение не может быть короче 4х символов!")
-				continue
-			}
-			if !strings.HasPrefix(text, "/") {
-				fmt.Println("Ваше сообщение должно начинаться с '/'!")
-				continue
-			}
-			del := strings.Index(text, " ")
-			if del == -1 {
-				fmt.Println("После '/<recepient' должен быть пробел и ваше сообщение!")
-				continue
-			}
-			if len(text[del:]) < 2 {
-				fmt.Println("Сообщение должно быть не пустым!")
-				continue
-			}
-			recepient := text[1:del]
-			fmt.Print("\033[1A\033[2K")
-			fmt.Printf("You for %s: %s\n", recepient, text[del+1:])
-			err := n.Send(message.Outcome{
-				To: recepient,
-				Message: message.Message{
-					Type: message.ForYou,
-					Text: text[del+1:],
-				},
-			})
-			if err != nil {
-				log.Println("Error sending message", err.Error())
-			}
-		}
-	}()
-
-	if *addr != "" {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-				n.ServeWs(ctx, w, r)
-			})
-
-			http.HandleFunc("/id", func(w http.ResponseWriter, r *http.Request) {
-				logger.Debugf(ctx, "ID requested <ID:%s>", *memberID)
-				w.Write([]byte(*memberID))
-			})
-
-			logger.Debugf(ctx, "Stat listening <addr:%s>", *addr)
-			err := http.ListenAndServe(*addr, nil)
-			if err != nil {
-				logger.Errorf(ctx, "Error listening <addr:%s>", *addr)
-			}
-		}()
 	}
 
 	wg.Wait()

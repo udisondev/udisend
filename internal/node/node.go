@@ -121,8 +121,12 @@ type challenge struct {
 
 type Node struct {
 	id         string
+	addr       string
 	stunServer string
 	inbox      chan message.Income
+
+	messagesMu sync.RWMutex
+	messages   map[string][]message.PrivateMessage
 
 	privateSignKey *ecdsa.PrivateKey
 	publicSignKey  *ecdsa.PublicKey
@@ -146,7 +150,7 @@ type Node struct {
 	signMap   map[string]message.ConnectionSign
 }
 
-func New(myID string, privateSignKey *ecdsa.PrivateKey, publicSignKey *ecdsa.PublicKey) *Node {
+func New(myID string, privateSignKey *ecdsa.PrivateKey, publicSignKey *ecdsa.PublicKey, addr string) *Node {
 	return &Node{
 		id:             myID,
 		members:        make(map[string]connectedMember),
@@ -207,6 +211,40 @@ func (n *Node) Run(ctx context.Context) {
 		<-ctx.Done()
 		logger.Debugf(ctx, "Shuting down...")
 		close(n.inbox)
+	}()
+
+	if n.addr != "" {
+		go func() {
+			http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+				n.ServeWs(ctx, w, r)
+			})
+
+			http.HandleFunc("/id", func(w http.ResponseWriter, r *http.Request) {
+				logger.Debugf(ctx, "ID requested <ID:%s>", n.id)
+				w.Write([]byte(n.id))
+			})
+
+			logger.Debugf(ctx, "Stat listening <addr:%s>")
+			err := http.ListenAndServe(n.addr, nil)
+			if err != nil {
+				logger.Errorf(ctx, "Error listening <addr:%s>", n.addr)
+			}
+		}()
+	}
+
+	go func() {
+		fs := http.FileServer(http.Dir("static"))
+		http.Handle("/", fs)
+
+		http.HandleFunc("/chat/users", n.handleUsers)
+		http.HandleFunc("/chat/messages", n.handleMessages)
+		http.HandleFunc("/chat/send", n.handleSend)
+
+		logger.Infof(ctx, "Open localhost:7777 to use the chat")
+		err := http.ListenAndServe(":7777", nil)
+		if err != nil {
+			panic(err)
+		}
 	}()
 
 	for in := range n.inbox {

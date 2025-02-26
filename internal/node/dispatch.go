@@ -36,8 +36,14 @@ func (n *Node) dispatch(ctx context.Context, in message.Income) {
 	}
 
 	switch in.Type {
-	case message.ForYou:
-		fmt.Printf("%s: %s\n", in.From, in.Text)
+	case message.Private:
+		n.messagesMu.Lock()
+		msgs, ok := n.messages[in.From]
+		if !ok {
+			msgs = make([]message.PrivateMessage, 1)
+		}
+		msgs = append(msgs, message.PrivateMessage{From: in.From, Text: in.Text})
+		n.membersMu.Unlock()
 	case message.DoVerify:
 		n.doVerify(ctx, in)
 	case message.SolveChallenge:

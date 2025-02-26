@@ -10,7 +10,7 @@ import (
 /*
 ENUM(
 
-	ForYou,
+	Private,
 	DoVerify,
 	ProvidePubKey,
 	PubKeyProvided,
@@ -35,6 +35,12 @@ type MessageType string
 type Income struct {
 	From string
 	Message
+}
+
+type PrivateMessage struct {
+	From string
+	Text string
+	Read bool
 }
 
 type Message struct {
@@ -72,6 +78,14 @@ type ConnectionSign struct {
 
 type Offer struct {
 	From, To, Sign, Stun, SDP string
+}
+
+func ParsePrivateMessage(text string) PrivateMessage {
+	parts := strings.Split(text, "|")
+	return PrivateMessage{
+		From: parts[0],
+		Text: parts[1],
+	}
 }
 
 func (m Message) String() string {
