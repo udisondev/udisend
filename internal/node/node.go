@@ -215,34 +215,35 @@ func (n *Node) Run(ctx context.Context) {
 
 	if n.addr != "" {
 		go func() {
-			http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+			// Создаем отдельный multiplexer для этого сервера
+			muxWs := http.NewServeMux()
+			muxWs.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 				n.ServeWs(ctx, w, r)
 			})
-
-			http.HandleFunc("/id", func(w http.ResponseWriter, r *http.Request) {
+			muxWs.HandleFunc("/id", func(w http.ResponseWriter, r *http.Request) {
 				logger.Debugf(ctx, "ID requested <ID:%s>", n.id)
 				w.Write([]byte(n.id))
 			})
 
-			logger.Debugf(ctx, "Stat listening <addr:%s>")
-			err := http.ListenAndServe(n.addr, nil)
-			if err != nil {
-				logger.Errorf(ctx, "Error listening <addr:%s>", n.addr)
+			logger.Debugf(ctx, "Stat listening <addr:%s>", n.addr)
+			if err := http.ListenAndServe(n.addr, muxWs); err != nil {
+				logger.Errorf(ctx, "Error listening <addr:%s> %v", n.addr, err)
 			}
 		}()
 	}
 
 	go func() {
-		fs := http.FileServer(http.Dir("static"))
-		http.Handle("/", fs)
+		// Создаем отдельный multiplexer для этого сервера
+		muxChat := http.NewServeMux()
 
-		http.HandleFunc("/chat/users", n.handleUsers)
-		http.HandleFunc("/chat/messages", n.handleMessages)
-		http.HandleFunc("/chat/send", n.handleSend)
+		fs := http.FileServer(http.Dir("static"))
+		muxChat.Handle("/", fs)
+		muxChat.HandleFunc("/chat/users", n.handleUsers)
+		muxChat.HandleFunc("/chat/messages", n.handleMessages)
+		muxChat.HandleFunc("/chat/send", n.handleSend)
 
 		logger.Infof(ctx, "Open localhost:7777 to use the chat")
-		err := http.ListenAndServe(":7777", nil)
-		if err != nil {
+		if err := http.ListenAndServe(":7777", muxChat); err != nil {
 			panic(err)
 		}
 	}()
