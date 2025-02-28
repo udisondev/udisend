@@ -67,6 +67,6 @@ func RenderMessage(w http.ResponseWriter, msg Message) {
 func RenderUnread(w http.ResponseWriter, msgs []Message) {
 	err := tmpl.ExecuteTemplate(w, "unread", msgs)
 	if err != nil {
-		logger.Errorf(nil, "Error render unread: %v", err)
+		logger.Errorf(nil, "Error render chat: %v", err)
 	}
 }
