@@ -39,6 +39,7 @@ func (n *Node) indexHandler(w http.ResponseWriter, r *http.Request) {
 func (n *Node) messagesHandler(w http.ResponseWriter, r *http.Request) {
 	user := r.URL.Query().Get("user_id")
 	if user == "" {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -73,6 +74,7 @@ func (n *Node) messagesHandler(w http.ResponseWriter, r *http.Request) {
 func (n *Node) unreadHandler(w http.ResponseWriter, r *http.Request) {
 	user := r.URL.Query().Get("user_id")
 	if user == "" {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -99,6 +101,11 @@ func (n *Node) unreadHandler(w http.ResponseWriter, r *http.Request) {
 			Time:   m.Time,
 			Text:   m.Text,
 		})
+	}
+
+	if len(msgs) < 1 {
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 
 	templates.RenderUnread(w, msgs)
