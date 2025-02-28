@@ -84,10 +84,7 @@ func (n *Node) unreadHandler(w http.ResponseWriter, r *http.Request) {
 
 	messages, ok := n.messages[user]
 	if !ok {
-		templates.RenderChat(w, templates.Chat{
-			With:     user,
-			Messages: nil,
-		})
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
