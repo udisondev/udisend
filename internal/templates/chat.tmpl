@@ -8,7 +8,7 @@
     {{ end }}
   </div>
   <div class="chat-input">
-    <form hx-post="/chat/send" hx-target="#chat-content" hx-swap="beforeend">
+    <form hx-post="/chat/send" hx-target="#chat-body" hx-swap="beforeend">
       <input type="hidden" name="to_id" value="{{ .With }}">
       <textarea name="content" onkeydown="if(event.ctrlKey && event.key === 'Enter') this.form.submit()"></textarea>
       <button type="submit">Отправить</button>
