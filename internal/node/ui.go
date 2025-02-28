@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"udisend/internal/logger"
 	"udisend/internal/message"
 	"udisend/internal/templates"
 )
@@ -118,12 +119,15 @@ func (n *Node) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	text := r.FormValue("content")
 	recepient := r.FormValue("to_id")
+	logger.Debugf(nil, "Going to send '%s' to %s", text, recepient)
 	if recepient == "" {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	text := r.FormValue("content")
 	if strings.TrimSpace(text) == "" {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
