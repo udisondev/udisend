@@ -44,17 +44,29 @@ func RenderIndex(w http.ResponseWriter, users []User) {
 }
 
 func RenderUsers(w http.ResponseWriter, users []User) {
-	tmpl.ExecuteTemplate(w, "users", users)
+	err := tmpl.ExecuteTemplate(w, "users", users)
+	if err != nil {
+		logger.Errorf(nil, "Error render users: %v", err)
+	}
 }
 
 func RenderChat(w http.ResponseWriter, chat Chat) {
-	tmpl.ExecuteTemplate(w, "chat", chat)
+	err := tmpl.ExecuteTemplate(w, "chat", chat)
+	if err != nil {
+		logger.Errorf(nil, "Error render chat: %v", err)
+	}
 }
 
 func RenderMessage(w http.ResponseWriter, msg Message) {
-	tmpl.ExecuteTemplate(w, "message", msg)
+	err := tmpl.ExecuteTemplate(w, "message", msg)
+	if err != nil {
+		logger.Errorf(nil, "Error render message: %v", err)
+	}
 }
 
 func RenderUnread(w http.ResponseWriter, msgs []Message) {
-	tmpl.ExecuteTemplate(w, "unread", msgs)
+	err := tmpl.ExecuteTemplate(w, "unread", msgs)
+	if err != nil {
+		logger.Errorf(nil, "Error render unread: %v", err)
+	}
 }

@@ -1,7 +1,7 @@
 <div class="chat-header">
   Chat with ID: {{ .UserID }}
 </div>
-<div class="chat-body" hx-get="/unread?user_id={{ .UserID }}" hx-trigger="every 1s" hx-swap="innerHTML">
+<div class="chat-body" hx-get="/chat/unread?user_id={{ .UserID }}" hx-trigger="every 1s" hx-swap="innerHTML">
   {{ range .Messages }}
     {{ template "message" .}}
   {{ end }}

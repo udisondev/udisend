@@ -1,8 +1,10 @@
 package node
 
 import (
+	"cmp"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 	"udisend/internal/message"
@@ -24,7 +26,10 @@ func (n *Node) loadUsers() []templates.User {
 			Name: id,
 		})
 	}
-	return users
+
+	return slices.SortedFunc(slices.Values(users), func(a, b templates.User) int {
+		return cmp.Compare(a.ID, b.ID)
+	})
 }
 
 func (n *Node) indexHandler(w http.ResponseWriter, r *http.Request) {
