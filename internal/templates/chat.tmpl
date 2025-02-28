@@ -3,7 +3,7 @@
 </div>
 <div class="chat-body" hx-get="/unread?user_id={{ .UserID }}" hx-trigger="every 1s" hx-swap="innerHTML">
   {{ range .Messages }}
-    {{ templage "message" .}}
+    {{ template "message" .}}
   {{ end }}
 </div>
 <div class="chat-input">

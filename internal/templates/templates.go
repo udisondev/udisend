@@ -4,15 +4,20 @@ import (
 	"net/http"
 	"text/template"
 	"time"
+	"udisend/internal/logger"
 )
 
 var (
-	tmpl = template.Must(template.ParseFiles(
-		"index.tmpl",
-		"users.tmpl",
-		"chat.tmpl",
-		"unread.tmpl",
-		"message.tmpl",
+	tmpl = template.Must(template.New("").Funcs(template.FuncMap{
+		"fmtTime": func(t time.Time, layout string) string {
+			return t.Format(layout)
+		},
+	}).ParseFiles(
+		"internal/templates/index.tmpl",
+		"internal/templates/users.tmpl",
+		"internal/templates/chat.tmpl",
+		"internal/templates/unread.tmpl",
+		"internal/templates/message.tmpl",
 	))
 )
 
@@ -33,7 +38,9 @@ type Chat struct {
 }
 
 func RenderIndex(w http.ResponseWriter, users []User) {
-	tmpl.ExecuteTemplate(w, "index", users)
+	if err := tmpl.ExecuteTemplate(w, "index", users); err != nil {
+		logger.Errorf(nil, "Error render index: %v", err)
+	}
 }
 
 func RenderUsers(w http.ResponseWriter, users []User) {
