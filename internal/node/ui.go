@@ -1,40 +1,102 @@
 package node
 
 import (
-	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
 	"udisend/internal/message"
+	"udisend/internal/templates"
 )
 
-func (n *Node) handleUsers(w http.ResponseWriter, r *http.Request) {
-	usersHTML := `<h3>Пользователи</h3>
-	<ul>
-		<li>Пользователь1</li>
-		<li>Пользователь2</li>
-		<li>Пользователь3</li>
-	</ul>`
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, usersHTML)
+func (n *Node) usersHandler(w http.ResponseWriter, r *http.Request) {
+	templates.RenderUsers(w, n.loadUsers())
 }
 
-// handleMessages возвращает накопленные сообщения и очищает их, чтобы избежать дублирования
-func (n *Node) handleMessages(w http.ResponseWriter, r *http.Request) {
+func (n *Node) loadUsers() []templates.User {
+	n.membersMu.RLock()
+	defer n.membersMu.RUnlock()
+
+	users := make([]templates.User, len(n.members))
+	for id := range maps.Keys(n.members) {
+		users = append(users, templates.User{
+			ID:   id,
+			Name: id,
+		})
+	}
+	return users
+}
+
+func (n *Node) indexHandler(w http.ResponseWriter, r *http.Request) {
+	templates.RenderIndex(w, n.loadUsers())
+}
+
+func (n *Node) messagesHandler(w http.ResponseWriter, r *http.Request) {
+	user := r.URL.Query().Get("user_id")
+	if user == "" {
+		return
+	}
+
 	n.messagesMu.RLock()
 	defer n.messagesMu.RUnlock()
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	for member, msgs := range n.messages {
-		for i, msg := range msgs {
-			if msg.Read {
-				continue
-			}
-			msgs[i].Read = true
-			timestamp := time.Now().Format(time.TimeOnly)
-			fmt.Fprintf(w, `<div>[%s] %s:    %s</div>`, timestamp, member, msg.Text)
-		}
+	messages, ok := n.messages[user]
+	if !ok {
+		templates.RenderChat(w, templates.Chat{
+			With:     user,
+			Messages: nil,
+		})
+		return
 	}
+
+	msgs := make([]templates.Message, 0, len(messages))
+	for i, m := range messages {
+		messages[i].Read = true
+		msgs = append(msgs, templates.Message{
+			IsMine: n.id == m.From,
+			Time:   m.Time,
+			Text:   m.Text,
+		})
+	}
+
+	templates.RenderChat(w, templates.Chat{
+		With:     user,
+		Messages: msgs,
+	})
+}
+
+func (n *Node) unreadHandler(w http.ResponseWriter, r *http.Request) {
+	user := r.URL.Query().Get("user_id")
+	if user == "" {
+		return
+	}
+
+	n.messagesMu.RLock()
+	defer n.messagesMu.RUnlock()
+
+	messages, ok := n.messages[user]
+	if !ok {
+		templates.RenderChat(w, templates.Chat{
+			With:     user,
+			Messages: nil,
+		})
+		return
+	}
+
+	msgs := make([]templates.Message, 0, len(messages))
+	for i, m := range messages {
+		if m.Read {
+			continue
+		}
+		messages[i].Read = true
+		msgs = append(msgs, templates.Message{
+			IsMine: n.id == m.From,
+			Time:   m.Time,
+			Text:   m.Text,
+		})
+	}
+
+	templates.RenderUnread(w, msgs)
 }
 
 // handleSend принимает сообщение от пользователя и добавляет его в список сообщений
@@ -43,45 +105,44 @@ func (n *Node) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
 		return
 	}
-	err := r.ParseForm()
-	if err != nil {
-		http.Error(w, "Ошибка парсинга формы", http.StatusBadRequest)
+
+	recepient := r.FormValue("to_id")
+	if recepient == "" {
 		return
 	}
-	msg := r.FormValue("message")
-	if msg == "" {
-		http.Error(w, "Пустое сообщение", http.StatusBadRequest)
-		return
-	}
-	if len(msg) < 4 {
-		http.Error(w, "Ваше сообщение не может быть короче 4х символов", http.StatusBadRequest)
-		return
-	}
-	if !strings.HasPrefix(msg, "/") {
-		http.Error(w, "Ваше сообщение должно начинаться с '/'", http.StatusBadRequest)
-		return
-	}
-	del := strings.Index(msg, " ")
-	if del == -1 {
-		http.Error(w, "После '/<recepient' должен быть пробел и ваше сообщение!", http.StatusBadRequest)
-		return
-	}
-	if len(msg[del:]) < 2 {
-		http.Error(w, "Сообщение должно быть не пустым!", http.StatusBadRequest)
+	text := r.FormValue("content")
+	if strings.TrimSpace(text) == "" {
 		return
 	}
 
-	recepient := msg[1:del]
-	timestamp := time.Now().Format(time.TimeOnly)
+	n.messagesMu.Lock()
+	defer n.messagesMu.Unlock()
+
+	chat, ok := n.messages[recepient]
+	if !ok {
+		chat = make([]message.PrivateMessage, 0)
+	}
+	n.messages[recepient] = append(
+		chat,
+		message.PrivateMessage{
+			From: n.id,
+			Text: text,
+			Read: false,
+			Time: time.Time{},
+		})
 
 	n.Send(message.Outcome{
 		To: recepient,
 		Message: message.Message{
 			Type: message.Private,
-			Text: msg[del+1:],
+			Text: text,
 		},
 	})
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<div>[%s] You: %s</div>`, timestamp, msg)
+	templates.RenderMessage(w, templates.Message{
+		Time:   time.Now(),
+		Text:   text,
+		IsMine: true,
+	})
+
 }

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Messenger</title>
+  <script src="https://unpkg.com/htmx.org@1.9.6"></script>
+  <style>
+    body {
+      display: flex;
+      height: 100vh;
+      margin: 0;
+      font-family: Arial, sans-serif;
+    }
+
+    .left-panel {
+      width: 30%;
+      background: #f0f2f5;
+      overflow-y: auto;
+    }
+
+    .right-panel {
+      width: 70%;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .chat-header {
+      padding: 10px;
+      background: #00a884;
+      color: white;
+    }
+
+    .chat-body {
+      flex: 1;
+      padding: 10px;
+      overflow-y: auto;
+    }
+
+    .chat-input {
+      padding: 10px;
+      border-top: 1px solid #ddd;
+    }
+
+    .user {
+      padding: 10px;
+      cursor: pointer;
+    }
+
+    .user:hover {
+      background: #ddd;
+    }
+
+    .user.active {
+      background: #ccc;
+    }
+
+    .message-in {
+      text-align: left;
+      margin: 5px;
+    }
+
+    .message-out {
+      text-align: right;
+      margin: 5px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="left-panel" hx-get="/chat/users" hx-trigger="every 2s">
+    {{ template "users" }}
+  </div>
+  <div class="right-panel" id="chat-content">
+    <!-- Начальное состояние: чат пуст -->
+    <div class="chat-header">Выберите пользователя</div>
+    <div class="chat-body"></div>
+    <div class="chat-input"></div>
+  </div>
+
+  <script>
+    function setActive(element) {
+      document.querySelectorAll('.user').forEach(el => el.classList.remove('active'));
+      element.classList.add('active');
+    }
+  </script>
+</body>
+
+</html>

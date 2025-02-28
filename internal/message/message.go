@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+	"time"
 )
 
 /*
@@ -41,6 +42,7 @@ type PrivateMessage struct {
 	From string
 	Text string
 	Read bool
+	Time time.Time
 }
 
 type Message struct {

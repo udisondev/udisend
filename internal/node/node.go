@@ -242,10 +242,10 @@ func (n *Node) Run(ctx context.Context) {
 		// Создаем отдельный multiplexer для этого сервера
 		muxChat := http.NewServeMux()
 
-		fs := http.FileServer(http.Dir("static"))
-		muxChat.Handle("/", fs)
-		muxChat.HandleFunc("/chat/users", n.handleUsers)
-		muxChat.HandleFunc("/chat/messages", n.handleMessages)
+		muxChat.HandleFunc("/", n.indexHandler)
+		muxChat.HandleFunc("/users", n.usersHandler)
+		muxChat.HandleFunc("/chat", n.messagesHandler)
+		muxChat.HandleFunc("/chat/unread", n.unreadHandler)
 		muxChat.HandleFunc("/chat/send", n.handleSend)
 
 		logger.Infof(ctx, "Open localhost:%s to use the chat", n.chatPort)
