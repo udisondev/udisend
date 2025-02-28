@@ -114,6 +114,7 @@ func (n *Node) unreadHandler(w http.ResponseWriter, r *http.Request) {
 
 // handleSend принимает сообщение от пользователя и добавляет его в список сообщений
 func (n *Node) handleSend(w http.ResponseWriter, r *http.Request) {
+	logger.Debugf(nil, "Received request to /chat/send with method %s", r.Method)
 	if r.Method != http.MethodPost {
 		http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
 		return
