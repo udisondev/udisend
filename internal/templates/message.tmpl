@@ -1,7 +1,7 @@
 {{ define "message" }}
     {{if .IsMine }}
-            <div class="message-out">[{{ .Time | fmtTime "15:04" }}] {{ .Text }}</div>
+            <div class="message-out">[{{ fmtTime .Time "15:04" }}] {{ .Text }}</div>
     {{else}}
-            <div class="message-in">[{{ .Time | fmtTime "15:04" }}] {{ .Text }}</div>
+            <div class="message-in">[{{ fmtTime .Time "15:04" }}] {{ .Text }}</div>
     {{end}}
 {{ end }}
