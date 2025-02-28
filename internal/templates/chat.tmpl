@@ -1,15 +1,17 @@
-<div class="chat-header">
-  Chat with ID: {{ .UserID }}
-</div>
-<div class="chat-body" hx-get="/chat/unread?user_id={{ .UserID }}" hx-trigger="every 1s" hx-swap="innerHTML">
-  {{ range .Messages }}
-    {{ template "message" .}}
-  {{ end }}
-</div>
-<div class="chat-input">
-  <form hx-post="/chat/send" hx-target="#chat-content" hx-swap="beforeend">
-    <input type="hidden" name="to_id" value="{{ .UserID }}">
-    <textarea name="content" onkeydown="if(event.ctrlKey && event.key === 'Enter') this.form.submit()"></textarea>
-    <button type="submit">Отправить</button>
-  </form>
-</div>
+{{ define "chat" }}
+  <div class="chat-header">
+    Chat with ID: {{ .UserID }}
+  </div>
+  <div class="chat-body" hx-get="/chat/unread?user_id={{ .UserID }}" hx-trigger="every 1s" hx-swap="innerHTML">
+    {{ range .Messages }}
+      {{ template "message" .}}
+    {{ end }}
+  </div>
+  <div class="chat-input">
+    <form hx-post="/chat/send" hx-target="#chat-content" hx-swap="beforeend">
+      <input type="hidden" name="to_id" value="{{ .UserID }}">
+      <textarea name="content" onkeydown="if(event.ctrlKey && event.key === 'Enter') this.form.submit()"></textarea>
+      <button type="submit">Отправить</button>
+    </form>
+  </div>
+{{ end }}
