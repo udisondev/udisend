@@ -10,7 +10,7 @@
   <div class="chat-input">
     <form hx-post="/chat/send" hx-target="#chat-body" hx-swap="beforeend">
       <input type="hidden" name="to_id" value="{{ .With }}">
-      <textarea name="content" onkeydown="if(event.ctrlKey && event.key === 'Enter') htmx.trigger(this.form, 'submit')"></textarea>
+      <textarea name="content" ></textarea>
       <button type="submit">Отправить</button>
     </form>
   </div>
