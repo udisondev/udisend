@@ -141,8 +141,8 @@ func (n *Node) handleSend(w http.ResponseWriter, r *http.Request) {
 		message.PrivateMessage{
 			From: n.id,
 			Text: text,
-			Read: false,
-			Time: time.Time{},
+			Read: true,
+			Time: time.Now(),
 		})
 
 	n.Send(message.Outcome{
