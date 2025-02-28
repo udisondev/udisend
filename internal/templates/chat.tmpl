@@ -2,7 +2,7 @@
   <div class="chat-header">
     Chat with: {{ .With }}
   </div>
-  <div class="chat-body" hx-get="/chat/unread?user_id={{ .With }}" hx-target="#chat-content" hx-trigger="every 1s" hx-swap="beforeend">
+  <div class="chat-body" hx-get="/chat/unread?user_id={{ .With }}" hx-target="#chat-body" hx-trigger="every 1s" hx-swap="beforeend">
     {{ range .Messages }}
       {{ template "message" . }}
     {{ end }}
