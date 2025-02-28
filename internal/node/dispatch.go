@@ -366,7 +366,7 @@ func (n *Node) makeOffer(ctx context.Context, in message.Income) {
 
 func (n *Node) handleOffer(ctx context.Context, in message.Income) {
 	offer := message.ParseOffer(in.Text)
-	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.makeOffer for '%s'", offer.From))
+	ctx = ctxtool.Span(ctx, fmt.Sprintf("node.handleOffer of '%s'", offer.From))
 	logger.Debugf(ctx, "Start...")
 
 	actual, ok := n.signMap[offer.From]
@@ -399,7 +399,11 @@ func (n *Node) handleOffer(ctx context.Context, in message.Income) {
 		return
 	}
 
+	memberCtx, disconnect := context.WithCancel(ctx)
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateClosed {
+			disconnect()
+		}
 		logger.Debugf(ctx, "Connection change state to '%s'", state.String())
 	})
 
@@ -432,7 +436,6 @@ func (n *Node) handleOffer(ctx context.Context, in message.Income) {
 	<-gatherComplete
 
 	offered := member.NewOfferICE(offer.From, pc)
-	memberCtx, disconnect := context.WithCancel(ctx)
 	n.AddMember(memberCtx, offered, func() {
 		pc.Close()
 		disconnect()
