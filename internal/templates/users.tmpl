@@ -1,7 +1,10 @@
 {{ define "users" }}
   {{ range . }}
-      <div class="user" hx-get="/chat?user_id={{ .ID }}" hx-target="#chat-content" hx-swap="innerHTML"
-	onclick="setActive(this)">
+      <div class="user"
+      hx-get="/chat?user_id={{ .ID }}"
+      hx-trigger="click"
+      hx-target="#chat-content"
+      hx-swap="innerHTML">
 	{{ .ID }}
       </div>
   {{ end }}
