@@ -14,7 +14,7 @@ type (
 
 	SafeConn struct {
 		id       string
-		outboxMu sync.RWMutex
+		outboxMu sync.Mutex
 		state    ConnState
 		conn     Connectable
 		outbox   chan Signal
@@ -93,8 +93,8 @@ func (s *SafeConn) Send(out Signal) {
 		}
 	}()
 
-	s.outboxMu.RLock()
-	defer s.outboxMu.RUnlock()
+	s.outboxMu.Lock()
+	defer s.outboxMu.Unlock()
 	if s.outbox == nil {
 		return
 	}

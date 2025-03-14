@@ -24,7 +24,7 @@ func init() {
 
 	go func() {
 		<-killSign
-		ctx := span.Init("kill sitnal")
+		ctx := span.Init("kill signal")
 		wg := sync.WaitGroup{}
 		for _, fn := range globalCloser.fns {
 			wg.Add(1)

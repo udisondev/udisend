@@ -125,6 +125,11 @@ func (n *Network) ServeWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	closer.Add(func() error {
+		free()
+		return nil
+	})
+
 	mesh := r.Header.Get("Mesh")
 	if strings.TrimSpace(mesh) == "" {
 		logger.Warnf(ctx, "Empty mesh")
@@ -170,6 +175,11 @@ func (n *Network) AttachHead(entrypoint string) error {
 	if slot == nil {
 		return errors.New("has no free slot")
 	}
+
+	closer.Add(func() error {
+		free()
+		return nil
+	})
 
 	resp, err := http.Get(fmt.Sprintf("http://%s/id", entrypoint))
 	if err != nil {
