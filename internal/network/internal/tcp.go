@@ -1,11 +1,8 @@
 package network
 
 import (
-	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"udisend/pkg/logger"
-	"udisend/pkg/span"
+	"crypto/rsa"
 
 	"github.com/gorilla/websocket"
 )
@@ -13,16 +10,10 @@ import (
 type TCP struct {
 	Mesh    string
 	Conn    *websocket.Conn
-	PubAuth *ecdsa.PublicKey
+	PubAuth *rsa.PublicKey
 }
 
-var (
-	newline = []byte{'\n'}
-	space   = []byte{' '}
-)
-
 func (t *TCP) Interact(outbox <-chan Signal) <-chan Income {
-	ctx := span.Init("tcp.Interact <ID:%s>", t.Mesh)
 	inbox := make(chan Income)
 
 	readCtx, stopReading := context.WithCancel(context.Background())
@@ -30,45 +21,40 @@ func (t *TCP) Interact(outbox <-chan Signal) <-chan Income {
 		defer stopReading()
 
 		for s := range outbox {
-			w, err := t.Conn.NextWriter(websocket.TextMessage)
+			w, err := t.Conn.NextWriter(websocket.BinaryMessage)
 			if err != nil {
-				logger.Errorf(ctx, "Error receive new writer")
-				return
+				break
 			}
 
 			_, err = w.Write(s.Marshal())
 			if err != nil {
-				logger.Errorf(ctx, "w.Write: %v", err)
 			}
 
 			if err := w.Close(); err != nil {
-				logger.Errorf(ctx, "w.Close: %v", err)
-				return
+				break
 			}
 		}
 	}()
 
 	go func() {
 		defer close(inbox)
+	loop:
 		for {
 			select {
 			case <-readCtx.Done():
-				return
+				break loop
 			default:
 				_, b, err := t.Conn.ReadMessage()
 				if err != nil {
 					if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-						logger.Errorf(ctx, "m.conn.ReadMessage: %v", err)
 					}
-					return
+					break loop
 				}
 
 				var s Signal
-				b = bytes.TrimSpace(bytes.Replace(b, newline, space, -1))
 				err = s.Unmarshal(b)
 				if err != nil {
-					logger.Errorf(ctx, "in.Unmarshal: %v", err)
-					return
+					break loop
 				}
 
 				inbox <- Income{From: t.Mesh, Signal: s}

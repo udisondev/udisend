@@ -4,6 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"udisend/pkg/logger"
+	"udisend/pkg/span"
 )
 
 type (
@@ -13,7 +14,7 @@ type (
 	}
 
 	SafeConn struct {
-		id       string
+		mesh     string
 		outboxMu sync.Mutex
 		state    ConnState
 		conn     Connectable
@@ -29,15 +30,35 @@ type (
 )
 
 const (
-	ConnStateInit ConnState = iota
+	ConnStateEmpty ConnState = iota
+	ConnStateInit
 	ConnStateVerified
+	ConnStateConnected
 )
 
-func (s *Slot) AddConn(conn Connectable) <-chan Income {
-	logger.Debugf(nil, "New connection: %s", conn.ID())
+func (s *Slot) Send(sig Signal) {
+	if s.conn == nil {
+		return
+	}
+	s.conn.send(sig)
+}
+
+func (s *Slot) Mesh() string {
+	if s.conn == nil {
+		return ""
+	}
+	return s.conn.mesh
+}
+
+func (s *Slot) AddConn(conn Connectable, verified bool) <-chan Income {
+	state := ConnStateInit
+	if verified {
+		state = ConnStateVerified
+	}
+	logger.Debugf(span.Init("Slot.AddConn"), "New connection")
 	s.conn = &SafeConn{
-		id:     conn.ID(),
-		state:  ConnStateInit,
+		mesh:   conn.ID(),
+		state:  state,
 		conn:   conn,
 		outbox: make(chan Signal, 256),
 	}
@@ -65,15 +86,20 @@ func (s *Slot) Free() {
 		s.conn.disconnect()
 	}
 	s.conn = nil
+	s.mu.TryLock()
 	s.mu.Unlock()
 }
 
-func (s *Slot) Conn() *SafeConn {
-	return s.conn
+func (s *Slot) UpgrageConn(newState ConnState) {
+	if s.conn == nil {
+		return
+	}
+	logger.Debugf(nil, "%s new state=%d", s.conn.mesh, newState)
+	s.conn.state = newState
 }
 
 func (s *SafeConn) disconnect() {
-	logger.Debugf(nil, "'%s' Disconnected!", s.id)
+	logger.Debugf(nil, "'%s' Disconnected!", s.mesh)
 	s.outboxMu.Lock()
 	defer s.outboxMu.Unlock()
 
@@ -82,17 +108,14 @@ func (s *SafeConn) disconnect() {
 	s.outbox = nil
 }
 
-func (s *SafeConn) IsVerified() bool {
-	return s.state > ConnStateInit
+func (s *Slot) ConnState() ConnState {
+	if s.conn == nil {
+		return ConnStateEmpty
+	}
+	return s.conn.state
 }
 
-func (s *SafeConn) Send(out Signal) {
-	defer func() {
-		if v := recover(); v != nil {
-			s.disconnect()
-		}
-	}()
-
+func (s *SafeConn) send(out Signal) {
 	s.outboxMu.Lock()
 	defer s.outboxMu.Unlock()
 	if s.outbox == nil {
@@ -101,12 +124,8 @@ func (s *SafeConn) Send(out Signal) {
 	select {
 	case s.outbox <- out:
 	default:
-		s.disconnect()
+		go s.disconnect()
 	}
-}
-
-func (s *SafeConn) Mesh() string {
-	return s.id
 }
 
 func (s *SafeConn) applyFilters(ch <-chan Income) <-chan Income {
