@@ -29,7 +29,7 @@ type Network struct {
 	inbox                        chan Income
 	reactionsMu                  sync.Mutex
 	reactions                    []*reaction
-	authKey                      *rsa.PrivateKey
+	privateKey                   *rsa.PrivateKey
 	countOfWorkers, countOfSlots int
 	mcache                       map[string]struct{}
 }
@@ -49,6 +49,7 @@ var handlers = map[SignalType]func(*Network, Income){
 	SignalTypeChallenge:      challenge,
 	SignalTypeSolveChallenge: solveChallenge,
 	SignalTypeNeedInvite:     generateInvite,
+	SignalTypeInvite:         makeOffer,
 }
 
 func New(mesh string, authKey *rsa.PrivateKey, countOfWorkers, countOfSlots int) *Network {
@@ -57,7 +58,7 @@ func New(mesh string, authKey *rsa.PrivateKey, countOfWorkers, countOfSlots int)
 		inbox:          make(chan Income),
 		reactionsMu:    sync.Mutex{},
 		reactions:      []*reaction{},
-		authKey:        authKey,
+		privateKey:     authKey,
 		countOfWorkers: countOfWorkers,
 		countOfSlots:   countOfSlots,
 		mcache:         make(map[string]struct{}),
@@ -111,18 +112,18 @@ func (n *Network) Run(ctx context.Context) {
 }
 
 func (n *Network) ServeWs(w http.ResponseWriter, r *http.Request) {
-	slot, free := n.bookSlot()
+	slot := n.bookSlot()
 	if slot == nil {
 		return
 	}
 	var err error
 	defer func() {
 		if err != nil {
-			free()
+			slot.Free()
 			return
 		}
 		closer.Add(func() error {
-			free()
+			slot.Free()
 			return nil
 		})
 	}()
@@ -155,7 +156,7 @@ func (n *Network) ServeWs(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer func() {
 			conn.Close()
-			free()
+			slot.Free()
 		}()
 
 		n.inbox <- Income{From: mesh, Signal: Signal{Type: SignalTypeChallenge}}
@@ -166,15 +167,22 @@ func (n *Network) ServeWs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (n *Network) AttachHead(entrypoint string) error {
-	slot, free := n.bookSlot()
+	slot := n.bookSlot()
 	if slot == nil {
 		return errors.New("has no free slot")
 	}
 
-	closer.Add(func() error {
-		free()
-		return nil
-	})
+	var err error
+	defer func() {
+		if err != nil {
+			slot.Free()
+			return
+		}
+		closer.Add(func() error {
+			slot.Free()
+			return nil
+		})
+	}()
 
 	resp, err := http.Get(fmt.Sprintf("http://%s/id", entrypoint))
 	if err != nil {
@@ -211,7 +219,7 @@ func (n *Network) AttachHead(entrypoint string) error {
 	go func() {
 		defer func() {
 			conn.Close()
-			free()
+			slot.Free()
 		}()
 		for in := range inbox {
 			n.inbox <- in
@@ -306,21 +314,21 @@ func (r *reaction) react(in Income) {
 	}
 }
 
-func (n *Network) bookSlot() (*Slot, func()) {
+func (n *Network) bookSlot() *Slot {
 	ctx := span.Init("Network.bookSlot")
 	logger.Debugf(ctx, "Searching free slot...")
 	for _, s := range n.slots {
 		if s.ConnState() > ConnStateEmpty {
-			return nil, nil
+			return nil
 		}
 		free := s.TryLock()
 		if free {
 			logger.Debugf(ctx, "Found!")
-			return s, s.Unlock
+			return s
 		}
 	}
 	logger.Debugf(ctx, "Not found!")
-	return nil, nil
+	return nil
 }
 
 func (n *Network) putCache(b []byte) {
@@ -368,5 +376,13 @@ func (n *Network) broadcastWithExclude(sig Signal, exclude ...string) {
 			continue
 		}
 		s.Send(sig)
+	}
+}
+
+func (n *Network) disconnect(mesh string) {
+	for _, s := range n.slots {
+		if s.Mesh() == mesh {
+			s.Free()
+		}
 	}
 }

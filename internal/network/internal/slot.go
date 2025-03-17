@@ -51,11 +51,12 @@ func (s *Slot) Mesh() string {
 }
 
 func (s *Slot) AddConn(conn Connectable, verified bool) <-chan Income {
+	ctx := span.Init("Slot.AddConn")
+	logger.Debugf(ctx, "New connection=%s", conn.ID())
 	state := ConnStateInit
 	if verified {
 		state = ConnStateVerified
 	}
-	logger.Debugf(span.Init("Slot.AddConn"), "New connection")
 	s.conn = &SafeConn{
 		mesh:   conn.ID(),
 		state:  state,

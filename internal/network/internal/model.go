@@ -17,9 +17,10 @@ type (
 	}
 
 	Invite struct {
-		To   string
-		From string
-		Sign []byte
+		To     string
+		From   string
+		Sign   []byte
+		Secret []byte
 	}
 
 	Offer struct {
@@ -30,6 +31,7 @@ type (
 
 	Answer struct {
 		From string
+		To   string
 		SDP  []byte
 	}
 )
@@ -37,13 +39,15 @@ type (
 type SignalType uint8
 
 const (
-	SignalTypeChallenge      SignalType = 0x00
-	SignalTypeSolveChallenge            = 0x01
-	SignalTypeTestChallenge             = 0x02
-	SignalTypeNeedInvite                = 0x03
-	SignalTypeInvite                    = 0x04
-	SingalTypeOffer                     = 0x05
-	SignalTypeAnswer                    = 0x06
+	SignalTypeChallenge             SignalType = 0x00
+	SignalTypeSolveChallenge                   = 0x01
+	SignalTypeTestChallenge                    = 0x02
+	SignalTypeNeedInvite                       = 0x03
+	SignalTypeInvite                           = 0x04
+	SingalTypeOffer                            = 0x05
+	SignalTypeAnswer                           = 0x06
+	SignalTypeConnectionSecret                 = 0x07
+	SignalTypeConnectionEstablished            = 0x08
 )
 
 func (s SignalType) String() string {
@@ -81,7 +85,7 @@ func (s *Signal) Unmarshal(b []byte) error {
 }
 
 func (i Invite) Marshal() []byte {
-	totalLen := len(i.To) + len(i.From) + len(i.Sign) + 2
+	totalLen := len(i.To) + len(i.From) + len(i.Sign) + len(i.Secret) + 3
 	out := make([]byte, totalLen)
 	pos := 0
 
@@ -91,7 +95,10 @@ func (i Invite) Marshal() []byte {
 	pos += copy(out[pos:], i.From)
 	out[pos] = '|'
 	pos++
-	copy(out[pos:], i.Sign)
+	pos += copy(out[pos:], i.Sign)
+	out[pos] = '|'
+	pos++
+	copy(out[pos:], i.Secret)
 
 	return out
 }
@@ -120,10 +127,16 @@ func (i *Invite) Unmarshal(data []byte) error {
 
 	i.From = string(rest[:secondSep])
 
-	if secondSep+1 > len(rest) {
-		i.Sign = nil
-	} else {
-		i.Sign = rest[secondSep+1:]
+	rest = data[secondSep+1:]
+	thirdSep := bytes.IndexByte(rest, '|')
+	if thirdSep == -1 && len(rest) < 52 {
+		return errors.New("invalid data: missing third separator")
+	}
+
+	i.Sign = rest[:thirdSep]
+
+	if len(rest[thirdSep:]) == 27 {
+		i.Secret = rest[thirdSep+1:]
 	}
 
 	return nil
@@ -180,13 +193,18 @@ func (o *Offer) Unmarshal(data []byte) error {
 }
 
 func (a Answer) Marshal() []byte {
-	totalLen := len(a.From) + len(a.SDP) + 1
+	totalLen := len(a.From) + len(a.SDP) + len(a.To) + 2
 	out := make([]byte, totalLen)
 	pos := 0
 
 	pos += copy(out[pos:], a.From)
 	out[pos] = '|'
 	pos++
+
+	pos += copy(out[pos:], a.To)
+	out[pos] = '|'
+	pos++
+
 	copy(out[pos:], a.SDP)
 
 	return out
@@ -197,18 +215,25 @@ func (a *Answer) Unmarshal(data []byte) error {
 		return errors.New("invalid data: too short")
 	}
 
-	sep := bytes.IndexByte(data, '|')
-	if sep == -1 {
+	firstSep := bytes.IndexByte(data, '|')
+	if firstSep == -1 {
 		return errors.New("invalid data: missing separator")
 	}
 
-	a.From = string(data[:sep])
+	a.From = string(data[:firstSep])
 
-	if sep+1 > len(data) {
-		a.SDP = nil
-	} else {
-		a.SDP = data[sep+1:]
+	secondSep := bytes.IndexByte(data, '|')
+	if secondSep == -1 {
+		return errors.New("invalid data: missing separator")
 	}
+
+	a.To = string(data[firstSep+1 : secondSep])
+
+	if len(data[secondSep:]) < 10 {
+		return errors.New("invalid data: has no SDP")
+	}
+
+	a.SDP = data[secondSep+1:]
 
 	return nil
 }

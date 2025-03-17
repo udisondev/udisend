@@ -63,7 +63,6 @@ func (t *TCP) Interact(outbox <-chan Signal) <-chan Income {
 	}()
 
 	return inbox
-
 }
 
 func (t *TCP) ID() string {
