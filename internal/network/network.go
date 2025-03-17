@@ -112,11 +112,24 @@ func (n *Network) Run(ctx context.Context) {
 }
 
 func (n *Network) ServeWs(w http.ResponseWriter, r *http.Request) {
-	slot := n.bookSlot()
-	if slot == nil {
+	ctx := span.Init("Network.ServeWs")
+	mesh := r.Header.Get("Mesh")
+	if strings.TrimSpace(mesh) == "" {
 		return
 	}
-	var err error
+
+	pubAuth, err := crypt.ExtractPublicKey(mesh)
+	if err != nil {
+		logger.Errorf(ctx, "crypt.ExtractPublicKey: %v", err)
+		return
+	}
+
+	slot := n.bookSlot()
+	if slot == nil {
+		logger.Warnf(ctx, "Has no free slot!")
+		return
+	}
+
 	defer func() {
 		if err != nil {
 			slot.Free()
@@ -128,19 +141,9 @@ func (n *Network) ServeWs(w http.ResponseWriter, r *http.Request) {
 		})
 	}()
 
-	mesh := r.Header.Get("Mesh")
-	if strings.TrimSpace(mesh) == "" {
-		err = errors.New("empty mesh")
-		return
-	}
-
-	pubAuth, err := crypt.ExtractPublicKey(mesh)
-	if err != nil {
-		return
-	}
-
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		logger.Errorf(ctx, "upgrader.Upgrade: %v", err)
 		return
 	}
 
@@ -167,12 +170,32 @@ func (n *Network) ServeWs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (n *Network) AttachHead(entrypoint string) error {
-	slot := n.bookSlot()
-	if slot == nil {
-		return errors.New("has no free slot")
+	ctx := span.Init("Network.AttachHead")
+
+	resp, err := http.Get(fmt.Sprintf("http://%s/id", entrypoint))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		logger.Errorf(ctx, "Error getting entrypoint Mesh <StatusCode:%s>", resp.Status)
+		return err
 	}
 
-	var err error
+	limitReader := io.LimitReader(resp.Body, 1024)
+	headID, err := io.ReadAll(limitReader)
+	if err != nil {
+		logger.Errorf(ctx, "io.ReadAll: %v", err)
+		return err
+	}
+
+	slot := n.bookSlot()
+	if slot == nil {
+		logger.Errorf(ctx, "Had no free slot!")
+		return errors.New("busy slots")
+	}
+
 	defer func() {
 		if err != nil {
 			slot.Free()
@@ -184,27 +207,12 @@ func (n *Network) AttachHead(entrypoint string) error {
 		})
 	}()
 
-	resp, err := http.Get(fmt.Sprintf("http://%s/id", entrypoint))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return err
-	}
-
-	limitReader := io.LimitReader(resp.Body, 1024)
-	headID, err := io.ReadAll(limitReader)
-	if err != nil {
-		return err
-	}
-
 	h := http.Header{}
 	h.Add("Mesh", n.mesh)
 	u := url.URL{Scheme: "ws", Host: entrypoint, Path: "/ws"}
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), h)
 	if err != nil {
+		logger.Errorf(ctx, "websocket.DefaultDealer.Dial: %v", err)
 		return err
 	}
 
@@ -319,7 +327,7 @@ func (n *Network) bookSlot() *Slot {
 	logger.Debugf(ctx, "Searching free slot...")
 	for _, s := range n.slots {
 		if s.ConnState() > ConnStateEmpty {
-			return nil
+			continue
 		}
 		free := s.TryLock()
 		if free {
@@ -368,13 +376,16 @@ func (n *Network) connectionsCount() int {
 }
 
 func (n *Network) broadcastWithExclude(sig Signal, exclude ...string) {
+	ctx := span.Init("Network.broadcastWithExclude")
 	for _, s := range n.slots {
+		logger.Debugf(ctx, "%s has state=%d", s.Mesh(), s.ConnState())
 		if slices.Contains(exclude, s.Mesh()) {
 			continue
 		}
 		if s.ConnState() < ConnStateConnected {
 			continue
 		}
+		logger.Debugf(ctx, "Going to send...")
 		s.Send(sig)
 	}
 }

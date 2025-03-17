@@ -10,6 +10,8 @@ import (
 	"time"
 	. "udisend/internal/network/internal"
 	"udisend/pkg/crypt"
+	"udisend/pkg/logger"
+	"udisend/pkg/span"
 )
 
 type signature struct {
@@ -21,8 +23,9 @@ func challenge(n *Network, in Income) {
 	if err != nil {
 		return
 	}
-	challengeValue := []byte(rand.Text() + rand.Text())
-	payload, err := crypt.EncryptMessage(challengeValue, pubAuth)
+	challengeValue := make([]byte, 32)
+	rand.Read(challengeValue)
+	payload, err := crypt.EncryptRSA(challengeValue, pubAuth)
 	if err != nil {
 		return
 	}
@@ -63,22 +66,28 @@ func challenge(n *Network, in Income) {
 			n.addReaction(
 				time.Second*30,
 				func(inviteMsg Income) bool {
+					ctx := span.Init("handle invite")
 					if in.Signal.Type != SignalTypeInvite {
 						return false
 					}
+					logger.Debugf(ctx, "Received Invite")
 					decryptedPayload, err := crypt.DecryptMessage(in.Signal.Payload, n.privateKey)
 					if err != nil {
+						logger.Errorf(ctx, "crypt.DecryptMessage: %v", err)
 						return false
 					}
 					var invite Invite
 					err = invite.Unmarshal(decryptedPayload)
 					if err != nil {
+						logger.Errorf(ctx, "invite.Unmarshal: %v", err)
 						return false
 					}
 					if invite.To != in.From {
+						logger.Warnf(ctx, "Invalid direction")
 						return false
 					}
 					if len(invite.Secret) != 26 {
+						logger.Warnf(ctx, "Invalid secret")
 						return false
 					}
 
@@ -121,8 +130,13 @@ func challenge(n *Network, in Income) {
 								},
 							)
 
-							inviteMsg.Signal.Payload = inviteMsg.Signal.Payload[:len(inviteMsg.Signal.Payload)-26]
-							n.send(in.From, inviteMsg.Signal)
+							invite.Secret = nil
+							encryptedInvite, err := crypt.EncryptMessage(invite.Marshal(), pubAuth, n.privateKey)
+							if err != nil {
+								logger.Errorf(ctx, "crypt.EncryptMessage: %v", err)
+								return
+							}
+							n.send(in.From, Signal{Type: SignalTypeInvite, Payload: encryptedInvite})
 						}
 					}()
 
@@ -160,7 +174,7 @@ func challenge(n *Network, in Income) {
 }
 
 func solveChallenge(n *Network, in Income) {
-	solved, err := crypt.DecryptMessage(in.Signal.Payload, n.privateKey)
+	solved, err := crypt.DecryptRSA(in.Signal.Payload, n.privateKey)
 	if err != nil {
 		return
 	}
@@ -172,4 +186,6 @@ func solveChallenge(n *Network, in Income) {
 			Payload: solved,
 		},
 	)
+
+	n.upgradeConn(in.From, ConnStateConnected)
 }

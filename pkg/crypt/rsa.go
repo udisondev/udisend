@@ -1,6 +1,9 @@
 package crypt
 
 import (
+	"crypto"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -9,6 +12,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 )
 
@@ -26,7 +30,7 @@ func GenerateRSAKeys() (*rsa.PrivateKey, *rsa.PublicKey, error) {
 	return privateKey, &privateKey.PublicKey, nil
 }
 
-func DecryptMessage(ciphertext []byte, privateKey *rsa.PrivateKey) ([]byte, error) {
+func DecryptRSA(ciphertext []byte, privateKey *rsa.PrivateKey) ([]byte, error) {
 	return rsa.DecryptOAEP(
 		sha256.New(),
 		rand.Reader,
@@ -66,7 +70,7 @@ func ParsePublicKey(pubPEM []byte) (*rsa.PublicKey, error) {
 	return pub.(*rsa.PublicKey), nil
 }
 
-func EncryptMessage(plaintext []byte, publicKey *rsa.PublicKey) ([]byte, error) {
+func EncryptRSA(plaintext []byte, publicKey *rsa.PublicKey) ([]byte, error) {
 	return rsa.EncryptOAEP(
 		sha256.New(),
 		rand.Reader,
@@ -89,15 +93,6 @@ func LoadOrGenerateRSAKeys(privateKeyPath, publicKeyPath string) (*rsa.PrivateKe
 		}
 
 		privateKey, publicKey, err := GenerateRSAKeys()
-		if err != nil {
-			return nil, nil, err
-		}
-
-		err = savePrivateKey(privateKey, privateKeyPath)
-		if err != nil {
-			return nil, nil, err
-		}
-		err = savePublicKey(publicKey, publicKeyPath)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -213,4 +208,88 @@ func savePublicKey(publicKey *rsa.PublicKey, path string) error {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return !os.IsNotExist(err)
+}
+
+func EncryptMessage(message []byte, recipientPubKey *rsa.PublicKey, senderPrivKey *rsa.PrivateKey) ([]byte, error) {
+	// Генерируем AES-ключ
+	aesKey := make([]byte, 32)
+	rand.Read(aesKey)
+
+	// Шифруем сообщение AES-GCM
+	block, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return nil, fmt.Errorf("aes.NewCipher: %w", err)
+	}
+	nonce := make([]byte, 12)
+	rand.Read(nonce)
+	aesgcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("cipher.NewGCM: %w", err)
+	}
+
+	encryptedMsg := aesgcm.Seal(nil, nonce, message, nil)
+
+	// Шифруем AES-ключ RSA
+	encryptedKey, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, recipientPubKey, aesKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("rsa.EnctyptOAEP: %w", err)
+	}
+
+	// Подписываем сообщение
+	hash := sha256.Sum256(message)
+	signature, err := rsa.SignPSS(rand.Reader, senderPrivKey, crypto.SHA256, hash[:], nil)
+	if err != nil {
+		return nil, fmt.Errorf("rsa.SignPSS: %w", err)
+	}
+
+	// Собираем пакет
+	packet := append(encryptedKey, nonce...)
+	packet = append(packet, encryptedMsg...)
+	packet = append(packet, signature...)
+	packet = append(packet, senderPrivKey.PublicKey.N.Bytes()...) // From как публичный ключ
+
+	return packet, nil
+}
+
+func DecryptMessage(packet []byte, privKey *rsa.PrivateKey) ([]byte, error) {
+	keySize := privKey.N.BitLen() / 8
+	encryptedKey := packet[:keySize]
+	nonce := packet[keySize : keySize+12]
+	sigSize := 256 // Например, для 2048-битного ключа
+	pubKeySize := 256
+	encryptedMsg := packet[keySize+12 : len(packet)-sigSize-pubKeySize]
+	signature := packet[len(packet)-sigSize-pubKeySize : len(packet)-pubKeySize]
+	senderPubKeyBytes := packet[len(packet)-pubKeySize:]
+
+	// Расшифровываем ключ
+	aesKey, err := rsa.DecryptOAEP(sha256.New(), nil, privKey, encryptedKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("rsa.DecryptOAEP: %w", err)
+	}
+
+	// Расшифровываем сообщение
+	block, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return nil, fmt.Errorf("rsa.DecryptOAEP: %w", err)
+	}
+	aesgcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("cipher.NewGCM: %w", err)
+	}
+	plaintext, err := aesgcm.Open(nil, nonce, encryptedMsg, nil)
+	if err != nil {
+		return nil, fmt.Errorf("aesgcm.Open: %w", err)
+	}
+
+	// Парсим публичный ключ отправителя
+	senderPubKey := &rsa.PublicKey{N: new(big.Int).SetBytes(senderPubKeyBytes), E: 65537}
+
+	// Проверяем подпись
+	hash := sha256.Sum256(plaintext)
+	err = rsa.VerifyPSS(senderPubKey, crypto.SHA256, hash[:], signature, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return plaintext, nil
 }

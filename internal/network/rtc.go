@@ -1,6 +1,7 @@
 package network
 
 import (
+	"bytes"
 	"crypto/rand"
 	"time"
 	. "udisend/internal/network/internal"
@@ -33,9 +34,11 @@ func generateInvite(n *Network, in Income) {
 		}
 	}()
 
-	sign := rand.Text()
+	sign := make([]byte, 32)
+	rand.Read(sign)
 	logger.Debugf(ctx, "Sign generated")
-	secret := []byte(rand.Text())
+	secret := make([]byte, 32)
+	rand.Read(secret)
 	pubKey, err := crypt.ExtractPublicKey(string(in.Signal.Payload))
 	if err != nil {
 		logger.Errorf(ctx, "crypt.ExtractPublicKey: %v", err)
@@ -45,10 +48,11 @@ func generateInvite(n *Network, in Income) {
 		Invite{
 			To:     in.From,
 			From:   n.mesh,
-			Sign:   []byte(sign),
+			Sign:   sign,
 			Secret: secret,
 		}.Marshal(),
-		pubKey)
+		pubKey,
+		n.privateKey)
 	if err != nil {
 		logger.Errorf(ctx, "crypt.EncryptMessage: %v", err)
 		return
@@ -73,7 +77,7 @@ func generateInvite(n *Network, in Income) {
 				logger.Warnf(ctx, "I'am not waiting an offer from %s", offer.From)
 				return false
 			}
-			if sign != string(offer.Sign) {
+			if !bytes.Equal(sign, offer.Sign) {
 				logger.Warnf(ctx, "Invalid sign!")
 				return true
 			}
@@ -141,7 +145,7 @@ func generateInvite(n *Network, in Income) {
 				})
 
 				sd := webrtc.SessionDescription{}
-				encryptedSDP, err := crypt.EncryptMessage([]byte(sd.SDP), pubKey)
+				encryptedSDP, err := crypt.EncryptRSA([]byte(sd.SDP), pubKey)
 				if err != nil {
 					logger.Errorf(ctx, "crypt.EncryptMessage: %v", err)
 					return
@@ -217,7 +221,7 @@ func makeOffer(n *Network, in Income) {
 		return
 	}
 
-	pubKey, err := crypt.ExtractPublicKey(in.From)
+	pubKey, err := crypt.ExtractPublicKey(invite.From)
 	if err != nil {
 		logger.Debugf(ctx, "crypt.ExtractPublicKey: %v", err)
 		return
@@ -269,7 +273,7 @@ func makeOffer(n *Network, in Income) {
 		return
 	}
 
-	encryptedPayload, err := crypt.EncryptMessage(Offer{
+	encryptedPayload, err := crypt.EncryptRSA(Offer{
 		From: n.mesh,
 		Sign: invite.Sign,
 		SDP:  []byte(offer.SDP),
