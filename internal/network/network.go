@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/hex"
@@ -28,14 +29,14 @@ type Network struct {
 	slots                        []*Slot
 	inbox                        chan Income
 	reactionsMu                  sync.Mutex
-	reactions                    []*reaction
+	reactions                    map[string]*reaction
 	privateKey                   *rsa.PrivateKey
 	countOfWorkers, countOfSlots int
 	mcache                       map[string]struct{}
 }
 
 type reaction struct {
-	mu   sync.RWMutex
+	mu   sync.Mutex
 	fn   func(Income) bool
 	done bool
 }
@@ -57,7 +58,7 @@ func New(mesh string, authKey *rsa.PrivateKey, countOfWorkers, countOfSlots int)
 		mesh:           mesh,
 		inbox:          make(chan Income),
 		reactionsMu:    sync.Mutex{},
-		reactions:      []*reaction{},
+		reactions:      make(map[string]*reaction),
 		privateKey:     authKey,
 		countOfWorkers: countOfWorkers,
 		countOfSlots:   countOfSlots,
@@ -253,65 +254,25 @@ func (n *Network) addReaction(timeout time.Duration, fn func(Income) bool) {
 
 func (n *Network) addReactionWithCallback(timeout time.Duration, fn func(Income) bool, callback func()) {
 	ctx := span.Init("interactions.addReactionWithCallback")
-
-	for _, r := range n.reactions {
-		if !r.done {
-			continue
-		}
-		if func(r *reaction) bool {
-			r.mu.Lock()
-			defer r.mu.Unlock()
-			if !r.done {
-				return false
-			}
-
-			logger.Debugf(ctx, "Re-use old reaction")
-
-			r.fn = fn
-			r.done = false
-
-			go func(r *reaction) {
-				<-time.After(timeout)
-				go callback()
-				r.mu.Lock()
-				defer r.mu.Unlock()
-				r.done = true
-				r.fn = nil
-			}(r)
-
-			return true
-		}(r) {
-			return
-		}
-
-	}
-
-	r := &reaction{fn: fn}
-
 	n.reactionsMu.Lock()
-	logger.Debugf(ctx, "Reactions locked")
-	defer func() {
-		n.reactionsMu.Unlock()
-		logger.Debugf(ctx, "Reactions unlocked")
-	}()
+	defer n.reactionsMu.Unlock()
 
-	logger.Debugf(ctx, "Append reactions")
-	n.reactions = append(n.reactions, r)
-
-	go func(r *reaction) {
+	key := rand.Text()
+	r := reaction{fn: fn}
+	n.reactions[key] = &r
+	go func() {
 		<-time.After(timeout)
-		go callback()
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		r.done = true
-		r.fn = nil
-		logger.Debugf(ctx, "Reaction removed")
-	}(r)
+		callback()
+		n.reactionsMu.Lock()
+		defer n.reactionsMu.Unlock()
+		delete(n.reactions, key)
+	}()
+	logger.Debugf(ctx, "Reaction added")
 }
 
 func (r *reaction) react(in Income) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.done {
 		return
 	}
