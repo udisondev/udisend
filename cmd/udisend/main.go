@@ -21,16 +21,17 @@ func main() {
 	ctx, stop := context.WithCancel(span.Init("main"))
 	flag.Parse()
 
-	privateAuth, publicAuth, err := crypt.LoadOrGenerateRSAKeys("", "")
+	privateAuth, publicAuth, err := crypt.GenerateRSAKeys()
 	if err != nil {
 		log.Fatal(err)
 	}
+	logger.Debugf(ctx, "Public key N: %s", publicAuth.N.String())
 
 	pem, err := crypt.MarshalPublicKey(publicAuth)
 	if err != nil {
 		log.Fatal(err)
 	}
-	mesh := base64.StdEncoding.EncodeToString([]byte(pem))
+	mesh := base64.StdEncoding.EncodeToString(pem)
 	logger.Debugf(ctx, "My mesh: %s", mesh)
 	n := network.New(mesh, privateAuth, runtime.NumCPU(), 10)
 	wg := sync.WaitGroup{}

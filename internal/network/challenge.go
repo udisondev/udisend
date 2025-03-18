@@ -19,32 +19,39 @@ type signature struct {
 }
 
 func challenge(n *Network, in Income) {
+	ctx := span.Init("challenge")
 	pubAuth, err := crypt.ExtractPublicKey(in.From)
 	if err != nil {
+		logger.Errorf(ctx, "crypt.ExtractPublicKey: %v", err)
 		return
 	}
 	challengeValue := make([]byte, 32)
 	rand.Read(challengeValue)
 	payload, err := crypt.EncryptRSA(challengeValue, pubAuth)
 	if err != nil {
+		logger.Errorf(ctx, "crypt.EncryptRSA: %v", err)
 		return
 	}
 
+	logger.Debugf(ctx, "Going to add waiting solved challenge")
 	n.addReaction(3*time.Second,
 		func(testMsg Income) bool {
-			if testMsg.From != in.From {
-				return false
-			}
+			ctx := span.Init("Test challenge")
 			if testMsg.Signal.Type != SignalTypeTestChallenge {
 				return false
 			}
+			if testMsg.From != in.From {
+				return false
+			}
 			if !bytes.Equal(challengeValue, testMsg.Signal.Payload) {
+				logger.Warnf(ctx, "Failed!")
 				n.disconnect(in.From)
 				return true
 			}
 
 			n.upgradeConn(testMsg.From, ConnStateVerified)
 			if n.connectionsCount() < 1 {
+				logger.Debugf(ctx, "Connections count less than one")
 				n.upgradeConn(testMsg.From, ConnStateConnected)
 				return true
 			}
@@ -171,6 +178,7 @@ func challenge(n *Network, in Income) {
 			Payload: payload,
 		},
 	)
+	logger.Debugf(ctx, "Challenge was sent")
 }
 
 func solveChallenge(n *Network, in Income) {

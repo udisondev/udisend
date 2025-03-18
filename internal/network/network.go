@@ -35,7 +35,7 @@ type Network struct {
 }
 
 type reaction struct {
-	mu   sync.Mutex
+	mu   sync.RWMutex
 	fn   func(Income) bool
 	done bool
 }
@@ -310,8 +310,8 @@ func (n *Network) addReactionWithCallback(timeout time.Duration, fn func(Income)
 }
 
 func (r *reaction) react(in Income) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if r.done {
 		return
 	}

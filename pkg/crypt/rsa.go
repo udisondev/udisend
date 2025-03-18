@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"udisend/pkg/logger"
 )
 
 // GenerateRSAKeys генерирует пару RSA 2048-битных ключей
@@ -92,6 +93,7 @@ func LoadOrGenerateRSAKeys(privateKeyPath, publicKeyPath string) (*rsa.PrivateKe
 			return LoadRSAKeys(privateKeyPath, publicKeyPath)
 		}
 
+		logger.Infof(nil, "Generating keys")
 		privateKey, publicKey, err := GenerateRSAKeys()
 		if err != nil {
 			return nil, nil, err

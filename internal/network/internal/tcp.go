@@ -38,7 +38,6 @@ func (t *TCP) Interact(outbox <-chan Signal) <-chan Income {
 			_, err = w.Write(s.Marshal())
 			if err != nil {
 				logger.Errorf(ctx, "w.Write: %v", err)
-				break
 			}
 
 			if err := w.Close(); err != nil {
