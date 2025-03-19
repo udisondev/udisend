@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -294,4 +295,9 @@ func DecryptMessage(packet []byte, privKey *rsa.PrivateKey) ([]byte, error) {
 	}
 
 	return plaintext, nil
+}
+
+func MeshHash(mesh string) string {
+	hash := sha256.Sum256([]byte(mesh))
+	return hex.EncodeToString(hash[:])
 }

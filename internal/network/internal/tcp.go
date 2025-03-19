@@ -3,6 +3,8 @@ package network
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
+	"udisend/pkg/crypt"
 	"udisend/pkg/logger"
 	"udisend/pkg/span"
 
@@ -10,13 +12,13 @@ import (
 )
 
 type TCP struct {
-	Mesh    string
-	Conn    *websocket.Conn
-	PubAuth *rsa.PublicKey
+	ConnMesh string
+	Conn     *websocket.Conn
+	PubAuth  *rsa.PublicKey
 }
 
 func (t *TCP) Interact(outbox <-chan Signal) <-chan Income {
-	ctx := span.Init("TCP.Interact Mesh=%s", t.Mesh)
+	ctx := span.Init("Interact with=%s", t.Hash())
 	inbox := make(chan Income)
 
 	readCtx, stopReading := context.WithCancel(context.Background())
@@ -48,6 +50,7 @@ func (t *TCP) Interact(outbox <-chan Signal) <-chan Income {
 	}()
 
 	go func() {
+		hash := t.Hash()
 		defer func() {
 			recover()
 			logger.Debugf(ctx, "Closing inbox")
@@ -65,7 +68,6 @@ func (t *TCP) Interact(outbox <-chan Signal) <-chan Income {
 					if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 						break loop
 					}
-					logger.Errorf(ctx, "t.Conn.ReadMessage: %v", err)
 					continue
 				}
 
@@ -76,7 +78,7 @@ func (t *TCP) Interact(outbox <-chan Signal) <-chan Income {
 					break loop
 				}
 
-				inbox <- Income{From: t.Mesh, Signal: s}
+				inbox <- Income{From: hash, Signal: s}
 			}
 		}
 	}()
@@ -84,6 +86,15 @@ func (t *TCP) Interact(outbox <-chan Signal) <-chan Income {
 	return inbox
 }
 
-func (t *TCP) ID() string {
-	return t.Mesh
+func (t *TCP) Mesh() string {
+	return t.ConnMesh
+}
+
+func (t *TCP) MeshHash() string {
+	hash := sha256.Sum256([]byte(t.ConnMesh))
+	return string(hash[:])
+}
+
+func (t *TCP) Hash() string {
+	return crypt.MeshHash(t.ConnMesh)
 }

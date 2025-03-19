@@ -19,8 +19,14 @@ type signature struct {
 }
 
 func challenge(n *Network, in Income) {
-	ctx := span.Init("challenge")
-	pubAuth, err := crypt.ExtractPublicKey(in.From)
+	ctx := span.Init("challenge hash=%s", in.From)
+	mesh, ok := n.meshByHash(in.From)
+	if !ok {
+		logger.Warnf(ctx, "There is no mesh of hash=%s", in.From)
+		return
+	}
+	logger.Debugf(ctx, "Start...")
+	pubAuth, err := crypt.ExtractPublicKey(mesh)
 	if err != nil {
 		logger.Errorf(ctx, "crypt.ExtractPublicKey: %v", err)
 		return
@@ -49,19 +55,14 @@ func challenge(n *Network, in Income) {
 				return true
 			}
 
-			n.upgradeConn(testMsg.From, ConnStateVerified)
-			if n.connectionsCount() < 1 {
+			n.upgradeConn(testMsg.From, connStateVerified)
+			if len(n.connections) < 2 {
 				logger.Debugf(ctx, "Connections count less than one")
-				n.upgradeConn(testMsg.From, ConnStateConnected)
+				n.upgradeConn(testMsg.From, connStateTrusted)
 				return true
 			}
 
-			n.broadcastWithExclude(Signal{
-				Type:    SignalTypeNeedInvite,
-				Payload: []byte(n.mesh),
-			}, testMsg.From)
-
-			minReqConns := min(n.connectionsCount(), 5)
+			minReqConns := min(len(n.connections)-1, 5)
 			invitesCount := atomic.Int32{}
 			invitesCtx, invitesRecieved := context.WithCancel(context.Background())
 
@@ -74,11 +75,10 @@ func challenge(n *Network, in Income) {
 				time.Second*30,
 				func(inviteMsg Income) bool {
 					ctx := span.Init("handle invite")
-					if in.Signal.Type != SignalTypeInvite {
+					if inviteMsg.Signal.Type != SignalTypeInviteForNewbie {
 						return false
 					}
-					logger.Debugf(ctx, "Received Invite")
-					decryptedPayload, err := crypt.DecryptMessage(in.Signal.Payload, n.privateKey)
+					decryptedPayload, err := crypt.DecryptMessage(inviteMsg.Signal.Payload, n.privateKey)
 					if err != nil {
 						logger.Errorf(ctx, "crypt.DecryptMessage: %v", err)
 						return false
@@ -89,11 +89,11 @@ func challenge(n *Network, in Income) {
 						logger.Errorf(ctx, "invite.Unmarshal: %v", err)
 						return false
 					}
-					if invite.To != in.From {
+					if invite.To != n.mesh {
 						logger.Warnf(ctx, "Invalid direction")
 						return false
 					}
-					if len(invite.Secret) != 26 {
+					if len(invite.Secret) != 32 {
 						logger.Warnf(ctx, "Invalid secret")
 						return false
 					}
@@ -108,12 +108,34 @@ func challenge(n *Network, in Income) {
 						case <-invitesCtx.Done():
 							n.addReaction(
 								time.Duration(10*minReqConns)*time.Second,
-								func(connEstablishedMsg Income) bool {
-									if connEstablishedMsg.From != in.From {
+								func(answer Income) bool {
+									if answer.Signal.Type != SignalTypeAnswerForNewbie {
 										return false
 									}
-									if len(connEstablishedMsg.Signal.Payload) < 500 {
-										n.disconnect(in.From)
+									n.send(in.From, answer.Signal)
+									return true
+								},
+							)
+							n.addReaction(
+								time.Duration(10*minReqConns)*time.Second,
+								func(offer Income) bool {
+									if offer.Signal.Type != SingalTypeNewbieOffer {
+										return false
+									}
+									if offer.From != in.From {
+										return false
+									}
+									n.broadcastWithExclude(offer.Signal)
+									return true
+								},
+							)
+							n.addReaction(
+								time.Duration(10*minReqConns)*time.Second,
+								func(connEstablishedMsg Income) bool {
+									if connEstablishedMsg.Signal.Type != SignalTypeConnectionEstablished {
+										return false
+									}
+									if connEstablishedMsg.From != in.From {
 										return false
 									}
 									givenSecret := connEstablishedMsg.Signal.Payload[:26]
@@ -143,7 +165,7 @@ func challenge(n *Network, in Income) {
 								logger.Errorf(ctx, "crypt.EncryptMessage: %v", err)
 								return
 							}
-							n.send(in.From, Signal{Type: SignalTypeInvite, Payload: encryptedInvite})
+							n.send(in.From, Signal{Type: SignalTypeInviteForNewbie, Payload: encryptedInvite})
 						}
 					}()
 
@@ -167,6 +189,10 @@ func challenge(n *Network, in Income) {
 					return false
 				},
 			)
+			n.broadcastWithExclude(Signal{
+				Type:    SignalTypeNeedInviteForNewbie,
+				Payload: []byte(n.mesh),
+			}, testMsg.From)
 
 			return true
 		})
@@ -195,5 +221,4 @@ func solveChallenge(n *Network, in Income) {
 		},
 	)
 
-	n.upgradeConn(in.From, ConnStateConnected)
 }

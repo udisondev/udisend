@@ -3,9 +3,10 @@ package network
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"time"
 	. "udisend/internal/network/internal"
-	"udisend/pkg/closer"
 	"udisend/pkg/crypt"
 	"udisend/pkg/logger"
 	"udisend/pkg/span"
@@ -15,38 +16,31 @@ import (
 
 func generateInvite(n *Network, in Income) {
 	ctx := span.Init("generateInvite")
-	slot := n.bookSlot()
-	if slot == nil {
+	if len(n.connections) >= 10 {
 		logger.Warnf(ctx, "Has no free slot")
 		n.broadcastWithExclude(in.Signal, in.From)
 		return
 	}
 
-	var err error
-	defer func() {
-		if err != nil {
-			slot.Free()
-		} else {
-			closer.Add(func() error {
-				slot.Free()
-				return nil
-			})
-		}
-	}()
-
 	sign := make([]byte, 32)
 	rand.Read(sign)
-	logger.Debugf(ctx, "Sign generated")
+	logger.Debugf(ctx, "Sign=%s generated", hex.EncodeToString(sign))
 	secret := make([]byte, 32)
 	rand.Read(secret)
-	pubKey, err := crypt.ExtractPublicKey(string(in.Signal.Payload))
+	logger.Debugf(ctx, "generated secret: %s", hex.EncodeToString(secret))
+	mesh, ok := n.meshByHash(in.From)
+	if !ok {
+		logger.Warnf(ctx, "There is no mesh of hash=%s", in.From)
+		return
+	}
+	pubKey, err := crypt.ExtractPublicKey(mesh)
 	if err != nil {
 		logger.Errorf(ctx, "crypt.ExtractPublicKey: %v", err)
 		return
 	}
 	payload, err := crypt.EncryptMessage(
 		Invite{
-			To:     in.From,
+			To:     string(in.Signal.Payload),
 			From:   n.mesh,
 			Sign:   sign,
 			Secret: secret,
@@ -62,7 +56,7 @@ func generateInvite(n *Network, in Income) {
 	n.addReaction(
 		time.Second*20,
 		func(offerMsg Income) bool {
-			if offerMsg.Signal.Type != SingalTypeOffer {
+			if offerMsg.Signal.Type != SingalTypeNewbieOffer {
 				return false
 			}
 			logger.Debugf(nil, "Received offer")
@@ -73,10 +67,13 @@ func generateInvite(n *Network, in Income) {
 			}
 			var offer Offer
 			offer.Unmarshal(decryptedPayload)
-			if offer.From != string(in.Signal.Payload) {
-				logger.Warnf(ctx, "I'am not waiting an offer from %s", offer.From)
-				return false
+			var offerSDP webrtc.SessionDescription
+			err = json.Unmarshal(offer.SDP, &offerSDP)
+			if err != nil {
+				logger.Errorf(ctx, "json.Unmarshal: %v", err)
+				return true
 			}
+			logger.Debugf(ctx, "Received offer: %s", string(offer.SDP))
 			if !bytes.Equal(sign, offer.Sign) {
 				logger.Warnf(ctx, "Invalid sign!")
 				return true
@@ -99,7 +96,6 @@ func generateInvite(n *Network, in Income) {
 					if err == nil {
 						return
 					}
-					slot.Free()
 					pc.Close()
 				}()
 				if err != nil {
@@ -120,10 +116,10 @@ func generateInvite(n *Network, in Income) {
 					dataChannel.OnOpen(func() {
 						ctx := span.Extend(ctx, "dataChannel.OnOpen")
 						logger.Debugf(ctx, "Opened!")
-						slot.AddConn(&OfferICE{
-							PC:   pc,
-							DC:   dataChannel,
-							Mesh: offer.From,
+						n.addConn(&OfferICE{
+							PC:       pc,
+							DC:       dataChannel,
+							ConnMesh: offer.From,
 						}, true)
 						dataChannel.Send(Signal{
 							Type:    SignalTypeConnectionSecret,
@@ -144,14 +140,7 @@ func generateInvite(n *Network, in Income) {
 					logger.Debugf(ctx, "changed to=%s", state)
 				})
 
-				sd := webrtc.SessionDescription{}
-				encryptedSDP, err := crypt.EncryptRSA([]byte(sd.SDP), pubKey)
-				if err != nil {
-					logger.Errorf(ctx, "crypt.EncryptMessage: %v", err)
-					return
-				}
-
-				err = pc.SetRemoteDescription(sd)
+				err = pc.SetRemoteDescription(offerSDP)
 				if err != nil {
 					logger.Errorf(ctx, "pc.SetRemoteDesctiption: %v", err)
 					return
@@ -172,13 +161,24 @@ func generateInvite(n *Network, in Income) {
 				}
 
 				<-gatherComplete
+				anserSDP, err := json.Marshal(pc.LocalDescription())
+				if err != nil {
+					logger.Errorf(ctx, "json.Marshal: %v", err)
+					return
+				}
+
+				payload, err := crypt.EncryptMessage(Answer{
+					From: n.mesh,
+					To:   string(in.Signal.Payload),
+					SDP:  anserSDP,
+				}.Marshal(), pubKey, n.privateKey)
+				if err != nil {
+					logger.Errorf(ctx, "crypt.EncryptMessage: %v", err)
+					return
+				}
 				n.broadcastWithExclude(Signal{
-					Type: SignalTypeAnswer,
-					Payload: Answer{
-						From: n.mesh,
-						To:   string(in.Signal.Payload),
-						SDP:  encryptedSDP,
-					}.Marshal()})
+					Type:    SignalTypeAnswerForNewbie,
+					Payload: payload})
 				logger.Debugf(ctx, "Answer was sent!")
 			}()
 
@@ -186,7 +186,7 @@ func generateInvite(n *Network, in Income) {
 		})
 
 	n.broadcastWithExclude(Signal{
-		Type:    SignalTypeInvite,
+		Type:    SignalTypeInviteForNewbie,
 		Payload: payload,
 	})
 
@@ -195,18 +195,10 @@ func generateInvite(n *Network, in Income) {
 
 func makeOffer(n *Network, in Income) {
 	ctx := span.Init("makeOffer")
-	slot := n.bookSlot()
-	if slot == nil {
+	if len(n.connections) >= 10 {
 		logger.Errorf(ctx, "Has no free slot!")
 		return
 	}
-	var err error
-	defer func() {
-		if err == nil {
-			return
-		}
-		slot.Free()
-	}()
 
 	decryptedPayload, err := crypt.DecryptMessage(in.Signal.Payload, n.privateKey)
 	if err != nil {
@@ -267,24 +259,54 @@ func makeOffer(n *Network, in Income) {
 		logger.Errorf(ctx, "pc.CreateOffer: %v", err)
 		return
 	}
+	logger.Debugf(ctx, "Created offer: %s", string(offer.SDP))
 
 	if err := pc.SetLocalDescription(offer); err != nil {
 		logger.Errorf(ctx, "pc.SetLocalDescription: %v", err)
 		return
 	}
+	SDP, err := json.Marshal(pc.LocalDescription())
+	if err != nil {
+		logger.Errorf(ctx, "json.Marshal: %v", err)
+		return
+	}
 
-	encryptedPayload, err := crypt.EncryptRSA(Offer{
+	encryptedPayload, err := crypt.EncryptMessage(Offer{
 		From: n.mesh,
 		Sign: invite.Sign,
-		SDP:  []byte(offer.SDP),
-	}.Marshal(), pubKey)
+		SDP:  SDP,
+	}.Marshal(), pubKey, n.privateKey)
 	if err != nil {
 		logger.Errorf(ctx, "crypt.EncryptMessage: %v", err)
 		return
 	}
 
+	n.addReaction(
+		time.Second*10,
+		func(answer Income) bool {
+			if answer.Signal.Type != SignalTypeAnswerForNewbie {
+				return false
+			}
+			decryptedPayload, err := crypt.DecryptMessage(in.Signal.Payload, n.privateKey)
+			if err != nil {
+				logger.Debugf(ctx, "crypt.DectyptMeeage: %v", err)
+				return false
+			}
+			var ans Answer
+			ans.Unmarshal(decryptedPayload)
+			if ans.From != in.From {
+				return false
+			}
+
+			var ansSDP webrtc.SessionDescription
+			json.Unmarshal(ans.SDP, &ansSDP)
+			pc.SetRemoteDescription(ansSDP)
+			return true
+		},
+	)
+
 	n.broadcastWithExclude(Signal{
-		Type:    SingalTypeOffer,
+		Type:    SingalTypeNewbieOffer,
 		Payload: encryptedPayload,
 	})
 	logger.Debugf(ctx, "Offer was sent!")

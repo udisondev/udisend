@@ -25,18 +25,17 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	logger.Debugf(ctx, "Public key N: %s", publicAuth.N.String())
 
 	pem, err := crypt.MarshalPublicKey(publicAuth)
 	if err != nil {
 		log.Fatal(err)
 	}
 	mesh := base64.StdEncoding.EncodeToString(pem)
-	logger.Debugf(ctx, "My mesh: %s", mesh)
 	n := network.New(mesh, privateAuth, runtime.NumCPU(), 10)
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		n.Run(ctx)
 	}()
 
@@ -49,7 +48,6 @@ func main() {
 				n.ServeWs(w, r)
 			})
 			muxWs.HandleFunc("/id", func(w http.ResponseWriter, r *http.Request) {
-				logger.Debugf(ctx, "ID requested <ID:%s>", mesh)
 				w.Write([]byte(mesh))
 			})
 

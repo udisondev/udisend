@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"udisend/pkg/crypt"
 	"udisend/pkg/logger"
 	"udisend/pkg/span"
 
@@ -9,14 +10,14 @@ import (
 )
 
 type OfferICE struct {
-	PC   *webrtc.PeerConnection
-	DC   *webrtc.DataChannel
-	Mesh string
+	PC       *webrtc.PeerConnection
+	DC       *webrtc.DataChannel
+	ConnMesh string
 }
 
 func (o *OfferICE) Interact(outbox <-chan Signal) <-chan Income {
 	inbox := make(chan Income)
-	ctx := span.Init("Interaction with=%s", o.Mesh)
+	ctx := span.Init("Interaction with=%s", o.Hash())
 
 	readingCtx, stopReading := context.WithCancel(context.Background())
 
@@ -46,12 +47,16 @@ func (o *OfferICE) Interact(outbox <-chan Signal) <-chan Income {
 			return
 		}
 		logger.Debugf(ctx, "Received %s!", s.Type)
-		inbox <- Income{From: o.Mesh, Signal: s}
+		inbox <- Income{From: o.ConnMesh, Signal: s}
 	})
 
 	return inbox
 }
 
-func (o *OfferICE) ID() string {
-	return o.Mesh
+func (o *OfferICE) Mesh() string {
+	return o.ConnMesh
+}
+
+func (t *OfferICE) Hash() string {
+	return crypt.MeshHash(t.ConnMesh)
 }

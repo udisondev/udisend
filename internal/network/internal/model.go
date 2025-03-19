@@ -42,10 +42,10 @@ const (
 	SignalTypeChallenge             SignalType = 0x00
 	SignalTypeSolveChallenge                   = 0x01
 	SignalTypeTestChallenge                    = 0x02
-	SignalTypeNeedInvite                       = 0x03
-	SignalTypeInvite                           = 0x04
-	SingalTypeOffer                            = 0x05
-	SignalTypeAnswer                           = 0x06
+	SignalTypeNeedInviteForNewbie              = 0x03
+	SignalTypeInviteForNewbie                  = 0x04
+	SingalTypeNewbieOffer                      = 0x05
+	SignalTypeAnswerForNewbie                  = 0x06
 	SignalTypeConnectionSecret                 = 0x07
 	SignalTypeConnectionEstablished            = 0x08
 )
@@ -58,14 +58,18 @@ func (s SignalType) String() string {
 		return "SolveChallenge"
 	case SignalTypeTestChallenge:
 		return "TestChallenge"
-	case SignalTypeNeedInvite:
+	case SignalTypeNeedInviteForNewbie:
 		return "NeedInvite"
-	case SignalTypeInvite:
+	case SignalTypeInviteForNewbie:
 		return "Invite"
-	case SingalTypeOffer:
+	case SingalTypeNewbieOffer:
 		return "Offer"
-	case SignalTypeAnswer:
+	case SignalTypeAnswerForNewbie:
 		return "Answer"
+	case SignalTypeConnectionSecret:
+		return "ConnectionSecret"
+	case SignalTypeConnectionEstablished:
+		return "ConnectionEstablished"
 	default:
 		return ""
 	}
@@ -85,7 +89,10 @@ func (s *Signal) Unmarshal(b []byte) error {
 }
 
 func (i Invite) Marshal() []byte {
-	totalLen := len(i.To) + len(i.From) + len(i.Sign) + len(i.Secret) + 3
+	totalLen := len(i.To) + len(i.From) + len(i.Sign) + 2
+	if i.Secret != nil {
+		totalLen += len(i.Secret) + 1
+	}
 	out := make([]byte, totalLen)
 	pos := 0
 
@@ -96,6 +103,10 @@ func (i Invite) Marshal() []byte {
 	out[pos] = '|'
 	pos++
 	pos += copy(out[pos:], i.Sign)
+	if i.Secret == nil {
+		return out
+	}
+
 	out[pos] = '|'
 	pos++
 	copy(out[pos:], i.Secret)
@@ -126,19 +137,23 @@ func (i *Invite) Unmarshal(data []byte) error {
 	}
 
 	i.From = string(rest[:secondSep])
+	if secondSep+1 >= len(data) {
+		return errors.New("invalid data: missing Sign")
+	}
 
-	rest = data[secondSep+1:]
+	rest = rest[secondSep+1:]
 	thirdSep := bytes.IndexByte(rest, '|')
-	if thirdSep == -1 && len(rest) < 52 {
-		return errors.New("invalid data: missing third separator")
+	if thirdSep == -1 {
+		i.Sign = rest
+		return nil
 	}
 
 	i.Sign = rest[:thirdSep]
-
-	if len(rest[thirdSep:]) == 27 {
-		i.Secret = rest[thirdSep+1:]
+	if thirdSep+1 >= len(data) {
+		return errors.New("invalid data: missing Secret")
 	}
 
+	i.Secret = rest[thirdSep+1:]
 	return nil
 }
 
