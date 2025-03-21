@@ -2,9 +2,11 @@ package network
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"time"
 	. "udisend/internal/network/internal"
 	"udisend/pkg/crypt"
@@ -28,11 +30,8 @@ func generateInvite(n *Network, in Income) {
 	secret := make([]byte, 32)
 	rand.Read(secret)
 	logger.Debugf(ctx, "generated secret: %s", hex.EncodeToString(secret))
-	mesh, ok := n.meshByHash(in.From)
-	if !ok {
-		logger.Warnf(ctx, "There is no mesh of hash=%s", in.From)
-		return
-	}
+
+	mesh := string(in.Signal.Payload[26:])
 	pubKey, err := crypt.ExtractPublicKey(mesh)
 	if err != nil {
 		logger.Errorf(ctx, "crypt.ExtractPublicKey: %v", err)
@@ -40,7 +39,7 @@ func generateInvite(n *Network, in Income) {
 	}
 	payload, err := crypt.EncryptMessage(
 		Invite{
-			To:     string(in.Signal.Payload),
+			To:     mesh,
 			From:   n.mesh,
 			Sign:   sign,
 			Secret: secret,
@@ -116,11 +115,46 @@ func generateInvite(n *Network, in Income) {
 					dataChannel.OnOpen(func() {
 						ctx := span.Extend(ctx, "dataChannel.OnOpen")
 						logger.Debugf(ctx, "Opened!")
-						n.addConn(&OfferICE{
-							PC:       pc,
-							DC:       dataChannel,
-							ConnMesh: offer.From,
-						}, true)
+						n.addConn(
+							offer.From,
+							func(outbox <-chan Signal) <-chan Signal {
+								inbox := make(chan Signal)
+								readingCtx, stopReading := context.WithCancel(context.Background())
+
+								go func() {
+									defer func() {
+										pc.Close()
+										dataChannel.Close()
+									}()
+
+									for {
+										select {
+										case <-readingCtx.Done():
+											return
+										case s, ok := <-outbox:
+											if !ok {
+												stopReading()
+												return
+											}
+
+											dataChannel.Send(s.Marshal())
+										}
+									}
+								}()
+
+								dataChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
+									var s Signal
+									err := s.Unmarshal(msg.Data)
+									if err != nil {
+										stopReading()
+										return
+									}
+									inbox <- s
+								})
+
+								return inbox
+							},
+							true)
 						dataChannel.Send(Signal{
 							Type:    SignalTypeConnectionSecret,
 							Payload: secret,
@@ -259,7 +293,6 @@ func makeOffer(n *Network, in Income) {
 		logger.Errorf(ctx, "pc.CreateOffer: %v", err)
 		return
 	}
-	logger.Debugf(ctx, "Created offer: %s", string(offer.SDP))
 
 	if err := pc.SetLocalDescription(offer); err != nil {
 		logger.Errorf(ctx, "pc.SetLocalDescription: %v", err)
@@ -287,19 +320,86 @@ func makeOffer(n *Network, in Income) {
 			if answer.Signal.Type != SignalTypeAnswerForNewbie {
 				return false
 			}
-			decryptedPayload, err := crypt.DecryptMessage(in.Signal.Payload, n.privateKey)
+			decryptedPayload, err := crypt.DecryptMessage(answer.Signal.Payload, n.privateKey)
 			if err != nil {
 				logger.Debugf(ctx, "crypt.DectyptMeeage: %v", err)
 				return false
 			}
+
 			var ans Answer
-			ans.Unmarshal(decryptedPayload)
-			if ans.From != in.From {
-				return false
+			err = ans.Unmarshal(decryptedPayload)
+			if err != nil {
+				logger.Debugf(ctx, "ans.Unmarshal: %v", err)
+				return true
 			}
 
+			logger.Debugf(ctx, "Answer: %s", string(ans.SDP))
 			var ansSDP webrtc.SessionDescription
-			json.Unmarshal(ans.SDP, &ansSDP)
+			err = json.Unmarshal(ans.SDP, &ansSDP)
+			if err != nil {
+				logger.Debugf(ctx, "json.Unmarshal: %v", err)
+				return true
+			}
+
+			dc.OnOpen(func() {
+				logger.Debugf(nil, "Connected with answerrer=%s", crypt.MeshHash(ans.From))
+				n.addConn(
+					ans.From,
+					func(outbox <-chan Signal) <-chan Signal {
+						inbox := make(chan Signal)
+						readingCtx, stopReading := context.WithCancel(context.Background())
+
+						go func() {
+							defer func() {
+								pc.Close()
+								dc.Close()
+							}()
+
+							for {
+								select {
+								case <-readingCtx.Done():
+									return
+								case s, ok := <-outbox:
+									if !ok {
+										stopReading()
+										return
+									}
+
+									dc.Send(s.Marshal())
+								}
+							}
+						}()
+
+						dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+							var s Signal
+							err := s.Unmarshal(msg.Data)
+							if err != nil {
+								logger.Errorf(nil, "Error s.Unmarshal: %s", err)
+								stopReading()
+								close(inbox)
+								return
+							}
+							logger.Debugf(nil, "Received %s from datachannel", s.Type)
+							inbox <- s
+						})
+
+						return inbox
+					},
+					true,
+				)
+			})
+
+			n.addReaction(
+				time.Second*5,
+				func(secret Income) bool {
+					if secret.Signal.Type != SignalTypeConnectionSecret {
+						return false
+					}
+					n.send(in.From, Signal{Type: SignalTypeConnectionEstablished, Payload: slices.Concat(secret.Signal.Payload, []byte(ans.From))})
+					return true
+				},
+			)
+
 			pc.SetRemoteDescription(ansSDP)
 			return true
 		},

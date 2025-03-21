@@ -137,7 +137,7 @@ func (i *Invite) Unmarshal(data []byte) error {
 	}
 
 	i.From = string(rest[:secondSep])
-	if secondSep+1 >= len(data) {
+	if secondSep+1 >= len(rest) {
 		return errors.New("invalid data: missing Sign")
 	}
 
@@ -149,7 +149,7 @@ func (i *Invite) Unmarshal(data []byte) error {
 	}
 
 	i.Sign = rest[:thirdSep]
-	if thirdSep+1 >= len(data) {
+	if thirdSep+1 >= len(rest) {
 		return errors.New("invalid data: missing Secret")
 	}
 
@@ -237,18 +237,24 @@ func (a *Answer) Unmarshal(data []byte) error {
 
 	a.From = string(data[:firstSep])
 
-	secondSep := bytes.IndexByte(data, '|')
+	if firstSep+1 >= len(data) {
+		return errors.New("invalid data: has no To and SDP")
+	}
+
+	rest := data[firstSep+1:]
+
+	secondSep := bytes.IndexByte(rest, '|')
 	if secondSep == -1 {
 		return errors.New("invalid data: missing separator")
 	}
 
-	a.To = string(data[firstSep+1 : secondSep])
+	a.To = string(rest[:secondSep])
 
-	if len(data[secondSep:]) < 10 {
+	if secondSep+1 >= len(rest) {
 		return errors.New("invalid data: has no SDP")
 	}
 
-	a.SDP = data[secondSep+1:]
+	a.SDP = rest[secondSep+1:]
 
 	return nil
 }

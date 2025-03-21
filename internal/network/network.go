@@ -26,6 +26,7 @@ import (
 
 type Network struct {
 	mesh                         string
+	meshHash                     string
 	entryPointHash               string
 	inbox                        chan Income
 	reactionsMu                  sync.Mutex
@@ -38,11 +39,12 @@ type Network struct {
 }
 
 type connection struct {
-	mu       sync.Mutex
-	mesh     string
-	meshHash string
-	outbox   chan Signal
-	state    connState
+	mu         sync.Mutex
+	mesh       string
+	meshHash   string
+	outbox     chan Signal
+	disconnect func()
+	state      connState
 }
 
 type connectable interface {
@@ -79,6 +81,7 @@ var handlers = map[SignalType]func(*Network, Income){
 func New(mesh string, authKey *rsa.PrivateKey, countOfWorkers, countOfSlots int) *Network {
 	n := &Network{
 		mesh:           mesh,
+		meshHash:       crypt.MeshHash(mesh),
 		inbox:          make(chan Income),
 		reactionsMu:    sync.Mutex{},
 		reactions:      make(map[string]*reaction),
@@ -127,12 +130,6 @@ func (n *Network) ServeWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pubAuth, err := crypt.ExtractPublicKey(mesh)
-	if err != nil {
-		logger.Errorf(ctx, "crypt.ExtractPublicKey: %v", err)
-		return
-	}
-
 	if len(n.connections) >= 10 {
 		logger.Warnf(ctx, "Has no free slot!")
 		return
@@ -144,14 +141,70 @@ func (n *Network) ServeWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tcp := &TCP{
-		ConnMesh: mesh,
-		Conn:     conn,
-		PubAuth:  pubAuth,
-	}
-
 	n.addConn(
-		tcp,
+		mesh,
+		func(outbox <-chan Signal) <-chan Signal {
+			inbox := make(chan Signal)
+
+			readCtx, stopReading := context.WithCancel(context.Background())
+			go func() {
+				defer func() {
+					recover()
+					stopReading()
+				}()
+
+				for s := range outbox {
+					w, err := conn.NextWriter(websocket.BinaryMessage)
+					if err != nil {
+						logger.Errorf(ctx, "t.Conn.NextWriter: %v", err)
+						break
+					}
+
+					_, err = w.Write(s.Marshal())
+					if err != nil {
+						logger.Errorf(ctx, "w.Write: %v", err)
+					}
+
+					if err := w.Close(); err != nil {
+						logger.Errorf(ctx, "w.Close: %v", err)
+						break
+					}
+				}
+			}()
+
+			go func() {
+				defer func() {
+					recover()
+					close(inbox)
+				}()
+			loop:
+				for {
+					select {
+					case <-readCtx.Done():
+						break loop
+					default:
+						_, b, err := conn.ReadMessage()
+						if err != nil {
+							if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+								break loop
+							}
+							continue
+						}
+
+						var s Signal
+						err = s.Unmarshal(b)
+						if err != nil {
+							logger.Errorf(ctx, "s.Unmarshal: %v", err)
+							break loop
+						}
+
+						inbox <- s
+					}
+				}
+			}()
+
+			return inbox
+		},
 		false,
 	)
 }
@@ -183,20 +236,14 @@ func (n *Network) AttachHead(entrypoint string) error {
 		return errors.New("busy slots")
 	}
 
-	n.addReaction(
-		time.Second*5,
-		func(in Income) bool {
-			if in.Signal.Type != SignalTypeInviteForNewbie {
-				return false
-			}
-			if in.From != headHesh {
-				return false
-			}
+	handlers[SignalTypeInviteForNewbie] = func(n *Network, in Income) {
+		if in.From != headHesh {
+			return
+		}
 
-			go makeOffer(n, in)
-			return true
-		},
-	)
+		makeOffer(n, in)
+	}
+
 	h := http.Header{}
 	h.Add("Mesh", n.mesh)
 	u := url.URL{Scheme: "ws", Host: entrypoint, Path: "/ws"}
@@ -207,9 +254,68 @@ func (n *Network) AttachHead(entrypoint string) error {
 	}
 
 	n.addConn(
-		&TCP{
-			ConnMesh: string(headID),
-			Conn:     conn,
+		string(headID),
+		func(outbox <-chan Signal) <-chan Signal {
+			inbox := make(chan Signal)
+
+			readCtx, stopReading := context.WithCancel(context.Background())
+			go func() {
+				defer func() {
+					recover()
+					stopReading()
+				}()
+
+				for s := range outbox {
+					w, err := conn.NextWriter(websocket.BinaryMessage)
+					if err != nil {
+						logger.Errorf(ctx, "t.Conn.NextWriter: %v", err)
+						break
+					}
+
+					_, err = w.Write(s.Marshal())
+					if err != nil {
+						logger.Errorf(ctx, "w.Write: %v", err)
+					}
+
+					if err := w.Close(); err != nil {
+						logger.Errorf(ctx, "w.Close: %v", err)
+						break
+					}
+				}
+			}()
+
+			go func() {
+				defer func() {
+					recover()
+					close(inbox)
+				}()
+			loop:
+				for {
+					select {
+					case <-readCtx.Done():
+						break loop
+					default:
+						_, b, err := conn.ReadMessage()
+						if err != nil {
+							if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+								break loop
+							}
+							continue
+						}
+
+						var s Signal
+						err = s.Unmarshal(b)
+						if err != nil {
+							logger.Errorf(ctx, "s.Unmarshal: %v", err)
+							break loop
+						}
+
+						inbox <- s
+					}
+				}
+			}()
+
+			return inbox
 		},
 		true,
 	)
@@ -291,6 +397,7 @@ func (n *Network) broadcastWithExclude(sig Signal, exclude ...string) {
 		if conn.state < connStateTrusted {
 			continue
 		}
+		logger.Debugf(nil, "Going to broadcast to=%s", conn.meshHash)
 		conn.outbox <- sig
 	}
 }
@@ -303,26 +410,31 @@ func (n *Network) disconnect(mesh string) {
 	if !ok {
 		return
 	}
-	close(conn.outbox)
+	conn.disconnect()
 }
 
-func (n *Network) addConn(conn connectable, trusted bool) {
+func (n *Network) addConn(mesh string, interact func(<-chan Signal) <-chan Signal, trusted bool) {
 	outbox := make(chan Signal, 256)
 	n.connectionsMu.Lock()
 	defer n.connectionsMu.Unlock()
+	hash := crypt.MeshHash(mesh)
+
 	newConn := &connection{
-		mesh:     conn.Mesh(),
-		meshHash: conn.Hash(),
+		mesh:     mesh,
+		meshHash: hash,
 		outbox:   outbox,
-		state:    connStateInit,
+		disconnect: sync.OnceFunc(func() {
+			close(outbox)
+		}),
+		state: connStateInit,
 	}
 
-	n.connections[newConn.meshHash] = newConn
+	n.connections[hash] = newConn
 	if trusted {
 		newConn.state = connStateTrusted
 	}
 
-	inbox := conn.Interact(outbox)
+	inbox := interact(outbox)
 	if !trusted {
 		n.inbox <- Income{From: newConn.meshHash, Signal: Signal{Type: SignalTypeChallenge}}
 	}
@@ -332,17 +444,17 @@ func (n *Network) addConn(conn connectable, trusted bool) {
 		defer func() {
 			n.connectionsMu.Lock()
 			defer n.connectionsMu.Unlock()
-			delete(n.connections, conn.Mesh())
+			delete(n.connections, hash)
 			logger.Debugf(ctx, "Connection deleted")
 		}()
 
-		logger.Debugf(ctx, "Ready to handle")
 		for in := range inbox {
-			if n.checkCache(in.Signal.Payload) {
+			if n.checkCache(in.Payload) {
+				logger.Debugf(ctx, "Is duplicate")
 				continue
 			}
-			n.putCache(in.Signal.Payload)
-			n.inbox <- in
+			n.putCache(in.Payload)
+			n.inbox <- Income{From: hash, Signal: in}
 		}
 	}()
 }

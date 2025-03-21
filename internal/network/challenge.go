@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"math/big"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,7 +58,6 @@ func challenge(n *Network, in Income) {
 
 			n.upgradeConn(testMsg.From, connStateVerified)
 			if len(n.connections) < 2 {
-				logger.Debugf(ctx, "Connections count less than one")
 				n.upgradeConn(testMsg.From, connStateTrusted)
 				return true
 			}
@@ -75,6 +75,7 @@ func challenge(n *Network, in Income) {
 				time.Second*30,
 				func(inviteMsg Income) bool {
 					ctx := span.Init("handle invite")
+					logger.Debugf(ctx, "Working invite reaction for=%s", in.From)
 					if inviteMsg.Signal.Type != SignalTypeInviteForNewbie {
 						return false
 					}
@@ -99,20 +100,38 @@ func challenge(n *Network, in Income) {
 					}
 
 					mu.Lock()
-					invitesMap[inviteMsg.From] = invite.Secret
+					invitesMap[crypt.MeshHash(invite.From)] = invite.Secret
+					logger.Debugf(ctx, "Added invite from %s", crypt.MeshHash(invite.From))
 					mu.Unlock()
 
 					go func() {
 						select {
 						case <-time.After(30 * time.Second):
 						case <-invitesCtx.Done():
+							logger.Debugf(ctx, "Sending answer from=%s", crypt.MeshHash(invite.From))
 							n.addReaction(
 								time.Duration(10*minReqConns)*time.Second,
 								func(answer Income) bool {
 									if answer.Signal.Type != SignalTypeAnswerForNewbie {
 										return false
 									}
-									n.send(in.From, answer.Signal)
+									decryptedPayload, err := crypt.DecryptMessage(answer.Signal.Payload, n.privateKey)
+									if err != nil {
+										logger.Errorf(ctx, "crypt.DecryptMessage: %v", err)
+										return false
+									}
+									var ans Answer
+									err = ans.Unmarshal(decryptedPayload)
+									if err != nil {
+										logger.Errorf(ctx, "ans.Unmarshal: %s", err)
+										return true
+									}
+									encryptedPayload, err := crypt.EncryptMessage(ans.Marshal(), pubAuth, n.privateKey)
+									if err != nil {
+										logger.Errorf(ctx, "crypt.EncryptMessage: %v", err)
+										return true
+									}
+									n.send(in.From, Signal{Type: SignalTypeAnswerForNewbie, Payload: encryptedPayload})
 									return true
 								},
 							)
@@ -138,14 +157,16 @@ func challenge(n *Network, in Income) {
 									if connEstablishedMsg.From != in.From {
 										return false
 									}
-									givenSecret := connEstablishedMsg.Signal.Payload[:26]
-									with := string(connEstablishedMsg.Signal.Payload[26:])
-									actualSecret, ok := invitesMap[with]
+									givenSecret := connEstablishedMsg.Signal.Payload[:32]
+									with := string(connEstablishedMsg.Signal.Payload[32:])
+									actualSecret, ok := invitesMap[crypt.MeshHash(with)]
 									if !ok {
+										logger.Debugf(nil, "Has not invite with=%s", with)
 										n.disconnect(in.From)
 										return false
 									}
 									if !bytes.Equal(givenSecret, actualSecret) {
+										logger.Debugf(ctx, "Secrets not equal given=%s expected=%s", string(givenSecret), string(actualSecret))
 										n.disconnect(in.From)
 										return false
 									}
@@ -178,6 +199,8 @@ func challenge(n *Network, in Income) {
 							case <-time.After(time.Duration(10*minReqConns) * time.Second):
 								n.disconnect(in.From)
 							case <-connectionEstablishedCtx.Done():
+								n.upgradeConn(in.From, connStateTrusted)
+								logger.Debugf(nil, "%s Trusted!", crypt.MeshHash(in.From))
 								if minReqConns > 4 {
 									n.disconnect(in.From)
 								}
@@ -191,7 +214,7 @@ func challenge(n *Network, in Income) {
 			)
 			n.broadcastWithExclude(Signal{
 				Type:    SignalTypeNeedInviteForNewbie,
-				Payload: []byte(n.mesh),
+				Payload: slices.Concat([]byte(rand.Text()), []byte(n.mesh)),
 			}, testMsg.From)
 
 			return true
