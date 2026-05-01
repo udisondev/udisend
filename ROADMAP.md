@@ -4,7 +4,7 @@
 
 **Принципы:**
 - Каждая фаза — TDD: failing test → minimal code → refactor.
-- Фаза считается завершённой только когда **все acceptance criteria** зелёные и **документация синхронна** с реализацией.
+- Фаза считается завершённой только когда **все acceptance criteria** зелёные, **документация синхронна** с реализацией, и **post-phase code review** (3 итерации, см. `CLAUDE.md` → "Post-phase code review") пройден без необработанных MUST FIX.
 - Build tags: `integration` для multi-node, `e2e` для полной системы. Default `go test ./...` гоняет только unit + synctest.
 - `-race` обязателен в CI на всех уровнях.
 
