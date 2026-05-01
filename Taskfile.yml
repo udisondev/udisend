@@ -19,6 +19,24 @@ tasks:
       - go build -o {{.BIN_DIR}}/network ./cmd/network
       - go build -o {{.BIN_DIR}}/messenger ./cmd/messenger
 
+  run-network:
+    desc: Run the local network node on 127.0.0.1:9000
+    deps: [build]
+    cmds:
+      - "{{.BIN_DIR}}/network --listen 127.0.0.1:9000 -v"
+
+  run-alice:
+    desc: Run the messenger as Alice (storage in ~/.config/udisend/alice)
+    deps: [build]
+    cmds:
+      - "{{.BIN_DIR}}/messenger --identity $HOME/.config/udisend/alice.key --storage $HOME/.config/udisend/alice --bootstrap 127.0.0.1:9000 -v"
+
+  run-bob:
+    desc: Run the messenger as Bob (storage in ~/.config/udisend/bob)
+    deps: [build]
+    cmds:
+      - "{{.BIN_DIR}}/messenger --identity $HOME/.config/udisend/bob.key --storage $HOME/.config/udisend/bob --bootstrap 127.0.0.1:9000 -v"
+
   vet:
     desc: go vet
     cmds:

@@ -25,7 +25,7 @@
 | 5 | STUN/TURN volunteers | ✅ done | 2026-05-02 | 2026-05-02 |
 | 6 | WebRTC session | ✅ done | 2026-05-02 | 2026-05-02 |
 | 7 | Chat application | ✅ done | 2026-05-02 | 2026-05-02 |
-| 8 | Hardening & MVP release | ⏳ planned | — | — |
+| 8 | Hardening & MVP release | 🌙 partial | 2026-05-02 | — |
 
 ---
 
@@ -309,23 +309,43 @@
 **Deliverable:** проект готов к публичному релизу с pre-built бинарями для Linux/macOS/Windows.
 
 ### Tasks
-- [ ] Threat-model audit (по `p2p-messenger-design.md` §8) — каждая атака покрыта тестом или документирована как accepted risk.
-- [ ] Replay-attack test: signaling и chat layer.
-- [ ] Eclipse-attack simulation на DHT.
-- [ ] DoS rate-limiting на DHT и signaling.
-- [ ] PGO baseline: capture production profile, commit `default.pgo`.
-- [ ] Benchmark suite: fix regressions, document expected numbers.
-- [ ] Reproducible builds (с GOFLAGS, fixed timestamps).
-- [ ] Signed release artifacts.
-- [ ] CONTRIBUTING.md, threat-model.md, security.md.
-- [ ] Public spec document (отдельно от Go-кода) для multi-implementation future.
-- [ ] Release notes + установка инструкции.
+- [ ] 🌙 Threat-model audit — `[OVERNIGHT-DEFERRED]`. Чек-лист в `review/PENDING.md`.
+- [ ] 🌙 Replay-attack test (signaling + chat) — `[OVERNIGHT-DEFERRED]`.
+- [ ] 🌙 Eclipse-attack simulation на DHT — `[OVERNIGHT-DEFERRED]`.
+- [ ] 🌙 DoS rate-limiting (DHT + signaling) — `[OVERNIGHT-DEFERRED]`.
+- [ ] 🌙 PGO baseline — `[OVERNIGHT-DEFERRED]`.
+- [ ] 🌙 Benchmark suite — `[OVERNIGHT-DEFERRED]`.
+- [ ] 🌙 Reproducible builds — `[OVERNIGHT-DEFERRED]`.
+- [ ] 🌙 Signed release artifacts — `[OVERNIGHT-DEFERRED]`.
+- [ ] 🌙 CONTRIBUTING.md / threat-model.md / security.md — `[OVERNIGHT-DEFERRED]`.
+- [ ] 🌙 Public protocol spec (separate document) — `[OVERNIGHT-DEFERRED]`.
+- [x] **Demo run instructions** — см. `ASSUMPTIONS.md` § Demo + `Taskfile.yml` (`task run-network`, `task run-alice`, `task run-bob`).
 
 ### Acceptance criteria
-- Все threat-model атаки covered.
-- Benchmarks стабильны (variance ≤ 5% по `benchstat`).
-- Reproducible build verified by independent rebuild.
-- Documentation review by an outside reader (готовность к contributors).
+- [ ] 🌙 Все threat-model атаки covered — `[OVERNIGHT-DEFERRED]`.
+- [ ] 🌙 Benchmarks стабильны — `[OVERNIGHT-DEFERRED]`.
+- [ ] 🌙 Reproducible build verified — `[OVERNIGHT-DEFERRED]`.
+- [ ] 🌙 Documentation review — `[OVERNIGHT-DEFERRED]`.
+
+### What ships overnight
+
+- **Runnable MVP:** `cmd/network` + `cmd/messenger` (fyne) собираются и запускаются.
+- **End-to-end текст** через DHT + signaling + WebRTC DataChannel — verified by integration test.
+- **File transfer** — каркас (offer + chunks + sha256 verify) реализован end-to-end в коде; полный E2E regression test отложен.
+- **Call signaling** — invite/accept/reject/end через DataChannel; **media playback (audio/video frames) не реализован** — следующая итерация.
+- **TOFU** — обнаружение fingerprint mismatch при upsert контакта (storage layer).
+- **Outbox** — механизм есть, периодический flush + flush при PeerOnline.
+
+### What does NOT ship overnight (must address before public release)
+
+- 3-iteration post-phase code review для всех фаз (см. `review/PENDING.md`).
+- S/Kademlia hardening (PoW, disjoint paths, sibling lists).
+- Replay protection в signaling + DHT.
+- DTLS-fingerprint runtime cross-validation.
+- Production TURN auth (rate-limit, abuse mitigations).
+- Live audio/video media через `pion/mediadevices` + canvas.Image rendering.
+- 100-узловые in-process тесты + Docker testcontainers integration.
+- PGO, reproducible builds, signed releases.
 
 ---
 

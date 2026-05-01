@@ -107,13 +107,56 @@ packet := version(1B) | type(1B) | length(uvarint) | payload(length B)
 ## Что делать после пробуждения
 
 1. Прочитать этот файл целиком.
-2. Прочитать `ROADMAP.md` — все пункты с пометкой `[OVERNIGHT-DEFERRED]` нуждаются в решении.
-3. `git log auto/overnight-mvp --oneline` — посмотреть последовательность фаз.
-4. Запустить `task build` и попробовать локально:
-   ```
-   ./bin/network --listen 127.0.0.1:9000
-   ./bin/messenger --identity-file alice.key --bootstrap 127.0.0.1:9000
-   ./bin/messenger --identity-file bob.key   --bootstrap 127.0.0.1:9000
-   ```
-5. Если что-то не запустилось — `review/PENDING.md` содержит чек-лист починки.
-6. Решить, что из 🔴 принимаем, что переделываем, что откладываем post-MVP.
+2. Прочитать `ROADMAP.md` — все пункты с пометкой `🌙 [OVERNIGHT-DEFERRED]` нуждаются в решении.
+3. `git log auto/overnight-mvp --oneline` — посмотреть последовательность фаз. Каждый коммит фазы помечен `[skip-review-overnight]`.
+4. Прогнать тесты: `task test-race` (быстро, ~10s) + `task build`.
+5. Запустить демо локально (см. ниже).
+6. Если что-то не запустилось — `review/PENDING.md` содержит чек-лист починки.
+7. Решить, что из 🔴 принимаем, что переделываем, что откладываем post-MVP.
+
+## Demo: how to run on one machine
+
+В трёх терминалах:
+
+```sh
+# 1. Network node — bootstrap + signaling relay (no public IP, so no STUN/TURN advertised).
+./bin/network --listen 127.0.0.1:9000 -v
+
+# 2. Alice's messenger.
+./bin/messenger \
+  --identity ~/.config/udisend/alice.key \
+  --storage  ~/.config/udisend/alice \
+  --bootstrap 127.0.0.1:9000 -v
+
+# 3. Bob's messenger (in another terminal).
+./bin/messenger \
+  --identity ~/.config/udisend/bob.key \
+  --storage  ~/.config/udisend/bob \
+  --bootstrap 127.0.0.1:9000 -v
+```
+
+Каждый messenger при первом запуске генерирует identity и **печатает в логи** свой destination_hash и fingerprint:
+
+```
+INFO udisend messenger identity=89f3...c2ab fingerprint="12345 67890 ..."
+```
+
+В UI Alice'ы:
+1. Кнопка "➕ Add contact" → вставить Bob'овский destination_hash + alias "bob".
+2. Выбрать Bob в списке слева → точка станет 🟡 (connecting), затем 🟢 (online).
+3. Написать сообщение → "Send".
+4. Bob увидит сообщение в своём окне (после `add contact` для alice симметрично).
+
+**File transfer:** "📎 File" → file picker → файл сохранится у получателя в `~/.config/udisend/<bob>/downloads/`.
+
+**Call:** "📞 Call" → у получателя появится "📞 incoming call from peer" → принять "✓ Accept" / "✕ End". В MVP нет фактического media playback (см. блок "Видео-звонки — ограничения" выше); это **call signaling end-to-end через WebRTC DataChannel**, готово стать реальным video call в следующей итерации.
+
+## Известные ограничения, которые ты заметишь сразу
+
+1. **Видео-звонок без видео.** `pion/mediadevices` + canvas rendering — следующий шаг. Сейчас CallInvite/Accept/End работают, signaling видно в UI.
+2. **Адрес в presence — это адрес transport.** На localhost это всегда `127.0.0.1:N`. Через NAT нужен publicIP detection (отложено).
+3. **Bootstrap — ручной флаг.** DNS-seeds не делал.
+4. **Контакты добавляются вставкой hex'а.** QR-код / numeric safety code share — следующий шаг (fingerprint УЖЕ есть, надо его удобно показать в UI).
+5. **fyne и cgo.** Если на твоей системе fyne не собирается — установлены ли `xorg-dev libgl1-mesa-dev`? На Linux обычно нужны.
+6. **Не запускай `task lint` без установленного golangci-lint** — он хочет system-wide install (см. https://golangci-lint.run/usage/install/).
+7. **Phase 8 hardening (threat-model audit, PGO, reproducible builds, signed releases)** не делал; см. `review/PENDING.md`.
