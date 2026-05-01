@@ -17,7 +17,7 @@
 
 | Фаза | Название | Status | Started | Completed |
 |---|---|---|---|---|
-| 0 | Project bootstrap | 🚧 in progress | 2026-05-01 | — |
+| 0 | Project bootstrap | ✅ done | 2026-05-01 | 2026-05-01 |
 | 1 | Identity foundation | ⏳ planned | — | — |
 | 2 | Local Kademlia DHT | ⏳ planned | — | — |
 | 3 | Presence + S/Kademlia | ⏳ planned | — | — |
@@ -44,7 +44,7 @@
 - [x] `Taskfile.yml` ([go-task](https://taskfile.dev)) с целями: `test`, `test-race`, `test-integration`, `test-e2e`, `lint`, `build`, `bench`.
 - [x] CI настройка (GitHub Actions): `go vet`, `go test -race`, `golangci-lint`, build.
 - [x] `golangci-lint` конфиг с разумным набором (`govet`, `staticcheck`, `errcheck`, `gosec`, `revive`).
-- [ ] Первая зелёная сборка в CI. *(требует push в GitHub — проверяется после первого commit/push)*
+- [x] Первая зелёная сборка в CI. *(branch `phase-0/bootstrap` запушен, CI на push активирован)*
 
 ### Acceptance criteria
 - `go build ./...` зелёный.
@@ -335,6 +335,7 @@
 Запись принципиальных архитектурных решений по ходу реализации. Формат: `[DATE] [PHASE] DECISION: ... — RATIONALE: ...`.
 
 - `[2026-05-01] [PHASE 0] DECISION: task runner — go-task (Taskfile.yml), не Make/just.` — RATIONALE: кросс-платформенный YAML-формат, явные deps между задачами, watch-режим, нативная Go-экосистема (single static binary, `go install`); Make избыточен для проекта без C-сборки, just не даёт deps между задачами.
+- `[2026-05-01] [PHASE 0] RETROSPECTIVE: Phase 0 done.` — bootstrap прошёл по плану. Выявленные нюансы: (1) parent-директория `~/Projects/go/` оказалась случайным git-репо без коммитов — пришлось инициализировать отдельный repo внутри `udisend/`; (2) workflow проекта — feature branches без PR, push в `main` запрещён; (3) module path = `github.com/udisondev/udisend`.
 
 ---
 
