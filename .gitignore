@@ -1,0 +1,25 @@
+# Binaries
+/bin/
+/dist/
+/cmd/network/network
+/cmd/messenger/messenger
+
+# Test / coverage / profiling
+coverage.out
+coverage.html
+*.test
+*.prof
+*.pgo
+!default.pgo
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Local config / secrets
+.env
+.env.local
+*.local.yml

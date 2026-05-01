@@ -1,0 +1,76 @@
+version: '3'
+
+# udisend dev tasks. Run `task --list` to see available targets.
+# https://taskfile.dev
+
+vars:
+  PKG: ./...
+  BIN_DIR: ./bin
+
+tasks:
+  default:
+    desc: Run vet + race tests + lint
+    deps: [vet, test-race, lint]
+
+  build:
+    desc: Build all binaries into ./bin
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -o {{.BIN_DIR}}/network ./cmd/network
+      - go build -o {{.BIN_DIR}}/messenger ./cmd/messenger
+
+  vet:
+    desc: go vet
+    cmds:
+      - go vet {{.PKG}}
+
+  test:
+    desc: Run unit tests (default build, no integration/e2e)
+    cmds:
+      - go test {{.PKG}}
+
+  test-race:
+    desc: Run unit tests with race detector
+    cmds:
+      - go test -race {{.PKG}}
+
+  test-integration:
+    desc: Run integration tests (build tag `integration`)
+    cmds:
+      - go test -race -tags=integration {{.PKG}}
+
+  test-e2e:
+    desc: Run end-to-end tests (build tag `e2e`)
+    cmds:
+      - go test -race -tags=e2e {{.PKG}}
+
+  test-fuzz:
+    desc: Run fuzz tests for the given package (use `task test-fuzz -- ./pkg/identity`)
+    cmds:
+      - go test -run=^$ -fuzz=. -fuzztime=30s {{.CLI_ARGS}}
+
+  cover:
+    desc: Run tests with coverage and write coverage.out
+    cmds:
+      - go test -race -coverprofile=coverage.out {{.PKG}}
+      - go tool cover -func=coverage.out | tail -n 1
+
+  bench:
+    desc: Run all benchmarks
+    cmds:
+      - go test -run=^$ -bench=. -benchmem {{.PKG}}
+
+  lint:
+    desc: Run golangci-lint (must be installed separately — see https://golangci-lint.run)
+    cmds:
+      - golangci-lint run {{.PKG}}
+
+  tidy:
+    desc: go mod tidy
+    cmds:
+      - go mod tidy
+
+  clean:
+    desc: Remove build artefacts and coverage
+    cmds:
+      - rm -rf {{.BIN_DIR}} coverage.out coverage.html
