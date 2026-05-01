@@ -12,6 +12,7 @@ import (
 
 	"github.com/udisondev/udisend/pkg/identity"
 	"github.com/udisondev/udisend/pkg/transport"
+	"github.com/udisondev/udisend/pkg/wire"
 )
 
 // Defaults for lookup behaviour. Tunable via Config.
@@ -135,7 +136,7 @@ func (n *Node) Close() {
 }
 
 func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
-	typ, payload, err := peekFrameType(pkt.Payload)
+	typ, body, err := wire.DecodeFrame(pkt.Payload)
 	if err != nil {
 		n.cfg.Logger.Debug("dht: bad frame", "from", pkt.From, "err", err)
 		return
@@ -145,7 +146,7 @@ func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
 	case MsgPing, MsgPong, MsgFindNode, MsgNodes,
 		MsgStore, MsgStoreOK, MsgFindValue, MsgValue:
 	default:
-		if n.cfg.ExtraHandler != nil && n.cfg.ExtraHandler(ctx, pkt, typ, payload) {
+		if n.cfg.ExtraHandler != nil && n.cfg.ExtraHandler(ctx, pkt, typ, body) {
 			return
 		}
 		return
@@ -550,12 +551,3 @@ func (n *Node) decodeContacts(cs []EncodedContact) []Contact {
 	return out
 }
 
-func peekFrameType(frame []byte) (byte, []byte, error) {
-	if len(frame) < 3 {
-		return 0, nil, errors.New("dht: short frame")
-	}
-	if frame[0] != 0x01 {
-		return 0, nil, fmt.Errorf("dht: unknown wire version %d", frame[0])
-	}
-	return frame[1], frame[2:], nil
-}

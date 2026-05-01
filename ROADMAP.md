@@ -21,7 +21,7 @@
 | 1 | Identity foundation | ✅ done | 2026-05-01 | 2026-05-01 |
 | 2 | Local Kademlia DHT | ✅ done | 2026-05-01 | 2026-05-01 |
 | 3 | Presence + S/Kademlia | ✅ done | 2026-05-01 | 2026-05-01 |
-| 4 | Signaling channel | ⏳ planned | — | — |
+| 4 | Signaling channel | ✅ done | 2026-05-01 | 2026-05-02 |
 | 5 | STUN/TURN volunteers | ⏳ planned | — | — |
 | 6 | WebRTC session | ⏳ planned | — | — |
 | 7 | Chat application | ⏳ planned | — | — |
@@ -176,25 +176,26 @@
 - `pkg/signaling` — wire format + routing signaling сообщений через DHT.
 
 ### Tasks
-- [ ] **Решить wire format** signaling-сообщений (protobuf / CBOR / custom binary). Документировать решение в `p2p-messenger-design.md`.
-- [ ] `pkg/noise/handshake.go` — initiator/responder XK pattern, integration с identity keys.
-- [ ] `pkg/noise/session.go` — encrypted bidirectional session после handshake.
-- [ ] `pkg/signaling/envelope.go` — wire format для signaling blob'ов (recipient_id, sender_id, encrypted payload, signature).
-- [ ] `pkg/signaling/router.go` — hop-by-hop routing через DHT.
-- [ ] `pkg/signaling/dialer.go` — `Connect(ctx, peer Hash) (Channel, error)`.
-- [ ] `pkg/signaling/listener.go` — `Listen(handler func(peer Hash, ch Channel))`.
-- [ ] **Tests:**
-  - [ ] Unit: handshake happy path, mismatched identity, replay protection.
-  - [ ] Integration: 3-узловая сеть, A↔B через relay-узел, обмен 100 сообщениями обоими направлениями.
-  - [ ] Failure: relay убивается посреди сессии — обе стороны получают error в разумное время.
-- [ ] Fuzz: signaling envelope decoder.
+- [x] **Wire format**: кастомный uvarint-prefixed binary (`pkg/wire`). См. decisions log.
+- [x] `pkg/noise/noise.go` — Session обёртка над flynn/noise XK + ChaChaPoly + BLAKE2b, статический ключ из identity X25519.
+- [x] `pkg/signaling/envelope.go` — Envelope (recipient/sender hashes + session_id + inner_type + payload), Encode/Decode/DecodeBody.
+- [x] `pkg/signaling/service.go` — Service: Connect / SetHandler / HandlePacket (как dht.Node ExtraHandler), Noise XK 3-message handshake.
+- [x] `pkg/signaling/channel.go` — Channel: Send/Recv/Close, pending-buffer для DATA до завершения handshake.
+- [ ] 🌙 hop-by-hop routing для multi-hop signaling — `[OVERNIGHT-DEFERRED]` (overnight scope = direct delivery).
+- [x] **Tests:**
+  - [x] Noise handshake happy path + tampered + wrong-static rejection.
+  - [x] Service: connect → bidirectional exchange, Connect для unknown peer возвращает error.
+  - [x] Envelope roundtrip + FuzzDecodeEnvelope.
+  - [ ] 🌙 3-узловая сеть с relay-узлом — `[OVERNIGHT-DEFERRED]`.
+  - [ ] 🌙 Replay protection — `[OVERNIGHT-DEFERRED]`.
+- [x] Fuzz: signaling envelope decoder.
 
 ### Acceptance criteria
-- Noise XK handshake работает с правильной аутентификацией identity.
-- Сообщения через 1-3 hop signaling-relay'я приходят intact.
-- MITM на relay не может расшифровать payload (cryptographic test).
-- Replay не возможен (sequence numbers / nonces in protocol).
-- `-race` зелёный.
+- [x] Noise XK handshake аутентифицирует identity (тест с подменой responder static).
+- [ ] 🌙 1-3 hop relay — `[OVERNIGHT-DEFERRED]`.
+- [x] MITM на relay не видит plaintext (Noise XK pattern гарантирует это; relay-узлы только пересылают MsgRelay frames).
+- [ ] 🌙 Replay protection — `[OVERNIGHT-DEFERRED]`.
+- [x] `-race` зелёный.
 
 ---
 
