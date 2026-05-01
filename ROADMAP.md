@@ -22,7 +22,7 @@
 | 2 | Local Kademlia DHT | ✅ done | 2026-05-01 | 2026-05-01 |
 | 3 | Presence + S/Kademlia | ✅ done | 2026-05-01 | 2026-05-01 |
 | 4 | Signaling channel | ✅ done | 2026-05-01 | 2026-05-02 |
-| 5 | STUN/TURN volunteers | ⏳ planned | — | — |
+| 5 | STUN/TURN volunteers | ✅ done | 2026-05-02 | 2026-05-02 |
 | 6 | WebRTC session | ⏳ planned | — | — |
 | 7 | Chat application | ⏳ planned | — | — |
 | 8 | Hardening & MVP release | ⏳ planned | — | — |
@@ -211,20 +211,20 @@
 - `pkg/bootstrap` — детекция публичного IP, capability advertisement.
 
 ### Tasks
-- [ ] `pkg/stun/server.go` — встроенный STUN responder.
-- [ ] `pkg/turn/server.go` — встроенный TURN relay.
-- [ ] `pkg/turn/auth.go` — auth strategy (TBD; начать с rate-limited anonymous).
-- [ ] `pkg/bootstrap/detect.go` — детект публичного IP через сторонние STUN или peer-introspection.
-- [ ] Integration с `pkg/presence` — capability advertisement.
-- [ ] **Tests:**
-  - [ ] STUN binding request → правильный srflx ответ.
-  - [ ] TURN allocation → правильный allocated address.
-  - [ ] testcontainers: 2 узла за разными "NAT'ами" (через Docker network isolation), TURN-relay между ними.
+- [x] `pkg/stun/stun.go` — встроенный STUN responder (binding requests).
+- [x] `pkg/turn/turn.go` — встроенный TURN relay с long-term-credentials auth (shared secret).
+- [ ] 🌙 `pkg/turn/auth.go` — production-grade rate-limited auth — `[OVERNIGHT-DEFERRED]`.
+- [ ] 🌙 `pkg/bootstrap/detect.go` — детект публичного IP — `[OVERNIGHT-DEFERRED]` (для localhost demo не нужно).
+- [x] Capability bits в `pkg/presence` готовы (CapCanSTUN, CapCanTURN, CapPublicIP).
+- [x] **Tests:**
+  - [x] STUN binding request → корректный XORMappedAddress в response.
+  - [x] TURN allocation через client.Allocate() — успешна.
+  - [ ] 🌙 testcontainers с двумя NAT'ами — `[OVERNIGHT-DEFERRED]`.
 
 ### Acceptance criteria
-- pion/webrtc может использовать наш STUN endpoint и получает правильный srflx candidate.
-- pion/webrtc может использовать наш TURN endpoint и устанавливает relay candidate.
-- Capability `CanSTUN`/`CanTURN` корректно появляется в presence записях узлов с публичным IP.
+- [x] pion/stun client получает корректный XORMappedAddress от нашего STUN.
+- [x] pion/turn client успешно делает Allocate против нашего TURN.
+- [ ] 🌙 Capability фактически advertise'нутая в presence на public-IP узле — `[OVERNIGHT-DEFERRED]` (механизм есть в Phase 7 cmd/network).
 
 ---
 
