@@ -9,7 +9,7 @@
 - `-race` обязателен в CI на всех уровнях.
 
 **Status legend:**
-⏳ planned · 🚧 in progress · ✅ done · ⏸ blocked · ❌ cancelled
+⏳ planned · 🚧 in progress · ✅ done · ⏸ blocked · ❌ cancelled · 🌙 overnight-deferred (см. `ASSUMPTIONS.md`)
 
 ---
 
@@ -268,14 +268,14 @@
 - `internal/chat` — application protocol (типы сообщений, framing, ACK).
 - `internal/contacts` — контакты, TOFU store, fingerprint verification.
 - `internal/storage` — SQLite layer для истории, контактов, outbox.
-- `internal/ui` — CLI/TUI (библиотека TBD).
+- `internal/ui` — desktop GUI на `fyne.io/fyne/v2` (см. decisions log 2026-05-01).
 - `internal/messenger` — сборка messenger клиента.
 - `internal/network` — сборка network-узла.
 - `internal/config` — конфиг загрузка для обоих бинарей.
 
 ### Tasks
 - [ ] **Решить SQLite driver** (`modernc.org/sqlite` vs `mattn/go-sqlite3`).
-- [ ] **Решить UI library** (`bubbletea` / `tview` / plain stdin).
+- [x] ~~**Решить UI library**~~ — `fyne.io/fyne/v2` (см. decisions log 2026-05-01).
 - [ ] `internal/storage/schema.sql` — схема для контактов, истории, outbox.
 - [ ] `internal/storage/store.go` — DB layer с интерфейсом для тестов.
 - [ ] `internal/contacts/store.go` — TOFU + fingerprint verification flow.
@@ -286,7 +286,7 @@
 - [ ] `internal/chat/outbox.go` — periodic outbox flush при появлении peer в presence.
 - [ ] `internal/messenger/run.go` — main entry: load identity → join DHT → start signaling listener → CLI/TUI loop.
 - [ ] `internal/network/run.go` — main entry: join DHT → start signaling-relay + STUN/TURN if public IP.
-- [ ] `internal/ui/cli.go` — CLI commands: `/contacts`, `/send`, `/call`, `/file`, `/verify`, `/history`.
+- [ ] `internal/ui/app.go` — fyne app (главное окно, контакт-лист, чат, кнопки call/file/verify, история).
 - [ ] `cmd/messenger/main.go` — flag parsing → `internal/messenger.Run`.
 - [ ] `cmd/network/main.go` — flag parsing → `internal/network.Run`.
 - [ ] **Tests:**
@@ -336,6 +336,9 @@
 
 - `[2026-05-01] [PHASE 0] DECISION: task runner — go-task (Taskfile.yml), не Make/just.` — RATIONALE: кросс-платформенный YAML-формат, явные deps между задачами, watch-режим, нативная Go-экосистема (single static binary, `go install`); Make избыточен для проекта без C-сборки, just не даёт deps между задачами.
 - `[2026-05-01] [PHASE 0] RETROSPECTIVE: Phase 0 done.` — bootstrap прошёл по плану. Выявленные нюансы: (1) parent-директория `~/Projects/go/` оказалась случайным git-репо без коммитов — пришлось инициализировать отдельный repo внутри `udisend/`; (2) workflow проекта — feature branches без PR, push в `main` запрещён; (3) module path = `github.com/udisondev/udisend`.
+- `[2026-05-01] [PHASE 7] DECISION: UI = fyne (fyne.io/fyne/v2), не CLI/TUI.` — RATIONALE: пользователь явно попросил desktop-клиент с fyne для overnight-run. Фаза 7 в части `internal/ui` пересматривается под fyne; bubbletea/tview — снимаются. Trade-off: cgo-зависимость в messenger-бинаре (libgl/xorg-dev на Linux); pure-Go выбор для остального стека (modernc.org/sqlite) сохраняется.
+- `[2026-05-01] [PHASE 4] DECISION: wire format для DHT/signaling — кастомный uvarint-prefixed binary в pkg/wire.` — RATIONALE: одна реализация (Go), нулевые внешние deps на wire layer, простой fuzz-таргет. CBOR/protobuf — будущий рефактор, изолирован одним пакетом.
+- `[2026-05-01] [OVERNIGHT] CONTEXT: unattended overnight run на ветке auto/overnight-mvp.` — пользователь оставил auto-mode, потребовал runnable MVP (cmd/network + cmd/messenger fyne) с text/files/video. Все одиночные решения и cuts документированы в `ASSUMPTIONS.md`. Post-phase 3-iteration ревью пропущено для всех фаз 1–8, чек-лист — в `review/PENDING.md`. Не сделанные пункты ROADMAP помечены `[OVERNIGHT-DEFERRED]`.
 
 ---
 
