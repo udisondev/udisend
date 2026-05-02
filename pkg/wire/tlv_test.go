@@ -37,8 +37,8 @@ func TestSkipUnknownTLVs_ConsumesValidTrailing(t *testing.T) {
 func TestSkipUnknownTLVs_RejectsTruncated(t *testing.T) {
 	t.Parallel()
 	w := wire.NewWriter()
-	w.WriteUvarint(0x10)         // tag
-	w.WriteUvarint(8)            // length=8
+	w.WriteUvarint(0x10)          // tag
+	w.WriteUvarint(8)             // length=8
 	w.WriteFixed([]byte("short")) // only 5 bytes — buffer is now truncated
 	r := wire.NewBuffer(w.Bytes())
 	if err := r.SkipUnknownTLVs(); !errors.Is(err, wire.ErrShortBuffer) {

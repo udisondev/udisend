@@ -18,11 +18,11 @@ type Limiter struct {
 	burst float64       // max bucket capacity
 	idle  time.Duration // forget keys idle longer than this
 
-	mu       sync.Mutex
-	buckets  map[string]*bucket
-	clock    func() time.Time
-	lastGC   time.Time // amortise gc — see Allow
-	gcEvery  time.Duration
+	mu      sync.Mutex
+	buckets map[string]*bucket
+	clock   func() time.Time
+	lastGC  time.Time // amortise gc — see Allow
+	gcEvery time.Duration
 }
 
 type bucket struct {

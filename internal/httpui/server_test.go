@@ -164,7 +164,6 @@ func postJSON(p *peer, path string, body any) ([]byte, error) {
 	return rb, nil
 }
 
-
 type sseStream struct {
 	resp   *http.Response
 	mu     sync.Mutex
@@ -214,7 +213,6 @@ func waitListenerReady(t *testing.T, ctx context.Context, addr string) {
 		}
 	}
 }
-
 
 func (s *sseStream) read() {
 	defer s.resp.Body.Close()

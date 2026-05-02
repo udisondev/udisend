@@ -415,4 +415,3 @@ func boolInt(b bool) int {
 	}
 	return 0
 }
-

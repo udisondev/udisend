@@ -311,4 +311,3 @@ func (s *Server) singleClient() *sseClient {
 	}
 	return nil
 }
-

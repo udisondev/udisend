@@ -15,8 +15,8 @@ import (
 // destination MemoryAddr, the hub looks up the matching transport and
 // delivers the packet.
 type MemoryHub struct {
-	mu     sync.RWMutex
-	peers  map[string]*MemoryTransport
+	mu      sync.RWMutex
+	peers   map[string]*MemoryTransport
 	counter atomic.Uint64
 }
 

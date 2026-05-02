@@ -78,17 +78,29 @@ func (rt *RoutingTable) Size() int {
 }
 
 // All returns a snapshot of every known contact, sorted by bucket index
-// (closest to self last).
+// (closest to self last). The returned slice is a fresh copy; mutating
+// it never disturbs the table.
 func (rt *RoutingTable) All() []Contact {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
-	var out []Contact
+
+	total := 0
 	for _, b := range rt.buckets {
-		if b == nil {
-			continue
+		if b != nil {
+			total += len(b.contacts)
 		}
-		out = append(out, b.snapshot()...)
 	}
+	if total == 0 {
+		return nil
+	}
+
+	out := make([]Contact, 0, total)
+	for _, b := range rt.buckets {
+		if b != nil {
+			out = append(out, b.contacts...)
+		}
+	}
+
 	return out
 }
 

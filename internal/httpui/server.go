@@ -220,9 +220,9 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	defer iceCancel()
 	ice := s.mngr.ICEServers(iceCtx)
 	resp := struct {
-		Identity   identityView           `json:"identity"`
-		Contacts   []contactView          `json:"contacts"`
-		ICEServers []messenger.ICEServer  `json:"ice_servers"`
+		Identity   identityView          `json:"identity"`
+		Contacts   []contactView         `json:"contacts"`
+		ICEServers []messenger.ICEServer `json:"ice_servers"`
 	}{
 		Identity: identityView{
 			Hash:        s.mngr.Identity().Public().DestinationHash().String(),

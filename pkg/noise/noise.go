@@ -34,9 +34,9 @@ var cipherSuite = noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, no
 // Session encapsulates a single end of an XK handshake. After Done()
 // returns true the application can call Encrypt / Decrypt.
 type Session struct {
-	hs       *noise.HandshakeState
-	send     *noise.CipherState // app → peer
-	recv     *noise.CipherState // peer → app
+	hs        *noise.HandshakeState
+	send      *noise.CipherState // app → peer
+	recv      *noise.CipherState // peer → app
 	initiator bool
 }
 

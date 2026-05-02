@@ -94,8 +94,10 @@ func (s *Session) shutdown() {
 // recvLoop pumps signaling.Channel into the session inbox until either
 // closes. Runs as a goroutine.
 func (s *Session) recvLoop() {
+	// Recv blocks indefinitely; the loop exits when channel.Close fires
+	// or the peer sends BYE — neither path needs a context to cancel.
+	ctx := context.Background()
 	for {
-		ctx := context.Background() // Recv blocks; we stop via channel.Close.
 		blob, err := s.channel.Recv(ctx)
 		if err != nil {
 			s.shutdown()

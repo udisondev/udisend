@@ -278,7 +278,6 @@ func (n *Node) sendMsg(ctx context.Context, to net.Addr, m any) error {
 	return n.transport.Send(ctx, to, blob)
 }
 
-// register/await txID matching helpers.
 func (n *Node) register(tx TxID) chan any {
 	ch := make(chan any, 1)
 	n.pendingMu.Lock()
@@ -598,4 +597,3 @@ func (n *Node) decodeContacts(cs []EncodedContact) []Contact {
 	}
 	return out
 }
-

@@ -32,7 +32,7 @@ type ICEServer struct {
 // передаёт их адреса в webrtc.Configuration.ICEServers."
 func (m *Messenger) ICEServers(ctx context.Context) []ICEServer {
 	const (
-		lookupTTL = 1500 * time.Millisecond
+		lookupTTL  = 1500 * time.Millisecond
 		maxServers = 5
 	)
 	contacts := m.node.Table().All()

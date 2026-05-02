@@ -22,11 +22,11 @@ type Capability uint32
 
 // Capability bits.
 const (
-	CapPublicIP    Capability = 1 << 0
-	CapCanRelay    Capability = 1 << 1
+	CapPublicIP     Capability = 1 << 0
+	CapCanRelay     Capability = 1 << 1
 	CapCanBootstrap Capability = 1 << 2
-	CapCanSTUN     Capability = 1 << 3
-	CapCanTURN     Capability = 1 << 4
+	CapCanSTUN      Capability = 1 << 3
+	CapCanTURN      Capability = 1 << 4
 )
 
 // Has reports whether c has all of bits set.
@@ -75,9 +75,9 @@ type Record struct {
 
 // Errors returned by the package.
 var (
-	ErrInvalidRecord  = errors.New("presence: invalid record")
-	ErrBadSignature   = errors.New("presence: bad signature")
-	ErrExpired        = errors.New("presence: record expired")
+	ErrInvalidRecord    = errors.New("presence: invalid record")
+	ErrBadSignature     = errors.New("presence: bad signature")
+	ErrExpired          = errors.New("presence: record expired")
 	ErrIdentityMismatch = errors.New("presence: pubkey/destination mismatch")
 )
 

@@ -10,14 +10,14 @@ import (
 
 // Message type codes used inside wire frames.
 const (
-	MsgPing       byte = 0x01
-	MsgPong       byte = 0x02
-	MsgFindNode   byte = 0x03
-	MsgNodes      byte = 0x04
-	MsgStore      byte = 0x05
-	MsgStoreOK    byte = 0x06
-	MsgFindValue  byte = 0x07
-	MsgValue      byte = 0x08
+	MsgPing      byte = 0x01
+	MsgPong      byte = 0x02
+	MsgFindNode  byte = 0x03
+	MsgNodes     byte = 0x04
+	MsgStore     byte = 0x05
+	MsgStoreOK   byte = 0x06
+	MsgFindValue byte = 0x07
+	MsgValue     byte = 0x08
 	// MsgRelay is used by pkg/signaling for opaque payload routing through
 	// DHT nodes. We define the constant here so the demux table is in one
 	// place; the payload format is defined in pkg/signaling.
@@ -116,8 +116,10 @@ func readContacts(b *wire.Buffer, max int) ([]EncodedContact, error) {
 	return out, nil
 }
 
-// PingMsg / PongMsg are zero-payload messages besides the header.
+// PingMsg probes a peer's liveness; the response is a PongMsg.
 type PingMsg struct{ Header Header }
+
+// PongMsg is the response to a PingMsg.
 type PongMsg struct{ Header Header }
 
 // FindNodeMsg requests the K nodes closest to Target.
@@ -195,10 +197,13 @@ func EncodeMsg(m any) ([]byte, error) {
 	}
 }
 
-// DecodeMsg parses a wire frame into the matching message type.
-// Unknown types return ErrUnknownType.
+// ErrUnknownType is returned by DecodeMsg for frame types the DHT does not
+// recognise. Callers can use errors.Is to distinguish it from malformed
+// frames (which return wire.ErrShortBuffer / similar).
 var ErrUnknownType = errors.New("dht: unknown message type")
 
+// DecodeMsg parses a wire frame into the matching message type.
+// Unknown types return ErrUnknownType.
 func DecodeMsg(frame []byte) (any, error) {
 	typ, payload, err := wire.DecodeFrame(frame)
 	if err != nil {

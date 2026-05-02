@@ -139,4 +139,3 @@ func resolveAddr(addr net.Addr) (*net.UDPAddr, error) {
 	}
 	return resolved, nil
 }
-

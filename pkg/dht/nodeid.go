@@ -39,9 +39,8 @@ func PrefixLen(a, b NodeID) int {
 		if x == 0 {
 			continue
 		}
-		// Count leading zeros in the byte.
 		for j := 7; j >= 0; j-- {
-			if x&(1<<uint(j)) != 0 {
+			if x&(1<<j) != 0 {
 				return i*8 + (7 - j)
 			}
 		}
