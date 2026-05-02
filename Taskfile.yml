@@ -43,6 +43,41 @@ tasks:
       - go build -o {{.BIN_DIR}}/network   ./cmd/network
       - go build -o {{.BIN_DIR}}/messenger ./cmd/messenger
 
+  build:reproducible:
+    desc: |
+      Reproducible release build. Strips per-build paths (-trimpath), drops
+      the embedded VCS stamp (-buildvcs=false) and pins ldflags so two
+      checkouts of the same commit produce byte-identical binaries.
+      Optional VERSION variable is baked into the linker via -X main.version.
+    vars:
+      OS: '{{.OS | default "linux"}}'
+      ARCH: '{{.ARCH | default "amd64"}}'
+      VERSION: '{{.VERSION | default "dev"}}'
+      OUT: '{{.BIN_DIR}}/{{.OS}}_{{.ARCH}}'
+    cmds:
+      - mkdir -p {{.OUT}}
+      - GOOS={{.OS}} GOARCH={{.ARCH}} CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version={{.VERSION}}" -o {{.OUT}}/network   ./cmd/network
+      - GOOS={{.OS}} GOARCH={{.ARCH}} CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version={{.VERSION}}" -o {{.OUT}}/messenger ./cmd/messenger
+      - sha256sum {{.OUT}}/network {{.OUT}}/messenger > {{.OUT}}/SHA256SUMS
+
+  release:sign:
+    desc: |
+      Sign the SHA256SUMS file in {{.BIN_DIR}}/{{.OS}}_{{.ARCH}}/ using
+      `minisign -Sm`. Requires a minisign secret key at $MINISIGN_KEY (or
+      the default ~/.minisign/minisign.key). Two flows: minisign (default,
+      simple, no infra) or cosign (set COSIGN=1). Run after build:reproducible.
+    vars:
+      OS: '{{.OS | default "linux"}}'
+      ARCH: '{{.ARCH | default "amd64"}}'
+      OUT: '{{.BIN_DIR}}/{{.OS}}_{{.ARCH}}'
+    cmds:
+      - |
+        if [ "{{.COSIGN}}" = "1" ]; then
+          cosign sign-blob --yes {{.OUT}}/SHA256SUMS > {{.OUT}}/SHA256SUMS.cosig
+        else
+          minisign -Sm {{.OUT}}/SHA256SUMS ${MINISIGN_KEY:+-s "$MINISIGN_KEY"}
+        fi
+
   vet:
     desc: go vet
     cmds:
