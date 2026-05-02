@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>udisend</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">udisend</div>
+    <div class="me">
+      <span id="my-alias">Loading…</span>
+      <code id="my-hash"></code>
+      <span id="my-fingerprint" class="fp"></span>
+      <span id="my-address" class="addr"></span>
+    </div>
+    <div class="status" id="conn-status">connecting…</div>
+  </header>
+  <main>
+    <aside id="contacts-pane">
+      <div class="contacts-actions">
+        <button id="add-contact-btn">➕ Add contact</button>
+      </div>
+      <ul id="contacts" class="contacts"></ul>
+    </aside>
+    <section id="chat-pane" hidden>
+      <div class="chat-header">
+        <div class="chat-peer">
+          <div id="chat-peer-alias">peer</div>
+          <code id="chat-peer-hash"></code>
+        </div>
+        <div class="chat-actions">
+          <button id="verify-btn" title="Mark this contact as verified">✓ Verify</button>
+          <button id="call-btn">📞 Call</button>
+          <button id="hangup-btn" hidden>✕ Hangup</button>
+        </div>
+      </div>
+      <div id="call-pane" hidden>
+        <video id="local-video" autoplay muted playsinline></video>
+        <video id="remote-video" autoplay playsinline></video>
+      </div>
+      <div id="chat-history" class="chat-history"></div>
+      <div class="chat-composer">
+        <input id="msg-input" type="text" placeholder="Type a message…" />
+        <button id="send-btn">Send</button>
+        <label class="file-btn">
+          📎
+          <input id="file-input" type="file" hidden />
+        </label>
+      </div>
+    </section>
+    <section id="empty-state">
+      <div>← Pick or add a contact to start.</div>
+    </section>
+  </main>
+  <div id="modal-root"></div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

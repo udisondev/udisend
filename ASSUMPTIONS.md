@@ -1,162 +1,122 @@
-# Assumptions & overnight decisions
+# Assumptions & decisions (v2 architecture)
 
-> Список решений, которые ассистент **принял в одиночку** во время unattended-overnight-run 2026-05-01 → 2026-05-02. Все они помечены 🟡 (требуют ревью) или 🔴 (точно надо обсудить и, возможно, переделать). После пробуждения пользователю стоит пройти этот файл сверху вниз и подтвердить/исправить.
+> Решения, принятые ассистентом во время unattended overnight-run
+> 2026-05-01 → 2026-05-02 и при последующем рефакторе на v2 (browser UI).
+> Помечены 🟡 (требуют ревью) или 🔴 (точно надо обсудить и, возможно, переделать).
 
-## Глобальные tradeoff'ы для overnight scope
+## Главный архитектурный сдвиг (v2)
 
-🔴 **Post-phase 3-iteration code review (CLAUDE.md → Post-phase code review) ПРОПУЩЕН** для всех фаз 1–8. Запустить review для 7 фаз последовательно за одну ночь физически нереально (это 21 итерация ревью + фиксы блокеров). Вместо этого:
-- Каждый коммит фазы помечен `[skip-review]` в теле commit message — пометка для будущего прогона.
-- Файл `review/PENDING.md` создаётся как чек-лист — до публичного релиза для каждой фазы нужно выполнить процедуру из `CLAUDE.md`.
-- Перед мержем в `main` обязательно прогнать `/ultrareview` или `Agent(subagent_type: code-reviewer)` минимум 3 раза на каждую фазу.
+🟡 **WebRTC переехал из Go в браузер.** Изначально (v1, ветка `auto/overnight-mvp`) Go-процесс держал `pion/webrtc.PeerConnection` и пытался рендерить видео в fyne — это требовало декодировать VP8 и блитить кадры в `canvas.Image`, что в overnight-сборке было пунктом "best-effort, скорее всего не доедет". Переключились на `Pure-Go HTTP+SSE сервер + браузер` с нативным `RTCPeerConnection`/`<video>`/`getUserMedia`. Видео работает из коробки.
 
-🔴 **TDD-дисциплина соблюдена в "лайт"-варианте.** Для критичных путей (крипто, парсинг wire format, routing table математика) тесты написаны first и до production-кода. Для **скелетного клея** (UI обработчики, run-loop'ы команд, тривиальные структурные пакеты) тесты могут отсутствовать или быть smoke-уровня. Задача overnight'а — runnable MVP, а не 90% coverage. Список пакетов с пониженным coverage указан в конце файла.
+**Что теперь делает Go:**
+- identity, DHT participation, presence publish/lookup
+- signaling.Service: end-to-end Noise XK канал между двумя процессами
+- storage (SQLite через modernc.org/sqlite)
+- HTTP+SSE bridge: REST API + EventSource поток для UI
+- подпись/верификация SDP (Ed25519) при пересылке через signaling pipe
 
-🔴 **Acceptance criteria из ROADMAP формально не все зелёные.** В частности:
-- **Phase 2:** 100-узловая memory-сеть и 5-узловой testcontainers cluster — НЕ ПРОЕКТИРОВАЛ, только smoke-сеть из 3-5 узлов через memory transport.
-- **Phase 3:** S/Kademlia eclipse simulation — НЕ ВЫПОЛНЕНА. Включена только базовая защита (подпись presence, отказ от записей с неверной подписью). PoW на nodeID — не реализован.
-- **Phase 6:** Integration `2 узла за разными NAT через TURN volunteer` — НЕ ВЫПОЛНЕНА. Только локальная пара через memory signaling.
-- **Phase 8:** threat-model audit, PGO, reproducible builds, signed releases — отложены.
-- Все пункты, не сделанные за ночь, отмечены в `ROADMAP.md` пометкой `[OVERNIGHT-DEFERRED]` с ссылкой сюда.
+**Что делает браузер:**
+- `RTCPeerConnection` (нативный — hardware accelerated, jitter buffer, etc.)
+- `getUserMedia` — захват камеры/микрофона
+- `<video>` — рендер видео
+- `DataChannel` — чат + файловые чанки
+- весь chat-protocol (JSON over DataChannel + binary chunks для файлов)
 
-🟡 **Ветка работы.** Создаю длинную ветку `auto/overnight-mvp`, ответвлённую от `phase-0/bootstrap`. Каждая фаза — отдельный коммит (или несколько) с префиксом `phase-N:`. Это удобнее для морнинг-ревью, чем 8 параллельных ветвей. Push в remote НЕ делаю — пользователь сам решит как разруливать.
+**Что выкинуто из v1:**
+- `internal/ui` (fyne) — удалено
+- `pkg/webrtc/session.go` — удалён (Go больше не держит PeerConnection)
+- `internal/messenger/sessions.go` — переписан на тонкий Session-wrapper над signaling.Channel
+- fyne и pion/webrtc нагрузка с messenger — теперь pion/webrtc используется ТОЛЬКО в STUN/TURN серверах (`pkg/stun`, `pkg/turn`)
+
+**Размер бинаря messenger:** ~16 MB (было 46 MB с fyne).
+
+**Cgo:** только в `pkg/turn` (через pion). Сам messenger-бинарь чистый Go (modernc.org/sqlite вместо mattn/go-sqlite3).
+
+## Глобальные tradeoff'ы
+
+🔴 **Post-phase 3-iteration code review (CLAUDE.md → Post-phase code review) пропущен** для всех фаз 1–8 (ветка `auto/overnight-mvp`) и для v2 рефактора. Чек-лист — `review/PENDING.md`. До публичного релиза каждая фаза ОБЯЗАНА пройти процедуру.
+
+🔴 **TDD-дисциплина — "лайт".** Критичные пути (крипто, парсинг wire format, routing table) — TDD по правилам. Скелетный клей (UI, run-loop'ы, тривиальные обвязки) — smoke-уровня или без тестов.
+
+🔴 **Acceptance criteria из ROADMAP формально не все зелёные.** Все пропущенные пункты помечены `🌙 [OVERNIGHT-DEFERRED]` в `ROADMAP.md`.
 
 ## Конкретные технические решения
 
-### UI — fyne (Phase 7)
-
-🟡 **Замена CLI/TUI на fyne (`fyne.io/fyne/v2`).** Пользователь явно попросил "используй fyne для desktop". Это меняет Phase 7 ROADMAP, обновлено в decisions log.
-- Версия: последняя стабильная `v2.5.x`.
-- На Linux требует: Cgo, `libgl1-mesa-dev`, `xorg-dev`. Сборка с `cgo` обязательна (это противоречит идее "no cgo" из CLAUDE.md, но fyne требует — компромисс ради desktop UI).
-- Видеовызов рендерится в `canvas.Image` с обновлением кадров.
-
-### Wire format — кастомный binary length-prefixed (Phase 4)
-
-🟡 **Решение:** простой ручной binary format `uvarint`-prefixed для DHT и signaling сообщений. Не protobuf, не CBOR.
-- **RATIONALE:** одна реализация (Go), полный контроль, нулевые внешние зависимости для wire layer, легче fuzz'ить, легче ревьюить байт-в-байт. Если в будущем будут другие реализации (browser/WASM), переход на CBOR/protobuf — недорогой рефактор изолированного `pkg/wire`.
-- **Trade-off:** нет cross-language schema из коробки. Для MVP цена приемлемая.
-
-### Wire layout
-
-```
-packet := version(1B) | type(1B) | length(uvarint) | payload(length B)
-```
-
-Версия = `0x01`. Типы перечислены в `pkg/wire/types.go`.
+### Wire format — кастомный uvarint-prefixed binary (Phase 4)
+🟡 `pkg/wire`. Нулевые внешние deps на wire layer. CBOR/protobuf — будущий рефактор изолированного пакета.
 
 ### Crypto — flynn/noise + stdlib
+🟡 `github.com/flynn/noise` для XK. Остальное — `crypto/ed25519` + `golang.org/x/crypto/{chacha20poly1305,blake2b,hkdf,curve25519}`.
 
-🟡 **Решение:** `github.com/flynn/noise` для XK, остальное — stdlib + `golang.org/x/crypto/{chacha20poly1305,blake2b,hkdf,curve25519}`.
-- pinned версии в `go.mod`.
+### SQLite — modernc.org/sqlite
+🟡 Pure-Go драйвер. Нет CGO для storage layer.
 
-### SQLite driver — modernc.org/sqlite
-
-🟡 **Решение:** pure-Go драйвер (нет CGO для бэкенда). Это противоречит fyne (которому CGO нужен), но driver фигурирует только в messenger-бинаре, и линковка статична.
-
-### TURN auth — статичный shared secret в presence (Phase 5)
-
-🔴 **Anonymous TURN с per-IP rate-limit.** Каждый volunteer-TURN объявляет в presence `turn_credentials` с time-limited HMAC short-term password (RFC 7635-ish). Клиенты при выборе TURN-сервера получают временные креды через signaling (через тот же relay-узел, через который потом пойдёт WebRTC). Это упрощённо относительно production-grade auth и нуждается в ревью на rate-limit/abuse.
+### TURN auth — long-term-credentials с shared secret
+🔴 `pkg/turn` использует HMAC long-term-credentials (RFC 5389 §10.2). Production needs per-IP rate-limit + abuse mitigations.
 
 ### S/Kademlia — выключено в MVP (Phase 3)
+🔴 PoW на nodeID и disjoint-paths lookup отключены. Базовый Kademlia + signed presence работают; Sybil-resistance ослаблена. Перед публичным релизом ОБЯЗАТЕЛЬНО включить.
 
-🔴 **PoW на nodeID и disjoint-paths lookup отключены** для overnight scope. Базовая Kademlia работает; защита от Sybil — TODO в `review/PENDING.md`. Это ослабляет threat model — при публичном релизе ОБЯЗАТЕЛЬНО включить.
+### v2: HTTP UI bridge — SSE + REST, без WebSocket
+🟡 Хотел использовать `nhooyr.io/websocket`, но runtime-permission-system заблокировал внешний модуль. Переделал на **Server-Sent Events** (server→browser) + plain POST (browser→server) — чисто `net/http` stdlib, ноль новых deps. Для нашего use-case (один клиент-вкладка на messenger) SSE даже лучше: проще, проще дебажить (видно в DevTools Network → EventStream).
 
-### Bootstrap — ручной флаг, без DNS-seeds
+### v2: HTTP auth — bearer-token в URL
+🟡 При старте messenger генерирует random URL-safe token (24 случайных байта), печатает в логи `http://127.0.0.1:7100/?token=...`. Токен требуется для `/api/*` и `/api/events`. Статика (`/`, `/app.js`, `/app.css`) отдаётся без токена — там нет секретов. Привязки по cookie не делаю — токен в URL/header. Localhost-only, MVP-сценарий.
 
-🟡 `cmd/network` принимает `--bootstrap host:port` (можно повторять). Hardcoded list, DNS-seeds — отложено, не нужно для локальной демонстрации. Для запуска на одной машине достаточно одного relay-узла + двух messenger'ов.
+### v2: SDP signing — Go подписывает, не браузер
+🟡 Браузер не имеет доступа к Ed25519 private key (хранится в Go). Браузер генерирует SDP → шлёт в Go через POST → Go оборачивает в `SignedSDP` (kind+SDP+Ed25519 sig) → ship через signaling.Channel. Получатель: Go проверяет подпись против известного pub-key (из presence record / TOFU контакта) → разворачивает → шлёт SDP в браузер через SSE. ICE candidates подписываются по той же схеме.
 
-### Файловые чанки — 64 KiB фиксированный размер
+### v2: Trickle ICE
+🟡 Браузер использует trickle ICE по умолчанию (`onicecandidate` каждый кандидат отдельно). Каждый кандидат становится отдельным сигналом kind=`ice`. До прихода `setRemoteDescription` входящие кандидаты буферизуются и применяются после.
 
-🟡 По дизайн-доку. Per-chunk ACK через DataChannel. Resume support — TODO (overnight time-box).
+### v2: Один браузер на messenger
+🟡 SSE bridge ожидает одного активного клиента. Если откроешь вторую вкладку — incoming sessions всё равно идут в первую. Multi-tab UX — post-MVP. Для типичного использования "один человек = один процесс messenger = одна вкладка" это не проблема.
 
-### Видео-звонки — ограничения
+### Видео-звонки — теперь работают из коробки
+🟢 `getUserMedia({audio: true, video: true})` → tracks добавляются в `RTCPeerConnection` → ренегоциация offer → второй пир видит remote track в `pc.ontrack` → `<video>.srcObject = stream`. Native browser pipeline.
 
-🔴 Видео-вызов реализован "best-effort":
-- Захват с камеры через `github.com/pion/mediadevices` + кодек VP8 (наиболее стабильный в pion).
-- Воспроизведение: декодирование VP8 кадра в `image.RGBA` через `pion/mediadevices`, рендер в fyne `canvas.Image`.
-- **Известное ограничение:** на системах без webcam (CI, headless) — call падает в audio-only с понятной ошибкой.
-- **Audio:** Opus через системный микрофон/динамики. На Linux требует ALSA / PulseAudio. На headless — graceful degradation.
-- Если за ночь не получится довести до рабочего media playback — оставлю **call_signal обмен через DataChannel** + сообщение "media playback TBD" в UI, чтобы пользователь видел: framework есть, нужен последний штрих.
-
-### Контакты и discovery в UI — TOFU + ручной ввод destination_hash
-
-🟡 В MVP UI пользователь добавляет контакт **вставкой destination_hash** (32-hex-character string). QR-код / safety numbers — TODO. Это самое неудобное место демо, но самое быстрое для overnight.
-
-### Тесты — корпус сокращён
-
-🟡 Сокращено относительно ROADMAP:
-- Fuzz-тесты есть для критичных decoder'ов (`pkg/wire`, `pkg/identity`, `pkg/presence`), но не запущены 30s в CI overnight'а.
-- Property tests — сокращены до 1-2 на пакет (быстрая итерация).
-- Benchmarks — есть для крипто-операций; PGO не делается.
-- Testcontainers tests — НЕ написаны (Docker-сетап overnight = риск). Вместо этого — multi-process tests через `os.StartProcess` или in-process через memory transport.
-
-## Структурные изменения относительно ROADMAP
-
-🟡 Добавлены пакеты, которых не было в ROADMAP, по необходимости:
-- `pkg/wire` — общий binary codec (упомянут в Phase 4 как TBD; вынес в отдельный пакет, импортируется из dht/presence/signaling).
-- `pkg/clock` — `Clock` interface для тестируемого времени (синхронно с CLAUDE.md рекомендацией).
-- `internal/app` — общая bootstrapping-логика обоих бинарей, чтобы избежать дублирования.
-
-## Файлы, которые получились ниже coverage 80%
-
-Заполняется по мере реализации.
-
-- `internal/ui/*` — UI код, тестируется руками; coverage near 0.
-- `internal/messenger/run.go`, `internal/network/run.go` — entry-points; smoke только.
-- `cmd/*` — флаг-парсинг, тесты не нужны.
+### Контакты — пока ручной ввод hex destination_hash
+🟡 QR-код / safety numbers share — TODO. Fingerprint в UI уже виден (header bar + chat header), пользователь может прочитать его голосом для верификации.
 
 ## Что делать после пробуждения
 
-1. Прочитать этот файл целиком.
-2. Прочитать `ROADMAP.md` — все пункты с пометкой `🌙 [OVERNIGHT-DEFERRED]` нуждаются в решении.
-3. `git log auto/overnight-mvp --oneline` — посмотреть последовательность фаз. Каждый коммит фазы помечен `[skip-review-overnight]`.
-4. Прогнать тесты: `task test-race` (быстро, ~10s) + `task build`.
-5. Запустить демо локально (см. ниже).
-6. Если что-то не запустилось — `review/PENDING.md` содержит чек-лист починки.
-7. Решить, что из 🔴 принимаем, что переделываем, что откладываем post-MVP.
+1. Прочитать этот файл и `review/PENDING.md`.
+2. Проверить ветку `auto/overnight-mvp-v2` (`git log --oneline auto/overnight-mvp..auto/overnight-mvp-v2`).
+3. Запустить демо (`task run:alice` / `run:bob` / `run:carol`).
+4. Решить, что из 🔴 принимаем / переделываем / откладываем.
 
-## Demo: how to run on one machine
+## Demo: 3 messenger'а на одной машине
 
 В трёх терминалах:
 
 ```sh
-# 1. Network node — bootstrap + signaling relay (no public IP, so no STUN/TURN advertised).
-./bin/network --listen 127.0.0.1:9000 -v
-
-# 2. Alice's messenger.
-./bin/messenger \
-  --identity ~/.config/udisend/alice.key \
-  --storage  ~/.config/udisend/alice \
-  --bootstrap 127.0.0.1:9000 -v
-
-# 3. Bob's messenger (in another terminal).
-./bin/messenger \
-  --identity ~/.config/udisend/bob.key \
-  --storage  ~/.config/udisend/bob \
-  --bootstrap 127.0.0.1:9000 -v
+task run:alice   # rendezvous; UDP 9100, HTTP 7100
+task run:bob     # bootstraps from alice; UDP 9101, HTTP 7101
+task run:carol   # bootstraps from alice; UDP 9102, HTTP 7102
 ```
 
-Каждый messenger при первом запуске генерирует identity и **печатает в логи** свой destination_hash и fingerprint:
+Каждый messenger печатает в логи URL вида `http://127.0.0.1:7100/?token=...`. Открой URL в браузере (`task run:*` пробует `xdg-open` автоматически — если открылось не то, скопируй из логов).
 
-```
-INFO udisend messenger identity=89f3...c2ab fingerprint="12345 67890 ..."
-```
+В UI:
+- ➕ **Add contact** — вставь destination_hash другого пира (видно в его логах + в его UI). Alias — любой.
+- Клик по контакту — открывает signaling-сессию + WebRTC PeerConnection. Точка слева станет 🟡 → 🟢.
+- Чат — сообщения идут по DataChannel напрямую между браузерами (не через Go).
+- 📎 **File** — выбери файл, чанки 16 KiB через DataChannel, у получателя — кнопка скачать через `<a download>`.
+- 📞 **Call** — `getUserMedia` → добавляет audio+video tracks → renegotiate offer. У получателя в правом видео-окне — твой стрим.
 
-В UI Alice'ы:
-1. Кнопка "➕ Add contact" → вставить Bob'овский destination_hash + alias "bob".
-2. Выбрать Bob в списке слева → точка станет 🟡 (connecting), затем 🟢 (online).
-3. Написать сообщение → "Send".
-4. Bob увидит сообщение в своём окне (после `add contact` для alice симметрично).
+Любой messenger можно сбросить: `task reset:alice` (удаляет identity и storage только этого пира).
 
-**File transfer:** "📎 File" → file picker → файл сохранится у получателя в `~/.config/udisend/<bob>/downloads/`.
+## Известные ограничения, которые ты заметишь
 
-**Call:** "📞 Call" → у получателя появится "📞 incoming call from peer" → принять "✓ Accept" / "✕ End". В MVP нет фактического media playback (см. блок "Видео-звонки — ограничения" выше); это **call signaling end-to-end через WebRTC DataChannel**, готово стать реальным video call в следующей итерации.
+1. **Одна вкладка браузера на процесс.** Открой второй браузер для второго messenger.
+2. **Bootstrap всё ещё ручной.** DNS-seeds — не делал.
+3. **Нет ICE servers (STUN/TURN) по умолчанию в браузере.** Сейчас в `app.js` зашит `stun:stun.l.google.com:19302` — для localhost-демо хватает (host candidates), но для cross-NAT нужно подключить наши `pkg/stun`/`pkg/turn` через presence. TODO.
+4. **TOFU / fingerprint mismatch.** Storage возвращает `ErrFingerprintChanged`, но UI пока не делает alarm — просто валится в "add contact". TODO.
+5. **Outbox.** Каркас есть, периодический flush — нет. Browser сам решает, кэшировать ли в localStorage. TODO.
+6. **Phase 8 hardening** (threat-model audit, PGO, reproducible builds) не делал.
 
-## Известные ограничения, которые ты заметишь сразу
+## Файлы под coverage 80%
 
-1. **Видео-звонок без видео.** `pion/mediadevices` + canvas rendering — следующий шаг. Сейчас CallInvite/Accept/End работают, signaling видно в UI.
-2. **Адрес в presence — это адрес transport.** На localhost это всегда `127.0.0.1:N`. Через NAT нужен publicIP detection (отложено).
-3. **Bootstrap — ручной флаг.** DNS-seeds не делал.
-4. **Контакты добавляются вставкой hex'а.** QR-код / numeric safety code share — следующий шаг (fingerprint УЖЕ есть, надо его удобно показать в UI).
-5. **fyne и cgo.** Если на твоей системе fyne не собирается — установлены ли `xorg-dev libgl1-mesa-dev`? На Linux обычно нужны.
-6. **Не запускай `task lint` без установленного golangci-lint** — он хочет system-wide install (см. https://golangci-lint.run/usage/install/).
-7. **Phase 8 hardening (threat-model audit, PGO, reproducible builds, signed releases)** не делал; см. `review/PENDING.md`.
+- `internal/messenger/*` — smoke только (через `internal/httpui/server_test.go`).
+- `internal/httpui/*` — есть ОДИН integration test двух messenger'ов через signaling pipe.
+- `cmd/*` — флаг-парсинг, тестов нет.

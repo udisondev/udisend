@@ -1,85 +1,55 @@
 version: '3'
 
-# udisend dev tasks. Run `task --list` to see available targets.
-# https://taskfile.dev
+# udisend dev tasks. `task --list` shows everything; `task --summary <name>`
+# prints the full description. https://taskfile.dev
+#
+# Idioms used here:
+#   - colon-namespacing for related tasks (test:race, test:integration,
+#     run:alice, …) so `task --list` groups them.
+#   - wildcard tasks (run:*, reset:*) for parameterised invocations:
+#     one definition handles all peer names.
+#   - sources/generates on `build` so unchanged source skips the rebuild.
+#   - sh-evaluated vars derive deterministic UDP/HTTP ports from the
+#     peer name, so `task run:alice` and `task run:bob` map to stable
+#     addresses without hard-coding three near-identical tasks.
 
 vars:
   PKG: ./...
   BIN_DIR: ./bin
+  CONFIG_DIR: '{{.HOME}}/.config/udisend'
+  RENDEZVOUS_NAME: alice
+  RENDEZVOUS_PORT: 9100
 
 tasks:
   default:
     desc: Run vet + race tests + lint
-    deps: [vet, test-race, lint]
+    deps: [vet, test:race, lint]
+
+  # ─── Build / lint / hygiene ──────────────────────────────────────
 
   build:
-    desc: Build all binaries into ./bin
+    desc: Build all binaries into ./bin (incremental — skipped if sources unchanged)
+    sources:
+      - 'cmd/**/*.go'
+      - 'internal/**/*'
+      - 'pkg/**/*.go'
+      - go.mod
+      - go.sum
+    generates:
+      - '{{.BIN_DIR}}/network'
+      - '{{.BIN_DIR}}/messenger'
     cmds:
       - mkdir -p {{.BIN_DIR}}
-      - go build -o {{.BIN_DIR}}/network ./cmd/network
+      - go build -o {{.BIN_DIR}}/network   ./cmd/network
       - go build -o {{.BIN_DIR}}/messenger ./cmd/messenger
-
-  run-network:
-    desc: Run the local network node on 127.0.0.1:9000
-    deps: [build]
-    cmds:
-      - "{{.BIN_DIR}}/network --listen 127.0.0.1:9000 -v"
-
-  run-alice:
-    desc: Run the messenger as Alice (storage in ~/.config/udisend/alice)
-    deps: [build]
-    cmds:
-      - "{{.BIN_DIR}}/messenger --identity $HOME/.config/udisend/alice.key --storage $HOME/.config/udisend/alice --bootstrap 127.0.0.1:9000 -v"
-
-  run-bob:
-    desc: Run the messenger as Bob (storage in ~/.config/udisend/bob)
-    deps: [build]
-    cmds:
-      - "{{.BIN_DIR}}/messenger --identity $HOME/.config/udisend/bob.key --storage $HOME/.config/udisend/bob --bootstrap 127.0.0.1:9000 -v"
 
   vet:
     desc: go vet
     cmds:
       - go vet {{.PKG}}
 
-  test:
-    desc: Run unit tests (default build, no integration/e2e)
-    cmds:
-      - go test {{.PKG}}
-
-  test-race:
-    desc: Run unit tests with race detector
-    cmds:
-      - go test -race {{.PKG}}
-
-  test-integration:
-    desc: Run integration tests (build tag `integration`)
-    cmds:
-      - go test -race -tags=integration {{.PKG}}
-
-  test-e2e:
-    desc: Run end-to-end tests (build tag `e2e`)
-    cmds:
-      - go test -race -tags=e2e {{.PKG}}
-
-  test-fuzz:
-    desc: Run fuzz tests for the given package (use `task test-fuzz -- ./pkg/identity`)
-    cmds:
-      - go test -run=^$ -fuzz=. -fuzztime=30s {{.CLI_ARGS}}
-
-  cover:
-    desc: Run tests with coverage and write coverage.out
-    cmds:
-      - go test -race -coverprofile=coverage.out {{.PKG}}
-      - go tool cover -func=coverage.out | tail -n 1
-
-  bench:
-    desc: Run all benchmarks
-    cmds:
-      - go test -run=^$ -bench=. -benchmem {{.PKG}}
-
   lint:
-    desc: Run golangci-lint (must be installed separately — see https://golangci-lint.run)
+    desc: golangci-lint (install separately — https://golangci-lint.run)
     cmds:
       - golangci-lint run {{.PKG}}
 
@@ -92,3 +62,117 @@ tasks:
     desc: Remove build artefacts and coverage
     cmds:
       - rm -rf {{.BIN_DIR}} coverage.out coverage.html
+
+  # ─── Tests ───────────────────────────────────────────────────────
+
+  test:
+    desc: Unit tests (default build tag set, no integration/e2e)
+    cmds:
+      - go test {{.PKG}}
+
+  test:race:
+    desc: Unit tests with -race
+    cmds:
+      - go test -race {{.PKG}}
+
+  test:integration:
+    desc: Integration tests (build tag `integration`)
+    cmds:
+      - go test -race -tags=integration {{.PKG}}
+
+  test:e2e:
+    desc: End-to-end tests (build tag `e2e`)
+    cmds:
+      - go test -race -tags=e2e {{.PKG}}
+
+  test:fuzz:
+    desc: 'Fuzz a package — usage: task test:fuzz -- ./pkg/identity'
+    cmds:
+      - go test -run=^$ -fuzz=. -fuzztime=30s {{.CLI_ARGS}}
+
+  cover:
+    desc: Coverage report (writes coverage.out, prints total)
+    cmds:
+      - go test -race -coverprofile=coverage.out {{.PKG}}
+      - go tool cover -func=coverage.out | tail -n 1
+
+  bench:
+    desc: All benchmarks
+    cmds:
+      - go test -run=^$ -bench=. -benchmem {{.PKG}}
+
+  # ─── Demo: spawn a named messenger ───────────────────────────────
+  #
+  # Each `task run:<name>` boots one messenger that participates in the
+  # DHT, publishes presence and serves the browser UI on its own loopback
+  # port. Three-window demo:
+  #
+  #     task run:alice          # rendezvous on 9100/7100
+  #     task run:bob            # bootstraps from alice; 9101/7101
+  #     task run:carol          # bootstraps from alice; 9102/7102
+  #
+  # Names other than alice/bob/carol get a deterministic port derived
+  # from the name (`cksum`-based hash) and bootstrap from alice by
+  # default. Override anything via task vars:
+  #
+  #     task run:eve UDP_PORT=9200 HTTP_PORT=7200 BOOTSTRAP=127.0.0.1:9101
+
+  run:*:
+    desc: 'Run a messenger by name (e.g. `task run:alice`). See header for the convention.'
+    deps: [build]
+    vars:
+      NAME: '{{index .MATCH 0}}'
+      HOME_DIR: '{{.CONFIG_DIR}}/{{.NAME}}'
+      UDP_PORT:
+        sh: |
+          case '{{.NAME}}' in
+            {{.RENDEZVOUS_NAME}}) echo {{.RENDEZVOUS_PORT}} ;;
+            bob)   echo 9101 ;;
+            carol) echo 9102 ;;
+            *)     printf '%s' '{{.NAME}}' | cksum | awk '{ print 9200 + ($1 % 700) }' ;;
+          esac
+      HTTP_PORT:
+        sh: |
+          case '{{.NAME}}' in
+            {{.RENDEZVOUS_NAME}}) echo 7100 ;;
+            bob)   echo 7101 ;;
+            carol) echo 7102 ;;
+            *)     printf '%s' '{{.NAME}}' | cksum | awk '{ print 7200 + ($1 % 700) }' ;;
+          esac
+      # Default: bootstrap from the rendezvous unless I AM the rendezvous,
+      # or the caller passed BOOTSTRAP=… explicitly.
+      BOOTSTRAP_FLAG: '{{ if .BOOTSTRAP }}--bootstrap {{.BOOTSTRAP}}{{ else if ne .NAME .RENDEZVOUS_NAME }}--bootstrap 127.0.0.1:{{.RENDEZVOUS_PORT}}{{ end }}'
+    cmds:
+      - mkdir -p {{.HOME_DIR}}
+      - >-
+        {{.BIN_DIR}}/messenger
+        --identity {{.HOME_DIR}}.key
+        --storage  {{.HOME_DIR}}
+        --listen 127.0.0.1:{{.UDP_PORT}}
+        --http   127.0.0.1:{{.HTTP_PORT}}
+        {{.BOOTSTRAP_FLAG}}
+        -v
+
+  reset:*:
+    desc: 'Wipe a peer''s identity + storage (e.g. `task reset:bob`)'
+    vars:
+      NAME: '{{index .MATCH 0}}'
+    prompt: 'This deletes {{.CONFIG_DIR}}/{{.NAME}}{,.key}. Continue?'
+    cmds:
+      - rm -rf '{{.CONFIG_DIR}}/{{.NAME}}' '{{.CONFIG_DIR}}/{{.NAME}}.key'
+
+  reset:all:
+    desc: Wipe ALL local messenger identities and storage
+    prompt: 'This deletes everything under {{.CONFIG_DIR}}. Continue?'
+    cmds:
+      - rm -rf '{{.CONFIG_DIR}}'
+
+  # ─── Network node (long-lived rendezvous, not needed for the local demo) ──
+
+  run:network:
+    desc: 'Run a stand-alone network node (DHT + signaling relay). For VPS / always-on rendezvous use; the local 3-messenger demo does NOT need it.'
+    deps: [build]
+    vars:
+      LISTEN: '{{.LISTEN | default "127.0.0.1:9000"}}'
+    cmds:
+      - '{{.BIN_DIR}}/network --listen {{.LISTEN}} -v'

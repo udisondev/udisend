@@ -25,11 +25,49 @@ import (
 // MaxSDPSize caps signed SDP payload size to bound decode work.
 const MaxSDPSize = 256 * 1024
 
+// KindString returns a stable lowercase label used by the WS bridge
+// when forwarding signals to the browser.
+func KindString(k byte) string {
+	switch k {
+	case SDPTypeOffer:
+		return "offer"
+	case SDPTypeAnswer:
+		return "answer"
+	case SDPTypeICE:
+		return "ice"
+	case SDPTypeBye:
+		return "bye"
+	default:
+		return "unknown"
+	}
+}
+
+// KindFromString is the inverse of KindString.
+func KindFromString(s string) (byte, bool) {
+	switch s {
+	case "offer":
+		return SDPTypeOffer, true
+	case "answer":
+		return SDPTypeAnswer, true
+	case "ice":
+		return SDPTypeICE, true
+	case "bye":
+		return SDPTypeBye, true
+	default:
+		return 0, false
+	}
+}
+
 // Inner-message type codes carried over a signaling channel.
 const (
 	SDPTypeOffer  byte = 0x01
 	SDPTypeAnswer byte = 0x02
 	SDPTypeBye    byte = 0x03
+	// SDPTypeICE carries a single ICE candidate (JSON-encoded
+	// RTCIceCandidateInit). Signed for parity with offer/answer — the
+	// per-candidate signing cost is negligible and lets us treat the
+	// signal pipe uniformly on both ends.
+	SDPTypeICE byte = 0x04
 )
 
 // SignedSDP is a SDP description authenticated by the publisher.
