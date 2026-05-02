@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/bits"
 )
 
 // PoWBits returns the number of leading zero bits in the destination
@@ -13,22 +14,17 @@ import (
 // raising the cost of generating many identities to surround a victim.
 func (p PublicIdentity) PoWBits() int {
 	h := p.DestinationHash()
-	bits := 0
+	leading := 0
 	for _, b := range h {
 		if b == 0 {
-			bits += 8
+			leading += 8
 			continue
 		}
-		for mask := byte(0x80); mask != 0; mask >>= 1 {
-			if b&mask == 0 {
-				bits++
-				continue
-			}
-			return bits
-		}
-		return bits
+
+		return leading + bits.LeadingZeros8(b)
 	}
-	return bits
+
+	return leading
 }
 
 // ErrPoWSearchAborted is returned by GenerateWithPoW when the supplied

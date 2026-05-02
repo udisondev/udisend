@@ -11,6 +11,8 @@
 package dht
 
 import (
+	"math/bits"
+
 	"github.com/udisondev/udisend/pkg/identity"
 )
 
@@ -35,16 +37,11 @@ func Distance(a, b NodeID) NodeID {
 // between a and b. Two equal IDs have prefix length IDBits.
 func PrefixLen(a, b NodeID) int {
 	for i := range a {
-		x := a[i] ^ b[i]
-		if x == 0 {
-			continue
-		}
-		for j := 7; j >= 0; j-- {
-			if x&(1<<j) != 0 {
-				return i*8 + (7 - j)
-			}
+		if x := a[i] ^ b[i]; x != 0 {
+			return i*8 + bits.LeadingZeros8(x)
 		}
 	}
+
 	return IDBits
 }
 
