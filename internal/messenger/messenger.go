@@ -167,16 +167,45 @@ func (m *Messenger) SetIncomingHandler(fn func(*Session)) {
 	m.incoming = fn
 }
 
-// Run starts the background loops.
+// Run starts the background loops. Order matters here:
+//
+//  1. The DHT receive loop must run first — bootstrap responses
+//     (PONG, NODES) arrive via that loop.
+//  2. Bootstrap is awaited synchronously (with a timeout). Without this
+//     the publisher's first PutValue races with bootstrap: an empty
+//     routing table at PutValue time means the record is stored ONLY
+//     locally, and remote peers cannot find us until the next refresh
+//     (TTL/2 = 45s by default). That manifests as "record not found"
+//     when a peer tries to add us as a contact right after we start.
+//  3. Publisher starts last so its first publish reaches the live
+//     bootstrap peer.
 func (m *Messenger) Run(ctx context.Context) {
 	var wg sync.WaitGroup
-	wg.Add(2)
+
+	wg.Add(1)
 	go func() { defer wg.Done(); m.node.Run(ctx) }()
+
+	if len(m.cfg.Bootstrap) > 0 {
+		m.bootstrapAll(ctx)
+	}
+
+	wg.Add(1)
 	go func() { defer wg.Done(); m.publisher.Run(ctx) }()
 
+	<-ctx.Done()
+	wg.Wait()
+}
+
+// bootstrapAll dials every configured bootstrap peer in parallel and
+// waits up to 5 seconds for all of them to either succeed or fail.
+// Failures are logged, not returned — a single reachable peer is enough.
+func (m *Messenger) bootstrapAll(ctx context.Context) {
+	var wg sync.WaitGroup
 	for _, addr := range m.cfg.Bootstrap {
 		addr := addr
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			netAddr, err := m.transport.Dial(addr)
 			if err != nil {
 				m.cfg.Logger.Warn("messenger: bootstrap parse", "addr", addr, "err", err)
@@ -186,11 +215,11 @@ func (m *Messenger) Run(ctx context.Context) {
 			defer cancel()
 			if err := m.node.Bootstrap(bctx, netAddr); err != nil {
 				m.cfg.Logger.Warn("messenger: bootstrap", "addr", addr, "err", err)
+			} else {
+				m.cfg.Logger.Info("messenger: bootstrap ok", "addr", addr)
 			}
 		}()
 	}
-
-	<-ctx.Done()
 	wg.Wait()
 }
 

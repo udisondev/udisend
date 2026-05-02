@@ -2,20 +2,27 @@ package messenger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/udisondev/udisend/internal/storage"
 	"github.com/udisondev/udisend/pkg/identity"
+	"github.com/udisondev/udisend/pkg/presence"
 )
 
 // AddContact registers a peer in the local TOFU store. The peer's public
 // identity is fetched via presence; the contact's verified flag stays
 // false until the user does an out-of-band fingerprint check.
+//
+// Presence resolution retries a few times: if the peer started moments
+// ago, their first record may not have reached the closest DHT nodes
+// yet. ErrPeerOffline (wrapping presence.ErrNotFound) is returned only
+// after all attempts fail, so the UI can show a useful message.
 func (m *Messenger) AddContact(ctx context.Context, hash identity.Hash, alias string) error {
-	rec, err := m.resolver.Lookup(ctx, hash)
+	rec, err := m.resolveWithRetry(ctx, hash)
 	if err != nil {
-		return fmt.Errorf("messenger: resolve contact: %w", err)
+		return err
 	}
 	c := storage.Contact{
 		Hash:        hash,
@@ -25,6 +32,38 @@ func (m *Messenger) AddContact(ctx context.Context, hash identity.Hash, alias st
 		AddedAt:     time.Now().UTC(),
 	}
 	return m.storage.UpsertContact(ctx, c)
+}
+
+// ErrPeerOffline wraps presence.ErrNotFound with a more user-friendly
+// message for the UI layer.
+var ErrPeerOffline = errors.New("peer not visible on the network: their messenger may not be running yet, or they have not joined the same DHT bootstrap")
+
+func (m *Messenger) resolveWithRetry(ctx context.Context, hash identity.Hash) (*presence.Record, error) {
+	const attempts = 4
+	const delay = 800 * time.Millisecond
+	var lastErr error
+	for i := range attempts {
+		attemptCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		rec, err := m.resolver.Lookup(attemptCtx, hash)
+		cancel()
+		if err == nil {
+			return rec, nil
+		}
+		lastErr = err
+		if !errors.Is(err, presence.ErrNotFound) {
+			return nil, fmt.Errorf("messenger: resolve contact: %w", err)
+		}
+		// Last attempt — surface the friendly error rather than sleep.
+		if i == attempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return nil, fmt.Errorf("%w (last lookup: %v)", ErrPeerOffline, lastErr)
 }
 
 // VerifyContact toggles the verified flag.
