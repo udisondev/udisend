@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -30,15 +31,30 @@ type ICEServer struct {
 // design.md §6: "Перед инициированием звонка/линка клиент делает DHT
 // lookup узлов с capability CanSTUN/CanTURN. Выбирает 3-5 узлов и
 // передаёт их адреса в webrtc.Configuration.ICEServers."
+// DefaultSTUNPort is the well-known STUN listen port (RFC 5389). Network
+// nodes that advertise CapCanSTUN run their STUN responder there; the
+// publish address in the presence record is the DHT/signaling socket
+// (a different port), so when constructing stun: URLs we substitute in
+// the standard port. Future work: carry an explicit STUN address as a
+// presence-record TLV so non-default deployments work too.
+const DefaultSTUNPort = "3478"
+
 func (m *Messenger) ICEServers(ctx context.Context) []ICEServer {
 	const (
 		lookupTTL  = 1500 * time.Millisecond
 		maxServers = 5
 	)
+
 	contacts := m.node.Table().All()
 	if len(contacts) == 0 {
 		return nil
 	}
+
+	// Cancellable child ctx so once we have enough servers, in-flight
+	// goroutines waiting on resolver.Lookup return immediately rather
+	// than burn the full lookupTTL.
+	gather, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	type result struct {
 		urls []string
@@ -47,19 +63,23 @@ func (m *Messenger) ICEServers(ctx context.Context) []ICEServer {
 	var wg sync.WaitGroup
 	for _, c := range contacts {
 		wg.Go(func() {
-			rctx, cancel := context.WithTimeout(ctx, lookupTTL)
-			defer cancel()
+			rctx, rcancel := context.WithTimeout(gather, lookupTTL)
+			defer rcancel()
+
 			rec, err := m.resolver.Lookup(rctx, c.ID)
 			if err != nil || rec == nil {
 				return
 			}
-			r := result{}
-			if rec.Capabilities.Has(presence.CapCanSTUN) {
-				r.urls = append(r.urls, "stun:"+rec.Address)
+			if !rec.Capabilities.Has(presence.CapCanSTUN) {
+				return
 			}
-			if len(r.urls) > 0 {
-				results <- r
+
+			host, _, err := net.SplitHostPort(rec.Address)
+			if err != nil {
+				host = rec.Address
 			}
+
+			results <- result{urls: []string{"stun:" + net.JoinHostPort(host, DefaultSTUNPort)}}
 		})
 	}
 	go func() { wg.Wait(); close(results) }()
@@ -68,9 +88,11 @@ func (m *Messenger) ICEServers(ctx context.Context) []ICEServer {
 	for r := range results {
 		out = append(out, ICEServer{URLs: r.urls})
 		if len(out) >= maxServers {
+			cancel() // wake up the rest so they don't burn lookupTTL
 			break
 		}
 	}
+
 	return out
 }
 

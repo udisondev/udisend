@@ -43,8 +43,19 @@ func LoadOrCreateIdentity(path string) (*identity.Identity, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path, blob, 0o600); err != nil {
+
+	// Atomic write: a crash during os.WriteFile would otherwise leave a
+	// 0-byte / partial file at `path` that the next start would refuse
+	// to parse. Write to .tmp and rename — Linux/macOS guarantee
+	// rename atomicity within the same directory.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, blob, 0o600); err != nil {
 		return nil, fmt.Errorf("config: write identity: %w", err)
 	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("config: rename identity: %w", err)
+	}
+
 	return id, nil
 }

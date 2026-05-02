@@ -53,6 +53,49 @@ func EncodeFrame(typ byte, payload []byte) ([]byte, error) {
 	return out[:2+n+len(payload)], nil
 }
 
+// frameWriterPrefix is the maximum bytes a frame header can occupy
+// (version + type + uvarint32 length).
+const frameWriterPrefix = 2 + binary.MaxVarintLen32
+
+// NewFrameWriter returns a Buffer ready for in-place frame construction:
+// the caller appends the body via the standard WriteX methods, then
+// FinishFrame patches the version / type / length prefix into reserved
+// front bytes and returns the contiguous frame slice. Avoids the double
+// allocation of NewWriter + EncodeFrame for hot encode paths.
+//
+// bodyHint is the expected body size; the underlying buffer is sized so a
+// typical frame fits without reallocation. The frame writer is write-only;
+// reading from it before FinishFrame is undefined.
+func NewFrameWriter(bodyHint int) *Buffer {
+	c := frameWriterPrefix + bodyHint
+	if c < frameWriterPrefix+64 {
+		c = frameWriterPrefix + 64
+	}
+	buf := make([]byte, frameWriterPrefix, c)
+	return &Buffer{buf: buf}
+}
+
+// FinishFrame finalises a frame started with NewFrameWriter by writing the
+// version, type, and uvarint(body-length) into the reserved prefix region
+// and returning the contiguous frame slice. The Buffer is consumed.
+func FinishFrame(b *Buffer, typ byte) ([]byte, error) {
+	bodyLen := len(b.buf) - frameWriterPrefix
+	if bodyLen < 0 {
+		return nil, fmt.Errorf("wire: FinishFrame called on non-frame Buffer")
+	}
+	if bodyLen > MaxFrameSize {
+		return nil, ErrFrameTooLarge
+	}
+	// Compute varint encoding length so we know where the real prefix starts.
+	var tmp [binary.MaxVarintLen32]byte
+	n := binary.PutUvarint(tmp[:], uint64(bodyLen))
+	start := frameWriterPrefix - 2 - n
+	b.buf[start] = CurrentVersion
+	b.buf[start+1] = typ
+	copy(b.buf[start+2:], tmp[:n])
+	return b.buf[start:], nil
+}
+
 // DecodeFrame parses a frame produced by EncodeFrame. It returns the type
 // byte, payload (a sub-slice of `data`, not copied), and an error if the
 // frame is malformed.
@@ -205,13 +248,37 @@ func (b *Buffer) ReadFixed(n int) ([]byte, error) {
 	return out, nil
 }
 
-// ReadString reads a uvarint-prefixed UTF-8 string.
+// ReadFixedInto reads exactly len(dst) raw bytes into dst, avoiding the
+// intermediate allocation of ReadFixed. Useful for fixed-size fields that
+// land in pre-existing arrays (TxID, NodeID, Hash).
+func (b *Buffer) ReadFixedInto(dst []byte) error {
+	n := len(dst)
+	if b.Remaining() < n {
+		return ErrShortBuffer
+	}
+	copy(dst, b.buf[b.off:b.off+n])
+	b.off += n
+	return nil
+}
+
+// ReadString reads a uvarint-prefixed UTF-8 string in a single allocation
+// — the previous implementation went through ReadBytes which paid for the
+// byte slice and then again for the string conversion.
 func (b *Buffer) ReadString(maxLen int) (string, error) {
-	bs, err := b.ReadBytes(maxLen)
+	length, err := b.ReadUvarint()
 	if err != nil {
 		return "", err
 	}
-	return string(bs), nil
+	if length > uint64(maxLen) {
+		return "", fmt.Errorf("wire: string len %d exceeds max %d", length, maxLen)
+	}
+	if uint64(b.Remaining()) < length {
+		return "", ErrShortBuffer
+	}
+	// string(byteSlice) copies once into the heap-allocated string body.
+	s := string(b.buf[b.off : b.off+int(length)])
+	b.off += int(length)
+	return s, nil
 }
 
 // AssertEmpty returns ErrTrailingBytes if there are unread bytes left.

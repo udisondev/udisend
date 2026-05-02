@@ -106,9 +106,16 @@ func (r *Record) Sign(id *identity.Identity) error {
 	return nil
 }
 
+// MaxClockSkew bounds how far in the future a record's IssuedAt may be
+// before Verify rejects it as forged or coming from a peer with a wildly
+// wrong clock. Without this guard a future-dated record never expires
+// (Expired uses now.Sub(IssuedAt) which goes negative) and would block
+// legitimate records via the cache's monotonic-IssuedAt rule.
+const MaxClockSkew = 30 * time.Second
+
 // Verify checks that the record's signature matches its embedded public
-// identity and (optionally) that it has not expired by ttl from IssuedAt
-// relative to now.
+// identity, that IssuedAt is not too far in the future, and (optionally)
+// that it has not expired by ttl from IssuedAt relative to now.
 func (r *Record) Verify(now time.Time, ttl time.Duration) error {
 	if len(r.Public.EdPub) == 0 {
 		return ErrInvalidRecord
@@ -120,9 +127,13 @@ func (r *Record) Verify(now time.Time, ttl time.Duration) error {
 	if !r.Public.Verify(preimage, r.Signature) {
 		return ErrBadSignature
 	}
+	if r.IssuedAt.After(now.Add(MaxClockSkew)) {
+		return ErrInvalidRecord
+	}
 	if ttl > 0 && r.Expired(now, ttl) {
 		return ErrExpired
 	}
+
 	return nil
 }
 
@@ -215,11 +226,9 @@ func (r *Record) UnmarshalBinary(data []byte) error {
 	}
 	r.MaxRelaySlots = slots
 
-	sig, err := b.ReadFixed(identity.SignatureSize)
-	if err != nil {
+	if err := b.ReadFixedInto(r.Signature[:]); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
-	copy(r.Signature[:], sig)
 
 	if err := b.SkipUnknownTLVs(); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)

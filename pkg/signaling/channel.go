@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/udisondev/udisend/pkg/identity"
 	"github.com/udisondev/udisend/pkg/noise"
@@ -98,16 +99,31 @@ func (c *Channel) Recv(ctx context.Context) ([]byte, error) {
 	}
 }
 
-// Close shuts the channel down and notifies the peer.
+// Close shuts the channel down and notifies the peer with an
+// authenticated BYE: an empty payload encrypted under the same noise
+// key used for DATA. A relay watching the wire cannot forge a BYE
+// because the AEAD nonce + key are private to the two endpoints.
 func (c *Channel) Close() error {
 	c.closeOnce.Do(func() {
-		// Best-effort BYE; we don't care about the result.
-		ctx, cancel := context.WithTimeout(context.Background(), HandshakeTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 		defer cancel()
-		_ = c.service.sendEnvelope(ctx, c, InnerBye, nil)
+
+		c.sendMu.Lock()
+		var ct []byte
+		if c.noise.Done() {
+			if encrypted, err := c.noise.Encrypt(nil, nil); err == nil {
+				ct = encrypted
+			}
+		}
+		c.sendMu.Unlock()
+		if ct != nil {
+			_ = c.service.sendEnvelope(ctx, c, InnerBye, ct)
+		}
+
 		c.service.unregister(sessionKey{peer: c.peer, sid: c.sid})
 		close(c.closed)
 	})
+
 	return nil
 }
 
@@ -142,29 +158,53 @@ func (c *Channel) handleResp(ctx context.Context, env *Envelope) {
 }
 
 // handleFinal drives the responder's side past handshake message 3.
+// Noise XK pattern carries the initiator's static key in m3, so this
+// is the first point at which resp.PeerStatic() is actually defined —
+// and the right place to verify the initiator's claimed sender hash
+// (env.Sender, captured at session install) really maps to the X25519
+// pubkey they authenticated themselves with.
 func (c *Channel) handleFinal(env *Envelope) {
 	if _, err := c.noise.ReadMessage(env.Payload); err != nil {
 		c.service.logger.Warn("signaling: HELLO_FINAL read", "err", err)
 		c.shutdown()
 		return
 	}
+
+	if !c.service.verifySenderIdentity(context.Background(), c.peer, c.noise) {
+		c.service.logger.Warn("signaling: HELLO_FINAL identity mismatch", "claimed", c.peer)
+		c.service.removeSession(sessionKey{peer: c.peer, sid: c.sid})
+		c.shutdown()
+		return
+	}
+
 	c.signalReady()
 	c.flushPending()
+
 	if h := c.service.handler.Load(); h != nil {
 		go (*h)(c.peer, c)
 	}
 }
 
+// MaxPendingDataFrames bounds how many DATA frames a channel will
+// buffer while the handshake is still in flight. Real reordering on a
+// single UDP socket is bounded; the cap is there so an attacker who
+// floods DATA before HELLO_FINAL cannot grow the per-channel slice
+// without limit (design.md §8 DoS).
+const MaxPendingDataFrames = 8
+
 // handleData decrypts a DATA frame. If the handshake hasn't yet completed
 // (rare; reorder under packet-level race), buffer the ciphertext for
-// later replay.
+// later replay — bounded by MaxPendingDataFrames.
 func (c *Channel) handleData(env *Envelope) {
 	if !c.noise.Done() {
 		c.mu.Lock()
-		c.pending = append(c.pending, env.Payload)
+		if len(c.pending) < MaxPendingDataFrames {
+			c.pending = append(c.pending, env.Payload)
+		}
 		c.mu.Unlock()
 		return
 	}
+
 	plain, err := c.noise.Decrypt(env.Payload, nil)
 	if err != nil {
 		c.service.logger.Warn("signaling: data decrypt", "err", err)

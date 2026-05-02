@@ -207,10 +207,23 @@ func (s *Service) dispatch(ctx context.Context, from net.Addr, env *Envelope) {
 		}
 		ch.handleData(env)
 	case InnerBye:
-		if ok {
-			ch.shutdown()
-			s.removeSession(key)
+		if !ok {
+			return
 		}
+		// Authenticated BYE: payload is an empty plaintext encrypted
+		// under the same noise key. A relay forging a BYE cannot
+		// supply a valid AEAD tag for the next nonce, so Decrypt
+		// fails and we keep the session up.
+		if !ch.noise.Done() {
+			s.logger.Debug("signaling: BYE before handshake done", "peer", env.Sender)
+			return
+		}
+		if _, err := ch.noise.Decrypt(env.Payload, nil); err != nil {
+			s.logger.Debug("signaling: forged BYE drop", "peer", env.Sender, "err", err)
+			return
+		}
+		ch.shutdown()
+		s.removeSession(key)
 	default:
 		s.logger.Debug("signaling: unknown inner type", "type", env.InnerType)
 	}
@@ -226,19 +239,75 @@ func (s *Service) acceptInit(ctx context.Context, from net.Addr, env *Envelope) 
 		s.logger.Warn("signaling: HELLO_INIT decrypt", "err", err)
 		return
 	}
+
+	// Note: Noise XK pattern (e,es / e,ee / s,se) does NOT carry the
+	// initiator's static key in m1 — it arrives in m3 (HELLO_FINAL).
+	// Identity binding therefore happens in Channel.handleFinal once
+	// resp.PeerStatic() actually reflects the initiator's authenticated
+	// static key.
+
 	m2, err := resp.WriteMessage(nil)
 	if err != nil {
 		s.logger.Warn("signaling: HELLO_RESP write", "err", err)
 		return
 	}
+
+	key := sessionKey{peer: env.Sender, sid: env.SessionID}
 	ch := s.newChannel(env.Sender, env.SessionID, from, resp, false)
 	s.mu.Lock()
-	s.sessions[sessionKey{peer: env.Sender, sid: env.SessionID}] = ch
+	s.sessions[key] = ch
 	s.mu.Unlock()
+
+	// Half-open responder DoS guard (design.md §8): if the initiator
+	// never sends HELLO_FINAL the channel sits forever consuming memory
+	// (pending buffer, slot in s.sessions). Schedule eviction after the
+	// same window Connect honours; a real peer always finishes within it.
+	time.AfterFunc(HandshakeTimeout, func() {
+		if ch.noise.Done() {
+			return
+		}
+
+		s.removeSession(key)
+	})
+
 	if err := s.sendEnvelope(ctx, ch, InnerHelloResp, m2); err != nil {
 		s.logger.Warn("signaling: send HELLO_RESP", "err", err)
-		s.removeSession(sessionKey{peer: env.Sender, sid: env.SessionID})
+		s.removeSession(key)
 	}
+}
+
+// verifySenderIdentity checks that the noise session's authenticated
+// peer-static (X25519) matches the one bound to env.Sender's
+// destination hash via the resolver. Looks up with a short timeout
+// (1s) so a slow / unanswered DHT query never blocks the dispatcher
+// goroutine; if the resolver does not return a record promptly the
+// binding is deferred to the SignedSDP layer — Session.recvLoop
+// refuses any payload whose Ed25519 signature does not match the
+// contact's pubkey.
+func (s *Service) verifySenderIdentity(parent context.Context, sender identity.Hash, sess *noise.Session) bool {
+	ctx, cancel := context.WithTimeout(parent, time.Second)
+	defer cancel()
+
+	rec, err := s.resolver.Lookup(ctx, sender)
+	if err != nil || rec == nil {
+		return true // unknown / slow: defer to higher layer
+	}
+
+	expected := rec.Public.XPub
+	got, err := sess.PeerStatic()
+	if err != nil {
+		return false
+	}
+	if len(got) != len(expected) {
+		return false
+	}
+	for i := range expected {
+		if got[i] != expected[i] {
+			return false
+		}
+	}
+
+	return true
 }
 
 // Connect initiates a handshake with `peer` and returns the open channel.

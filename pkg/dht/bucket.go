@@ -47,8 +47,3 @@ func (b *bucket) remove(id NodeID) bool {
 	return false
 }
 
-func (b *bucket) snapshot() []Contact {
-	out := make([]Contact, len(b.contacts))
-	copy(out, b.contacts)
-	return out
-}

@@ -58,16 +58,12 @@ func (h *Header) write(b *wire.Buffer) {
 }
 
 func (h *Header) read(b *wire.Buffer) error {
-	tx, err := b.ReadFixed(TxIDSize)
-	if err != nil {
+	if err := b.ReadFixedInto(h.TxID[:]); err != nil {
 		return err
 	}
-	copy(h.TxID[:], tx)
-	srcID, err := b.ReadFixed(int(IDBits / 8))
-	if err != nil {
+	if err := b.ReadFixedInto(h.SrcID[:]); err != nil {
 		return err
 	}
-	copy(h.SrcID[:], srcID)
 	addr, err := b.ReadString(MaxAddrLen)
 	if err != nil {
 		return err
@@ -99,19 +95,16 @@ func readContacts(b *wire.Buffer, max int) ([]EncodedContact, error) {
 	if n > uint64(max) {
 		return nil, fmt.Errorf("dht: contact count %d exceeds max %d", n, max)
 	}
-	out := make([]EncodedContact, 0, n)
-	for range n {
-		raw, err := b.ReadFixed(int(IDBits / 8))
-		if err != nil {
+	out := make([]EncodedContact, n)
+	for i := range out {
+		if err := b.ReadFixedInto(out[i].ID[:]); err != nil {
 			return nil, err
 		}
-		var id NodeID
-		copy(id[:], raw)
 		addr, err := b.ReadString(MaxAddrLen)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, EncodedContact{ID: id, Addr: addr})
+		out[i].Addr = addr
 	}
 	return out, nil
 }
@@ -158,43 +151,59 @@ type ValueMsg struct {
 	Value  []byte
 }
 
-// EncodeMsg serialises any of the DHT message types into a frame.
+// EncodeMsg serialises any of the DHT message types into a frame. Uses
+// wire.NewFrameWriter so the version/type/length prefix and the body live
+// in one allocation — halves the alloc count and avoids the body→frame
+// copy of the previous EncodeFrame two-step.
 func EncodeMsg(m any) ([]byte, error) {
-	b := wire.NewWriter()
 	switch v := m.(type) {
 	case *PingMsg:
+		b := wire.NewFrameWriter(headerHint(&v.Header))
 		v.Header.write(b)
-		return wire.EncodeFrame(MsgPing, b.Bytes())
+		return wire.FinishFrame(b, MsgPing)
 	case *PongMsg:
+		b := wire.NewFrameWriter(headerHint(&v.Header))
 		v.Header.write(b)
-		return wire.EncodeFrame(MsgPong, b.Bytes())
+		return wire.FinishFrame(b, MsgPong)
 	case *FindNodeMsg:
+		b := wire.NewFrameWriter(headerHint(&v.Header) + int(IDBits/8))
 		v.Header.write(b)
 		b.WriteFixed(v.Target[:])
-		return wire.EncodeFrame(MsgFindNode, b.Bytes())
+		return wire.FinishFrame(b, MsgFindNode)
 	case *NodesMsg:
+		b := wire.NewFrameWriter(headerHint(&v.Header) + 1 + len(v.Contacts)*(int(IDBits/8)+1+32))
 		v.Header.write(b)
 		writeContacts(b, v.Contacts)
-		return wire.EncodeFrame(MsgNodes, b.Bytes())
+		return wire.FinishFrame(b, MsgNodes)
 	case *StoreMsg:
+		b := wire.NewFrameWriter(headerHint(&v.Header) + int(IDBits/8) + 4 + len(v.Value))
 		v.Header.write(b)
 		b.WriteFixed(v.Key[:])
 		b.WriteBytes(v.Value)
-		return wire.EncodeFrame(MsgStore, b.Bytes())
+		return wire.FinishFrame(b, MsgStore)
 	case *StoreOKMsg:
+		b := wire.NewFrameWriter(headerHint(&v.Header))
 		v.Header.write(b)
-		return wire.EncodeFrame(MsgStoreOK, b.Bytes())
+		return wire.FinishFrame(b, MsgStoreOK)
 	case *FindValueMsg:
+		b := wire.NewFrameWriter(headerHint(&v.Header) + int(IDBits/8))
 		v.Header.write(b)
 		b.WriteFixed(v.Key[:])
-		return wire.EncodeFrame(MsgFindValue, b.Bytes())
+		return wire.FinishFrame(b, MsgFindValue)
 	case *ValueMsg:
+		b := wire.NewFrameWriter(headerHint(&v.Header) + 4 + len(v.Value))
 		v.Header.write(b)
 		b.WriteBytes(v.Value)
-		return wire.EncodeFrame(MsgValue, b.Bytes())
+		return wire.FinishFrame(b, MsgValue)
 	default:
 		return nil, fmt.Errorf("dht: cannot encode %T", m)
 	}
+}
+
+// headerHint returns the byte size of an encoded Header — TxID || SrcID ||
+// uvarint(addrLen) || addr — for sizing the frame buffer at encode time.
+func headerHint(h *Header) int {
+	return TxIDSize + int(IDBits/8) + 1 + len(h.SrcAddr)
 }
 
 // ErrUnknownType is returned by DecodeMsg for frame types the DHT does not
@@ -234,11 +243,9 @@ func DecodeMsg(frame []byte) (any, error) {
 		if err := m.Header.read(b); err != nil {
 			return nil, err
 		}
-		raw, err := b.ReadFixed(int(IDBits / 8))
-		if err != nil {
+		if err := b.ReadFixedInto(m.Target[:]); err != nil {
 			return nil, err
 		}
-		copy(m.Target[:], raw)
 		if err := b.SkipUnknownTLVs(); err != nil {
 			return nil, err
 		}
@@ -262,11 +269,9 @@ func DecodeMsg(frame []byte) (any, error) {
 		if err := m.Header.read(b); err != nil {
 			return nil, err
 		}
-		raw, err := b.ReadFixed(int(IDBits / 8))
-		if err != nil {
+		if err := b.ReadFixedInto(m.Key[:]); err != nil {
 			return nil, err
 		}
-		copy(m.Key[:], raw)
 		val, err := b.ReadBytes(MaxStoreValue)
 		if err != nil {
 			return nil, err
@@ -290,11 +295,9 @@ func DecodeMsg(frame []byte) (any, error) {
 		if err := m.Header.read(b); err != nil {
 			return nil, err
 		}
-		raw, err := b.ReadFixed(int(IDBits / 8))
-		if err != nil {
+		if err := b.ReadFixedInto(m.Key[:]); err != nil {
 			return nil, err
 		}
-		copy(m.Key[:], raw)
 		if err := b.SkipUnknownTLVs(); err != nil {
 			return nil, err
 		}

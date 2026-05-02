@@ -81,10 +81,18 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 	})
 	signalSvc.SetRouter(newDHTRouter(dhtNode))
 
+	// When the operator passes --public-ip, advertise that IP rather
+	// than the bind address. Operators routinely bind to 0.0.0.0 to
+	// accept traffic on every interface, but the published record
+	// must carry a routable address — otherwise remote peers cannot
+	// dial back.
 	pubAddr := tr.LocalAddr().String()
 	caps := presence.CapCanRelay | presence.CapCanBootstrap
 	if cfg.PublicIP != "" {
 		caps |= presence.CapPublicIP | presence.CapCanSTUN | presence.CapCanTURN
+		if _, port, err := net.SplitHostPort(pubAddr); err == nil {
+			pubAddr = net.JoinHostPort(cfg.PublicIP, port)
+		}
 	}
 	publisher := presence.NewPublisher(presence.PublisherConfig{
 		Identity:     cfg.Identity,

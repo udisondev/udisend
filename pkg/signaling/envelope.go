@@ -81,12 +81,14 @@ var (
 	ErrUnknownInner = errors.New("signaling: unknown inner type")
 )
 
-// Encode wraps the envelope into a dht.MsgRelay wire frame.
+// Encode wraps the envelope into a dht.MsgRelay wire frame. Uses
+// wire.NewFrameWriter so frame header and body share one allocation.
 func (e *Envelope) Encode() ([]byte, error) {
 	if len(e.Payload) > MaxInnerSize {
 		return nil, fmt.Errorf("%w: payload too large", ErrEnvelope)
 	}
-	w := wire.NewWriter()
+	const fixed = 1 + identity.HashSize*2 + SessionIDSize + 1 + 1 + 4
+	w := wire.NewFrameWriter(fixed + len(e.Payload))
 	w.WriteUint8(envelopeVersion)
 	w.WriteFixed(e.Recipient[:])
 	w.WriteFixed(e.Sender[:])
@@ -94,7 +96,7 @@ func (e *Envelope) Encode() ([]byte, error) {
 	w.WriteUint8(e.Hops)
 	w.WriteUint8(e.InnerType)
 	w.WriteBytes(e.Payload)
-	return wire.EncodeFrame(dht.MsgRelay, w.Bytes())
+	return wire.FinishFrame(w, dht.MsgRelay)
 }
 
 // Decode parses a wire.Frame produced by Encode. It is tolerant of
@@ -112,7 +114,8 @@ func Decode(frame []byte) (*Envelope, error) {
 
 // DecodeBody parses just the envelope body (i.e. the wire-frame payload).
 // pkg/dht hands us this directly via ExtraHandler, so the outer frame is
-// already consumed.
+// already consumed. Reads the fixed-size fields directly into the result
+// struct via ReadFixedInto so we do not pay for three intermediate slices.
 func DecodeBody(payload []byte) (*Envelope, error) {
 	b := wire.NewBuffer(payload)
 	ver, err := b.ReadUint8()
@@ -122,43 +125,35 @@ func DecodeBody(payload []byte) (*Envelope, error) {
 	if ver != envelopeVersion && ver != envelopeVersionV1 {
 		return nil, fmt.Errorf("%w: version=%d", ErrEnvelope, ver)
 	}
-	rec, err := b.ReadFixed(identity.HashSize)
-	if err != nil {
+	env := &Envelope{}
+	if err := b.ReadFixedInto(env.Recipient[:]); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}
-	snd, err := b.ReadFixed(identity.HashSize)
-	if err != nil {
+	if err := b.ReadFixedInto(env.Sender[:]); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}
-	sid, err := b.ReadFixed(SessionIDSize)
-	if err != nil {
+	if err := b.ReadFixedInto(env.SessionID[:]); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}
-	var hops byte
 	if ver >= envelopeVersion {
-		hops, err = b.ReadUint8()
+		hops, err := b.ReadUint8()
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 		}
+		env.Hops = hops
 	}
 	innerType, err := b.ReadUint8()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}
+	env.InnerType = innerType
 	inner, err := b.ReadBytes(MaxInnerSize)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}
+	env.Payload = inner
 	if err := b.SkipUnknownTLVs(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}
-	env := &Envelope{
-		Hops:      hops,
-		InnerType: innerType,
-		Payload:   inner,
-	}
-	copy(env.Recipient[:], rec)
-	copy(env.Sender[:], snd)
-	copy(env.SessionID[:], sid)
 	return env, nil
 }
