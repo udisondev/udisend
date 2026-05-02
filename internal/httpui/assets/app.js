@@ -1,16 +1,16 @@
 // udisend browser-side runtime.
 //
 // Architecture:
-//   - Server-Sent Events stream from /api/events delivers Go-side
-//     pushes (incoming sessions, signaling traffic from peers, errors).
+//   - SSE (/api/events) delivers Go-side pushes (incoming sessions,
+//     signaling traffic from peers, errors).
 //   - REST endpoints under /api/* drive contact / history / session
 //     management.
 //   - WebRTC PeerConnection lives in this script. Each chat peer gets one
-//     RTCPeerConnection with a DataChannel for text/files plus optional
-//     audio/video tracks for calls.
-//   - Signaling envelopes (offer/answer/ICE) ride over the Go-side
-//     end-to-end-encrypted signaling pipe; the JS only sees the
-//     relevant SDP / candidate strings.
+//     RTCPeerConnection with a DataChannel for text/files; calls add
+//     audio+video tracks via renegotiation.
+//   - Call UX is Telegram-style: a single global modal in #call-root
+//     drives outgoing / incoming / active states and floating /
+//     fullscreen / minimized layouts.
 
 const TOKEN = new URLSearchParams(location.search).get('token') || sessionStorage.getItem('udisend_token');
 if (TOKEN) sessionStorage.setItem('udisend_token', TOKEN);
@@ -19,42 +19,56 @@ const STATE = {
   identity: null,
   contacts: [],
   selectedHash: null,
-  // peer hash → RTCPeerConnection wrapper
+  // peer hash → connection wrapper
   peers: new Map(),
+  // active call info or null
+  call: null, // { peer, role: 'caller'|'callee', state, localStream, ... }
 };
 
 const els = {
-  myAlias:     document.getElementById('my-alias'),
-  myHash:      document.getElementById('my-hash'),
-  myFp:        document.getElementById('my-fingerprint'),
-  myAddr:      document.getElementById('my-address'),
-  connStatus:  document.getElementById('conn-status'),
-  contacts:    document.getElementById('contacts'),
-  addContact:  document.getElementById('add-contact-btn'),
-  chatPane:    document.getElementById('chat-pane'),
-  emptyState:  document.getElementById('empty-state'),
+  myAlias:       document.getElementById('my-alias'),
+  myHash:        document.getElementById('my-hash'),
+  myFp:          document.getElementById('my-fingerprint'),
+  myAddr:        document.getElementById('my-address'),
+  connStatus:    document.getElementById('conn-status'),
+  contacts:      document.getElementById('contacts'),
+  addContact:    document.getElementById('add-contact-btn'),
+  chatPane:      document.getElementById('chat-pane'),
+  emptyState:    document.getElementById('empty-state'),
   chatPeerAlias: document.getElementById('chat-peer-alias'),
   chatPeerHash:  document.getElementById('chat-peer-hash'),
-  history:     document.getElementById('chat-history'),
-  msgInput:    document.getElementById('msg-input'),
-  sendBtn:     document.getElementById('send-btn'),
-  fileInput:   document.getElementById('file-input'),
-  callBtn:     document.getElementById('call-btn'),
-  hangupBtn:   document.getElementById('hangup-btn'),
-  verifyBtn:   document.getElementById('verify-btn'),
-  callPane:    document.getElementById('call-pane'),
-  localVideo:  document.getElementById('local-video'),
-  remoteVideo: document.getElementById('remote-video'),
-  modalRoot:   document.getElementById('modal-root'),
+  history:       document.getElementById('chat-history'),
+  msgInput:      document.getElementById('msg-input'),
+  sendBtn:       document.getElementById('send-btn'),
+  fileInput:     document.getElementById('file-input'),
+  callBtn:       document.getElementById('call-btn'),
+  verifyBtn:     document.getElementById('verify-btn'),
+  modalRoot:     document.getElementById('modal-root'),
+  // call modal
+  callRoot:      document.getElementById('call-root'),
+  callPeerName:  document.getElementById('call-peer-name'),
+  callPeerStatus:document.getElementById('call-peer-status'),
+  callPrering:   document.getElementById('call-prering'),
+  callPreLabel:  document.getElementById('call-prering-label'),
+  callRemote:    document.getElementById('call-remote-video'),
+  callLocal:     document.getElementById('call-local-video'),
+  callPip:       document.getElementById('call-pip-restore'),
+  callPipVideo:  document.getElementById('call-pip-video'),
+  callMinimize:  document.getElementById('call-minimize'),
+  callFullscreen:document.getElementById('call-fullscreen'),
+  callAccept:    document.getElementById('call-accept'),
+  callDecline:   document.getElementById('call-decline'),
+  callCancel:    document.getElementById('call-cancel'),
+  callHangup:    document.getElementById('call-hangup'),
+  callMute:      document.getElementById('call-mute'),
+  callCam:       document.getElementById('call-cam'),
 };
 
 // ──────────────────────────────────────────────────────────────────
 // HTTP helpers
 // ──────────────────────────────────────────────────────────────────
 async function api(path, opts = {}) {
-  const headers = Object.assign({}, opts.headers || {}, {
-    'Authorization': 'Bearer ' + TOKEN,
-  });
+  const headers = Object.assign({}, opts.headers || {}, { 'Authorization': 'Bearer ' + TOKEN });
   if (opts.body && typeof opts.body === 'object' && !(opts.body instanceof FormData)) {
     headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(opts.body);
@@ -65,8 +79,8 @@ async function api(path, opts = {}) {
     throw new Error(`${path}: ${r.status} ${t}`);
   }
   if (r.status === 204) return null;
-  const contentType = r.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) return r.json();
+  const ct = r.headers.get('content-type') || '';
+  if (ct.includes('application/json')) return r.json();
   return r.text();
 }
 
@@ -136,7 +150,6 @@ function selectContact(hash) {
   els.chatPeerHash.textContent = `${hash}  ·  fp: ${c.fingerprint}`;
   loadHistory(hash);
   renderContacts();
-  // Auto-open session if we don't have one yet.
   ensurePeer(hash).catch(err => systemMsg('open session: ' + err.message));
 }
 
@@ -151,10 +164,10 @@ async function loadHistory(hash) {
 
 function addHistoryRow(direction, body, when, kind) {
   const div = document.createElement('div');
-  if (kind === 100 /* file marker */) {
+  if (kind === 100) {
     div.className = 'msg file ' + (direction === 'in' ? 'in' : 'out');
     div.textContent = body;
-  } else if (kind === 0 /* system */) {
+  } else if (kind === 0) {
     div.className = 'msg system';
     div.textContent = body;
   } else {
@@ -195,7 +208,7 @@ function startEventStream() {
   es.onmessage = ev => {
     let env;
     try { env = JSON.parse(ev.data); }
-    catch (e) { console.warn('bad event', ev.data); return; }
+    catch { console.warn('bad event', ev.data); return; }
     handleServerEvent(env);
   };
 }
@@ -222,31 +235,19 @@ function handleServerEvent(env) {
 // ──────────────────────────────────────────────────────────────────
 // Per-peer connection wrapper
 // ──────────────────────────────────────────────────────────────────
-//
-// peer = {
-//   hash, sessionId, pc (RTCPeerConnection), dc (DataChannel),
-//   state ('connecting'|'open'|'failed'|'closed'),
-//   incomingFiles: Map<id, {name, size, parts, received}>,
-//   role ('initiator'|'responder')
-// }
 
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-];
+const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
 async function ensurePeer(hash) {
   let p = STATE.peers.get(hash);
   if (p && (p.state === 'open' || p.state === 'connecting')) return p;
-  // Initiator path: ask Go to open a signaling session.
   const resp = await api('/api/session/open', { method: 'POST', body: { peer: hash } });
   return setupPeer(hash, resp.session_id, 'initiator');
 }
 
 function setupPeer(hash, sessionId, role) {
   const existing = STATE.peers.get(hash);
-  if (existing) {
-    try { existing.pc.close(); } catch {}
-  }
+  if (existing) { try { existing.pc.close(); } catch {} }
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   const peer = {
     hash, sessionId, pc, role,
@@ -255,6 +256,7 @@ function setupPeer(hash, sessionId, role) {
     incomingFiles: new Map(),
     pendingCandidates: [],
     haveRemoteDesc: false,
+    isMakingOffer: false, // perfect-negotiation flag for renegotiation
   };
   STATE.peers.set(hash, peer);
   renderContacts();
@@ -264,26 +266,19 @@ function setupPeer(hash, sessionId, role) {
     sendSignal(peer, 'ice', JSON.stringify(ev.candidate.toJSON()));
   };
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'connected') {
-      peer.state = 'open';
-    } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-      peer.state = 'failed';
-    }
+    if (pc.connectionState === 'connected') peer.state = 'open';
+    else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') peer.state = 'failed';
     renderContacts();
   };
-  pc.ontrack = ev => {
-    els.remoteVideo.srcObject = ev.streams[0];
-    els.callPane.hidden = false;
-    els.hangupBtn.hidden = false;
-  };
+  pc.ontrack = ev => onRemoteTrack(peer, ev);
   pc.ondatachannel = ev => attachDataChannel(peer, ev.channel);
 
   if (role === 'initiator') {
     const dc = pc.createDataChannel('udisend', { ordered: true });
     attachDataChannel(peer, dc);
-    pc.createOffer().then(offer => {
-      return pc.setLocalDescription(offer);
-    }).then(() => sendSignal(peer, 'offer', pc.localDescription.sdp))
+    pc.createOffer()
+      .then(offer => pc.setLocalDescription(offer))
+      .then(() => sendSignal(peer, 'offer', pc.localDescription.sdp))
       .catch(err => console.error('offer', err));
   }
   return peer;
@@ -297,17 +292,12 @@ function attachDataChannel(peer, dc) {
     renderContacts();
     systemMsg(`session with ${aliasOf(peer.hash)} is open`);
   };
-  dc.onclose = () => {
-    peer.state = 'closed';
-    renderContacts();
-  };
+  dc.onclose = () => { peer.state = 'closed'; renderContacts(); };
   dc.onmessage = ev => onDataChannelMessage(peer, ev.data);
 }
 
 async function handleIncomingSession(peerHash, sessionId) {
-  // Server-initiated session: we are the responder.
   setupPeer(peerHash, sessionId, 'responder');
-  // Make sure this contact is in our list (auto-add ghost contact if not).
   if (!STATE.contacts.find(c => c.hash === peerHash)) {
     STATE.contacts.push({ hash: peerHash, alias: '', fingerprint: '', verified: false });
     renderContacts();
@@ -316,14 +306,13 @@ async function handleIncomingSession(peerHash, sessionId) {
 
 async function handleSignalRecv(peerHash, sessionId, kind, payload) {
   const peer = STATE.peers.get(peerHash);
-  if (!peer) {
-    console.warn('signal for unknown peer', peerHash);
-    return;
-  }
+  if (!peer) { console.warn('signal for unknown peer', peerHash); return; }
   try {
     if (kind === 'offer') {
       await peer.pc.setRemoteDescription({ type: 'offer', sdp: payload });
       peer.haveRemoteDesc = true;
+      // If we're in an active call as the callee, our local tracks have
+      // already been added before we accepted; createAnswer pulls them in.
       const ans = await peer.pc.createAnswer();
       await peer.pc.setLocalDescription(ans);
       sendSignal(peer, 'answer', peer.pc.localDescription.sdp);
@@ -334,11 +323,8 @@ async function handleSignalRecv(peerHash, sessionId, kind, payload) {
       flushPending(peer);
     } else if (kind === 'ice') {
       const cand = JSON.parse(payload);
-      if (peer.haveRemoteDesc) {
-        await peer.pc.addIceCandidate(cand);
-      } else {
-        peer.pendingCandidates.push(cand);
-      }
+      if (peer.haveRemoteDesc) await peer.pc.addIceCandidate(cand);
+      else peer.pendingCandidates.push(cand);
     } else if (kind === 'bye') {
       onSessionClosed(peerHash, sessionId);
     }
@@ -350,8 +336,7 @@ async function handleSignalRecv(peerHash, sessionId, kind, payload) {
 
 async function flushPending(peer) {
   for (const c of peer.pendingCandidates) {
-    try { await peer.pc.addIceCandidate(c); }
-    catch (e) { console.warn('flush candidate', e); }
+    try { await peer.pc.addIceCandidate(c); } catch (e) { console.warn('flush candidate', e); }
   }
   peer.pendingCandidates = [];
 }
@@ -366,55 +351,75 @@ function sendSignal(peer, kind, payload) {
 function onSessionClosed(peerHash, sessionId) {
   const peer = STATE.peers.get(peerHash);
   if (!peer || peer.sessionId !== sessionId) return;
+  if (STATE.call && STATE.call.peer === peerHash) endCallLocal('peer disconnected');
   try { peer.pc.close(); } catch {}
   STATE.peers.delete(peerHash);
   renderContacts();
 }
 
 // ──────────────────────────────────────────────────────────────────
-// DataChannel — application-level chat protocol (JSON over text frames)
-// ──────────────────────────────────────────────────────────────────
-//
-// Wire shapes (kind ∈ {'text','file_offer','file_chunk','file_end'}):
+// DataChannel application protocol
+// Wire shapes:
 //   text:        { kind:'text', body, ts, id }
 //   file_offer:  { kind:'file_offer', id, name, size, mime }
-//   file_chunk:  ArrayBuffer — first 16 bytes is hex id, rest is payload
-//                (we send these as binary frames for efficiency).
+//   file_chunk:  binary frame; first 16 bytes = id, rest = payload
 //   file_end:    { kind:'file_end', id }
+//   call_invite: { kind:'call_invite' }
+//   call_accept: { kind:'call_accept' }
+//   call_reject: { kind:'call_reject' }
+//   call_end:    { kind:'call_end' }
+// ──────────────────────────────────────────────────────────────────
 
 function onDataChannelMessage(peer, data) {
   if (typeof data === 'string') {
     let msg;
-    try { msg = JSON.parse(data); } catch (e) { console.warn('bad json', data); return; }
-    if (msg.kind === 'text') {
-      addHistoryRow('in', msg.body, new Date(msg.ts || Date.now()), 1);
-      persistHistory(peer.hash, 'in', 1, msg.body, msg.ts);
-    } else if (msg.kind === 'file_offer') {
-      peer.incomingFiles.set(msg.id, { name: msg.name, size: msg.size, mime: msg.mime, parts: [] });
-      addHistoryRow('in', `📎 incoming file: ${msg.name} (${humanSize(msg.size)})`, new Date(), 100);
-    } else if (msg.kind === 'file_end') {
-      const f = peer.incomingFiles.get(msg.id);
-      if (!f) return;
-      const blob = new Blob(f.parts, { type: f.mime || 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      const div = document.createElement('div');
-      div.className = 'msg file in';
-      const a = document.createElement('a');
-      a.href = url; a.download = f.name; a.textContent = `↓ ${f.name} (${humanSize(blob.size)})`;
-      div.appendChild(a);
-      els.history.appendChild(div);
-      scrollHistory();
-      peer.incomingFiles.delete(msg.id);
-      persistHistory(peer.hash, 'in', 100, `received file ${f.name}`, Date.now() * 1e6);
+    try { msg = JSON.parse(data); } catch { return; }
+    switch (msg.kind) {
+      case 'text': {
+        addHistoryRow('in', msg.body, new Date(msg.ts || Date.now()), 1);
+        persistHistory(peer.hash, 'in', 1, msg.body, msg.ts);
+        break;
+      }
+      case 'file_offer': {
+        peer.incomingFiles.set(msg.id, { name: msg.name, size: msg.size, mime: msg.mime, parts: [] });
+        addHistoryRow('in', `📎 incoming file: ${msg.name} (${humanSize(msg.size)})`, new Date(), 100);
+        break;
+      }
+      case 'file_end': {
+        const f = peer.incomingFiles.get(msg.id);
+        if (!f) return;
+        const blob = new Blob(f.parts, { type: f.mime || 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const div = document.createElement('div');
+        div.className = 'msg file in';
+        const a = document.createElement('a');
+        a.href = url; a.download = f.name; a.textContent = `↓ ${f.name} (${humanSize(blob.size)})`;
+        div.appendChild(a);
+        els.history.appendChild(div);
+        scrollHistory();
+        peer.incomingFiles.delete(msg.id);
+        persistHistory(peer.hash, 'in', 100, `received file ${f.name}`, Date.now() * 1e6);
+        break;
+      }
+      case 'call_invite':  onCallInvite(peer);  break;
+      case 'call_accept':  onCallAccept(peer);  break;
+      case 'call_reject':  onCallReject(peer);  break;
+      case 'call_end':     onCallEnd(peer);     break;
     }
     return;
   }
-  // Binary frame: first 16 bytes = id (utf-8), rest = chunk.
+  // Binary frame: first 16 bytes = id, rest = chunk.
   const view = new Uint8Array(data);
   const id = new TextDecoder().decode(view.slice(0, 16));
   const f = peer.incomingFiles.get(id);
   if (!f) return;
   f.parts.push(view.slice(16));
+}
+
+function dcSend(peer, obj) {
+  if (!peer.dc || peer.dc.readyState !== 'open') return false;
+  peer.dc.send(JSON.stringify(obj));
+  return true;
 }
 
 async function sendText(peer, text) {
@@ -441,7 +446,6 @@ async function sendFile(peer, file) {
   div.textContent = `↑ ${file.name} (${humanSize(file.size)})`;
   els.history.appendChild(div);
   scrollHistory();
-  // Stream chunks of 16 KiB.
   const CHUNK = 16 * 1024;
   let offset = 0;
   const idBytes = new TextEncoder().encode(id);
@@ -466,66 +470,263 @@ async function persistHistory(peerHash, direction, kind, body, ts) {
       method: 'POST',
       body: { peer: peerHash, direction, kind, body, timestamp: ts },
     });
-  } catch (e) {
-    console.warn('persist', e);
-  }
+  } catch (e) { console.warn('persist', e); }
+}
+
+function onRemoteTrack(peer, ev) {
+  // A remote track arrives. If we're in a call with this peer, route the
+  // stream to the call modal; otherwise it's likely an extra m-section
+  // we don't care about yet.
+  if (!STATE.call || STATE.call.peer !== peer.hash) return;
+  const stream = ev.streams && ev.streams[0];
+  if (!stream) return;
+  els.callRemote.srcObject = stream;
+  els.callPipVideo.srcObject = stream;
 }
 
 // ──────────────────────────────────────────────────────────────────
-// Calls
+// Calls — Telegram-style state machine
 // ──────────────────────────────────────────────────────────────────
-let localStream = null;
+//
+// States in STATE.call.state:
+//   'outgoing'  — caller waiting for accept
+//   'incoming'  — callee shown the modal, ringtone playing
+//   'active'    — accepted, media flowing
+// Modes (only meaningful while 'active'):
+//   'floating' (default), 'fullscreen', 'minimized'
 
-async function startCall() {
+function setCallState(state, mode) {
+  els.callRoot.dataset.state = state;
+  if (mode) els.callRoot.dataset.mode = mode;
+  if (state === 'idle') els.callRoot.dataset.mode = 'floating';
+}
+
+async function placeCall() {
+  if (STATE.call) { systemMsg('Already in a call.'); return; }
   if (!STATE.selectedHash) return;
-  const peer = STATE.peers.get(STATE.selectedHash);
-  if (!peer || peer.state !== 'open') {
-    systemMsg('Not connected — open chat first to establish a session.');
+  let peer;
+  try { peer = await ensurePeer(STATE.selectedHash); }
+  catch (e) { systemMsg('cannot reach peer: ' + e.message); return; }
+  if (!peer.dc || peer.dc.readyState !== 'open') {
+    // Wait briefly for DC to open.
+    const ok = await waitFor(() => peer.dc && peer.dc.readyState === 'open', 8000);
+    if (!ok) { systemMsg('peer not connected'); return; }
+  }
+  STATE.call = { peer: peer.hash, role: 'caller', state: 'outgoing', startedAt: Date.now(), localStream: null };
+  showCallModal('outgoing', aliasOf(peer.hash), 'Calling…');
+  dcSend(peer, { kind: 'call_invite' });
+  // Auto-cancel after 45s if peer doesn't pick up.
+  STATE.call.ringTimeout = setTimeout(() => {
+    if (STATE.call && STATE.call.state === 'outgoing') endCallLocal('no answer');
+  }, 45_000);
+}
+
+function onCallInvite(peer) {
+  if (STATE.call) {
+    // Already busy — auto-decline.
+    dcSend(peer, { kind: 'call_reject' });
     return;
   }
+  STATE.call = { peer: peer.hash, role: 'callee', state: 'incoming', startedAt: Date.now(), localStream: null };
+  showCallModal('incoming', aliasOf(peer.hash), 'Incoming call');
+  startRingtone();
+}
+
+async function acceptIncomingCall() {
+  if (!STATE.call || STATE.call.role !== 'callee' || STATE.call.state !== 'incoming') return;
+  stopRingtone();
+  const peer = STATE.peers.get(STATE.call.peer);
+  if (!peer) { endCallLocal('peer gone'); return; }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true }); }
+  catch (e) {
+    dcSend(peer, { kind: 'call_reject' });
+    endCallLocal('media access denied: ' + e.message);
+    return;
+  }
+  STATE.call.localStream = stream;
+  els.callLocal.srcObject = stream;
+  // Add tracks NOW so when caller's renegotiation offer arrives, our
+  // createAnswer pulls these into the answer SDP.
+  for (const t of stream.getTracks()) peer.pc.addTrack(t, stream);
+  dcSend(peer, { kind: 'call_accept' });
+  setCallState('active', 'floating');
+  STATE.call.state = 'active';
+  els.callPeerStatus.textContent = 'Connected — waiting for offer…';
+}
+
+function declineIncomingCall() {
+  if (!STATE.call || STATE.call.role !== 'callee' || STATE.call.state !== 'incoming') return;
+  stopRingtone();
+  const peer = STATE.peers.get(STATE.call.peer);
+  if (peer) dcSend(peer, { kind: 'call_reject' });
+  endCallLocal('declined');
+}
+
+async function onCallAccept(peer) {
+  if (!STATE.call || STATE.call.role !== 'caller' || STATE.call.state !== 'outgoing' || STATE.call.peer !== peer.hash) return;
+  if (STATE.call.ringTimeout) { clearTimeout(STATE.call.ringTimeout); STATE.call.ringTimeout = null; }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true }); }
+  catch (e) {
+    dcSend(peer, { kind: 'call_end' });
+    endCallLocal('media access denied: ' + e.message);
+    return;
+  }
+  STATE.call.localStream = stream;
+  els.callLocal.srcObject = stream;
+  for (const t of stream.getTracks()) peer.pc.addTrack(t, stream);
+  STATE.call.state = 'active';
+  setCallState('active', 'floating');
+  els.callPeerStatus.textContent = 'Connecting…';
+  // Renegotiate: we (caller) drive the offer. Both sides have tracks now;
+  // the answer will flip the m-section direction to sendrecv on both ends.
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    const offer = await peer.pc.createOffer();
+    await peer.pc.setLocalDescription(offer);
+    sendSignal(peer, 'offer', peer.pc.localDescription.sdp);
   } catch (e) {
-    systemMsg('Camera/mic access denied: ' + e.message);
-    return;
+    console.error('renegotiate', e);
+    endCallLocal('renegotiate failed: ' + e.message);
   }
-  els.localVideo.srcObject = localStream;
-  els.callPane.hidden = false;
-  els.hangupBtn.hidden = false;
-  for (const track of localStream.getTracks()) {
-    peer.pc.addTrack(track, localStream);
-  }
-  // Renegotiate — adding tracks needs a new offer.
-  const offer = await peer.pc.createOffer();
-  await peer.pc.setLocalDescription(offer);
-  sendSignal(peer, 'offer', peer.pc.localDescription.sdp);
-  systemMsg('Calling…');
 }
 
-function hangup() {
-  if (!STATE.selectedHash) return;
-  const peer = STATE.peers.get(STATE.selectedHash);
-  if (peer) {
-    for (const sender of peer.pc.getSenders()) {
-      if (sender.track) sender.track.stop();
+function onCallReject(peer) {
+  if (!STATE.call || STATE.call.peer !== peer.hash) return;
+  endCallLocal('declined by peer');
+}
+
+function onCallEnd(peer) {
+  if (!STATE.call || STATE.call.peer !== peer.hash) return;
+  endCallLocal('peer hung up');
+}
+
+function hangupActive() {
+  if (!STATE.call) return;
+  const peer = STATE.peers.get(STATE.call.peer);
+  if (peer) dcSend(peer, { kind: 'call_end' });
+  endCallLocal('ended');
+}
+
+function endCallLocal(reason) {
+  stopRingtone();
+  if (STATE.call) {
+    if (STATE.call.localStream) {
+      for (const t of STATE.call.localStream.getTracks()) t.stop();
+    }
+    if (STATE.call.ringTimeout) clearTimeout(STATE.call.ringTimeout);
+    // Detach call media tracks from the PC so the next call starts clean.
+    const peer = STATE.peers.get(STATE.call.peer);
+    if (peer) {
+      for (const sender of peer.pc.getSenders()) {
+        if (sender.track) {
+          try { sender.track.stop(); } catch {}
+          try { peer.pc.removeTrack(sender); } catch {}
+        }
+      }
     }
   }
-  if (localStream) {
-    for (const t of localStream.getTracks()) t.stop();
-    localStream = null;
+  STATE.call = null;
+  els.callRemote.srcObject = null;
+  els.callLocal.srcObject = null;
+  els.callPipVideo.srcObject = null;
+  setCallState('idle');
+  if (reason) systemMsg(`call: ${reason}`);
+}
+
+function showCallModal(state, peerName, statusText) {
+  els.callPeerName.textContent = peerName;
+  els.callPeerStatus.textContent = statusText;
+  els.callPreLabel.textContent = statusText;
+  setCallState(state, 'floating');
+}
+
+function toggleFullscreen() {
+  if (!STATE.call || STATE.call.state !== 'active') return;
+  if (els.callRoot.dataset.mode === 'fullscreen') {
+    els.callRoot.dataset.mode = 'floating';
+  } else {
+    els.callRoot.dataset.mode = 'fullscreen';
   }
-  els.localVideo.srcObject = null;
-  els.remoteVideo.srcObject = null;
-  els.callPane.hidden = true;
-  els.hangupBtn.hidden = true;
-  systemMsg('Call ended.');
+}
+
+function toggleMinimize() {
+  if (!STATE.call || STATE.call.state !== 'active') return;
+  if (els.callRoot.dataset.mode === 'minimized') {
+    els.callRoot.dataset.mode = 'floating';
+  } else {
+    els.callRoot.dataset.mode = 'minimized';
+  }
+}
+
+function toggleMute() {
+  if (!STATE.call || !STATE.call.localStream) return;
+  const tracks = STATE.call.localStream.getAudioTracks();
+  if (!tracks.length) return;
+  const enabled = !tracks[0].enabled;
+  for (const t of tracks) t.enabled = enabled;
+  els.callMute.classList.toggle('toggled', !enabled);
+}
+
+function toggleCam() {
+  if (!STATE.call || !STATE.call.localStream) return;
+  const tracks = STATE.call.localStream.getVideoTracks();
+  if (!tracks.length) return;
+  const enabled = !tracks[0].enabled;
+  for (const t of tracks) t.enabled = enabled;
+  els.callCam.classList.toggle('toggled', !enabled);
 }
 
 // ──────────────────────────────────────────────────────────────────
-// UI handlers + helpers
+// Ringtone — synthesized via WebAudio so we don't ship an asset.
+// ──────────────────────────────────────────────────────────────────
+let ringAudio = null;
+let ringInterval = null;
+
+function startRingtone() {
+  stopRingtone();
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    ringAudio = ctx;
+    const beep = () => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = 480;
+      gain.gain.setValueAtTime(0, ctx.currentTime);
+      gain.gain.linearRampToValueAtTime(0.15, ctx.currentTime + 0.05);
+      gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.6);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.7);
+    };
+    beep();
+    ringInterval = setInterval(beep, 1500);
+  } catch (e) { /* autoplay policy may suppress; not critical */ }
+}
+
+function stopRingtone() {
+  if (ringInterval) { clearInterval(ringInterval); ringInterval = null; }
+  if (ringAudio) { try { ringAudio.close(); } catch {} ringAudio = null; }
+}
+
+function waitFor(predicate, timeoutMs) {
+  return new Promise(resolve => {
+    const start = Date.now();
+    const tick = () => {
+      if (predicate()) return resolve(true);
+      if (Date.now() - start > timeoutMs) return resolve(false);
+      setTimeout(tick, 100);
+    };
+    tick();
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────
+// UI handlers
 // ──────────────────────────────────────────────────────────────────
 function attachUIHandlers() {
   els.addContact.addEventListener('click', showAddContactModal);
+
   els.sendBtn.addEventListener('click', () => {
     const text = els.msgInput.value.trim();
     if (!text || !STATE.selectedHash) return;
@@ -535,14 +736,37 @@ function attachUIHandlers() {
   els.msgInput.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); els.sendBtn.click(); }
   });
+
   els.fileInput.addEventListener('change', () => {
     const file = els.fileInput.files?.[0];
     if (!file || !STATE.selectedHash) return;
     ensurePeer(STATE.selectedHash).then(p => sendFile(p, file)).catch(e => systemMsg('file: ' + e.message));
     els.fileInput.value = '';
   });
-  els.callBtn.addEventListener('click', startCall);
-  els.hangupBtn.addEventListener('click', hangup);
+
+  els.callBtn.addEventListener('click', placeCall);
+
+  els.callAccept.addEventListener('click', acceptIncomingCall);
+  els.callDecline.addEventListener('click', declineIncomingCall);
+  els.callCancel.addEventListener('click', () => {
+    const peer = STATE.peers.get(STATE.call?.peer);
+    if (peer) dcSend(peer, { kind: 'call_end' });
+    endCallLocal('cancelled');
+  });
+  els.callHangup.addEventListener('click', hangupActive);
+  els.callMinimize.addEventListener('click', toggleMinimize);
+  els.callFullscreen.addEventListener('click', toggleFullscreen);
+  els.callPip.addEventListener('click', toggleMinimize);
+  els.callMute.addEventListener('click', toggleMute);
+  els.callCam.addEventListener('click', toggleCam);
+
+  // Esc to exit fullscreen / minimize.
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && STATE.call && STATE.call.state === 'active') {
+      if (els.callRoot.dataset.mode === 'fullscreen') { e.preventDefault(); els.callRoot.dataset.mode = 'floating'; }
+    }
+  });
+
   els.verifyBtn.addEventListener('click', async () => {
     if (!STATE.selectedHash) return;
     const c = STATE.contacts.find(x => x.hash === STATE.selectedHash);
@@ -578,9 +802,7 @@ function showAddContactModal() {
       await api('/api/contacts/add', { method: 'POST', body: { hash, alias } });
       root.innerHTML = '';
       await loadSnapshot();
-    } catch (e) {
-      alert(e.message);
-    }
+    } catch (e) { alert(e.message); }
   };
 }
 

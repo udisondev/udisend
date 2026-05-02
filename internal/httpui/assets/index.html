@@ -32,13 +32,8 @@
         </div>
         <div class="chat-actions">
           <button id="verify-btn" title="Mark this contact as verified">✓ Verify</button>
-          <button id="call-btn">📞 Call</button>
-          <button id="hangup-btn" hidden>✕ Hangup</button>
+          <button id="call-btn" title="Start a call">📞 Call</button>
         </div>
-      </div>
-      <div id="call-pane" hidden>
-        <video id="local-video" autoplay muted playsinline></video>
-        <video id="remote-video" autoplay playsinline></video>
       </div>
       <div id="chat-history" class="chat-history"></div>
       <div class="chat-composer">
@@ -54,6 +49,47 @@
       <div>← Pick or add a contact to start.</div>
     </section>
   </main>
+
+  <!-- Call modal: present in DOM always, toggled via data-state.
+       States: idle | outgoing | incoming | active. Sub-modes for active:
+       data-mode in {floating | fullscreen | minimized}. -->
+  <div id="call-root" data-state="idle" data-mode="floating">
+    <div class="call-backdrop"></div>
+    <div class="call-window" role="dialog" aria-modal="true" aria-label="Call">
+      <div class="call-header">
+        <button class="call-icon" id="call-minimize" title="Minimize">▁</button>
+        <div class="call-peer">
+          <div class="call-peer-name" id="call-peer-name">peer</div>
+          <div class="call-peer-status" id="call-peer-status">Calling…</div>
+        </div>
+        <button class="call-icon" id="call-fullscreen" title="Fullscreen">⛶</button>
+      </div>
+      <div class="call-stage">
+        <video id="call-remote-video" autoplay playsinline></video>
+        <video id="call-local-video" class="call-local-pip" autoplay muted playsinline></video>
+        <div class="call-prering" id="call-prering">
+          <div class="call-pulse"></div>
+          <div class="call-prering-label" id="call-prering-label">Calling…</div>
+        </div>
+      </div>
+      <div class="call-actions">
+        <!-- One row per state; toggled via CSS. -->
+        <button class="call-btn danger"  id="call-cancel"  data-show="outgoing">Cancel</button>
+        <button class="call-btn danger"  id="call-decline" data-show="incoming">✕ Decline</button>
+        <button class="call-btn primary" id="call-accept"  data-show="incoming">✓ Accept</button>
+        <button class="call-btn neutral" id="call-mute"    data-show="active" title="Mute mic">🎙</button>
+        <button class="call-btn neutral" id="call-cam"     data-show="active" title="Toggle camera">📷</button>
+        <button class="call-btn danger"  id="call-hangup"  data-show="active">⛒ End</button>
+      </div>
+    </div>
+
+    <!-- Minimized PiP: appears when data-mode=minimized; click to restore. -->
+    <button class="call-pip" id="call-pip-restore" title="Restore">
+      <video id="call-pip-video" autoplay muted playsinline></video>
+      <span class="call-pip-label">in call</span>
+    </button>
+  </div>
+
   <div id="modal-root"></div>
   <script src="/app.js" type="module"></script>
 </body>
