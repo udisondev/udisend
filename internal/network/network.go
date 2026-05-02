@@ -8,7 +8,6 @@ package network
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -24,15 +23,15 @@ import (
 
 // Config configures a network node.
 type Config struct {
-	Identity     *identity.Identity
-	Listen       string   // UDP listen address; ":0" picks ephemeral
-	Bootstrap    []string // peer addresses to seed the routing table
-	PublicIP     string   // if non-empty, STUN/TURN are advertised on this IP
-	STUNAddr     string   // optional, defaults to ":3478" if PublicIP set
-	TURNAddr     string   // optional, defaults to ":3478" (shared with STUN by binding two sockets)
-	TURNSecret   string   // shared secret for TURN long-term-credentials
-	PresenceTTL  time.Duration
-	Logger       *slog.Logger
+	Identity    *identity.Identity
+	Listen      string   // UDP listen address; ":0" picks ephemeral
+	Bootstrap   []string // peer addresses to seed the routing table
+	PublicIP    string   // if non-empty, STUN/TURN are advertised on this IP
+	STUNAddr    string   // optional, defaults to ":3478" if PublicIP set
+	TURNAddr    string   // optional, defaults to ":3478" (shared with STUN by binding two sockets)
+	TURNSecret  string   // shared secret for TURN long-term-credentials
+	PresenceTTL time.Duration
+	Logger      *slog.Logger
 }
 
 // Node bundles every long-lived process inside a network node.
@@ -59,7 +58,7 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 		cfg.Listen = ":0"
 	}
 	if cfg.PresenceTTL == 0 {
-		cfg.PresenceTTL = dht.DefaultPresenceTTL
+		cfg.PresenceTTL = presence.DefaultRecordTTL
 	}
 
 	tr, err := transport.ListenUDP(cfg.Listen)
@@ -135,22 +134,18 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 
 // Run starts every loop. Returns when ctx is cancelled.
 func (n *Node) Run(ctx context.Context) error {
-	n.wg.Add(2)
-	go func() { defer n.wg.Done(); n.dht.Run(ctx) }()
-	go func() { defer n.wg.Done(); n.publisher.Run(ctx) }()
+	n.wg.Go(func() { n.dht.Run(ctx) })
+	n.wg.Go(func() { n.publisher.Run(ctx) })
 
 	if n.stunSrv != nil {
-		n.wg.Add(1)
-		go func() { defer n.wg.Done(); _ = n.stunSrv.Run(ctx) }()
+		n.wg.Go(func() { _ = n.stunSrv.Run(ctx) })
 	}
 	if n.turnSrv != nil {
-		n.wg.Add(1)
-		go func() { defer n.wg.Done(); _ = n.turnSrv.Run(ctx) }()
+		n.wg.Go(func() { _ = n.turnSrv.Run(ctx) })
 	}
 
 	for _, addr := range n.cfg.Bootstrap {
-		addr := addr
-		go func() {
+		n.wg.Go(func() {
 			peer, err := n.transport.Dial(addr)
 			if err != nil {
 				n.cfg.Logger.Warn("network: bootstrap parse", "addr", addr, "err", err)
@@ -161,7 +156,7 @@ func (n *Node) Run(ctx context.Context) error {
 			if err := n.dht.Bootstrap(bctx, peer); err != nil {
 				n.cfg.Logger.Warn("network: bootstrap", "addr", addr, "err", err)
 			}
-		}()
+		})
 	}
 
 	<-ctx.Done()
@@ -209,8 +204,3 @@ func (noopResolver) Lookup(_ context.Context, _ identity.Hash) (*presence.Record
 }
 
 var errNoLookups = errors.New("network: this node does not initiate signaling lookups")
-
-// Format helpers used by command-line output.
-//
-// Sprintf-style local helper to avoid pulling fmt into the public API.
-func _(format string, args ...any) string { return fmt.Sprintf(format, args...) }

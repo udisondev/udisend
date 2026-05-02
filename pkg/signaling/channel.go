@@ -54,6 +54,9 @@ func (s *Service) newChannel(peer identity.Hash, sid SessionID, remote net.Addr,
 // Peer returns the remote peer's destination hash.
 func (c *Channel) Peer() identity.Hash { return c.peer }
 
+// SessionID returns the session identifier shared by both ends of the channel.
+func (c *Channel) SessionID() SessionID { return c.sid }
+
 // Send encrypts payload and ships it. The payload is one logical message;
 // peers see it as a single Recv() call.
 func (c *Channel) Send(ctx context.Context, payload []byte) error {
@@ -70,10 +73,7 @@ func (c *Channel) Send(ctx context.Context, payload []byte) error {
 // Recv blocks until a DATA frame arrives or the channel closes.
 func (c *Channel) Recv(ctx context.Context) ([]byte, error) {
 	select {
-	case msg, ok := <-c.inbox:
-		if !ok {
-			return nil, ErrChannelClosed
-		}
+	case msg := <-c.inbox:
 		return msg, nil
 	case <-c.closed:
 		return nil, ErrChannelClosed
@@ -91,7 +91,6 @@ func (c *Channel) Close() error {
 		_ = c.service.sendEnvelope(ctx, c, InnerBye, nil)
 		c.service.unregister(sessionKey{peer: c.peer, sid: c.sid})
 		close(c.closed)
-		close(c.inbox)
 	})
 	return nil
 }
@@ -101,7 +100,6 @@ func (c *Channel) Close() error {
 func (c *Channel) shutdown() {
 	c.closeOnce.Do(func() {
 		close(c.closed)
-		close(c.inbox)
 	})
 }
 

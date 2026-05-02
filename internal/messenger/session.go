@@ -63,10 +63,7 @@ func (s *Session) Send(ctx context.Context, ev SignalEvent) error {
 // Recv blocks for the next inbound signal.
 func (s *Session) Recv(ctx context.Context) (SignalEvent, error) {
 	select {
-	case ev, ok := <-s.inbox:
-		if !ok {
-			return SignalEvent{}, ErrSessionClosed
-		}
+	case ev := <-s.inbox:
 		return ev, nil
 	case <-s.closed:
 		return SignalEvent{}, ErrSessionClosed
@@ -90,7 +87,6 @@ func (s *Session) Close() error {
 func (s *Session) shutdown() {
 	s.closeOnce.Do(func() {
 		close(s.closed)
-		close(s.inbox)
 		s.messenger.removeSession(s.Peer, s.SessionID)
 	})
 }

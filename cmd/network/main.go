@@ -6,7 +6,7 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
+	"log"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -20,8 +20,7 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 }
 

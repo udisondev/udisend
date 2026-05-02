@@ -3,7 +3,6 @@ package httpui
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -178,10 +177,17 @@ func (c *sseClient) pumpSession(sess *messenger.Session) {
 		c.sessionsMu.Unlock()
 		c.send(envelope{Type: "session_closed", Peer: sess.Peer.String(), SessionID: sess.SessionID})
 	}()
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		ev, err := sess.Recv(ctx)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-c.closed:
+		case <-sess.Done():
+		}
 		cancel()
+	}()
+	for {
+		ev, err := sess.Recv(ctx)
 		if err != nil {
 			return
 		}
@@ -300,5 +306,3 @@ func (s *Server) singleClient() *sseClient {
 	return nil
 }
 
-// suppress unused warning on errors import in some build configurations.
-var _ = errors.New

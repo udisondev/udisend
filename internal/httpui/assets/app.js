@@ -105,6 +105,9 @@ async function loadSnapshot() {
   const snap = await api('/api/snapshot');
   STATE.identity = snap.identity;
   STATE.contacts = snap.contacts;
+  STATE.iceServers = (snap.ice_servers && snap.ice_servers.length)
+    ? snap.ice_servers
+    : ICE_SERVERS_FALLBACK;
   els.myHash.textContent = snap.identity.hash;
   els.myFp.textContent = snap.identity.fingerprint;
   els.myAddr.textContent = snap.identity.address;
@@ -236,7 +239,10 @@ function handleServerEvent(env) {
 // Per-peer connection wrapper
 // ──────────────────────────────────────────────────────────────────
 
-const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+// Fallback used only if /api/snapshot did not surface any volunteer ICE
+// servers (no public-IP network nodes in this messenger's routing table).
+// The real list comes from the Go side via snapshot.ice_servers.
+const ICE_SERVERS_FALLBACK = [{ urls: 'stun:stun.l.google.com:19302' }];
 
 async function ensurePeer(hash) {
   let p = STATE.peers.get(hash);
@@ -248,7 +254,7 @@ async function ensurePeer(hash) {
 function setupPeer(hash, sessionId, role) {
   const existing = STATE.peers.get(hash);
   if (existing) { try { existing.pc.close(); } catch {} }
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const pc = new RTCPeerConnection({ iceServers: STATE.iceServers || ICE_SERVERS_FALLBACK });
   const peer = {
     hash, sessionId, pc, role,
     state: 'connecting',

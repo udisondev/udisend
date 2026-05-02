@@ -74,9 +74,7 @@ func TestMemory_Concurrent(t *testing.T) {
 
 	const n = 100
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		count := 0
 		for range b.Inbox() {
 			count++
@@ -84,7 +82,7 @@ func TestMemory_Concurrent(t *testing.T) {
 				return
 			}
 		}
-	}()
+	})
 	for i := range n {
 		_ = a.Send(t.Context(), b.LocalAddr(), []byte{byte(i)})
 	}

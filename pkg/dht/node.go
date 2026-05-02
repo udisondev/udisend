@@ -17,10 +17,14 @@ import (
 
 // Defaults for lookup behaviour. Tunable via Config.
 const (
-	DefaultAlpha           = 3
-	DefaultRequestTimeout  = 2 * time.Second
-	DefaultLookupTimeout   = 8 * time.Second
-	DefaultPresenceTTL     = 90 * time.Second
+	DefaultAlpha          = 3
+	DefaultRequestTimeout = 2 * time.Second
+	DefaultLookupTimeout  = 8 * time.Second
+	// DefaultStoreTTL is the eviction window the local store uses for
+	// values written through STORE / PutValue when no caller-provided TTL
+	// is available. Higher layers (presence) decide their own record TTL
+	// and pass it through Config / API.
+	DefaultStoreTTL = 90 * time.Second
 )
 
 // PacketHandler is invoked for inbound packets whose type is not consumed
@@ -176,7 +180,7 @@ func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
 		n.deliver(m.Header.TxID, m)
 	case *StoreMsg:
 		n.refreshContact(m.Header, pkt.From)
-		n.store.Put(m.Key, m.Value, DefaultPresenceTTL)
+		n.store.Put(m.Key, m.Value, DefaultStoreTTL)
 		_ = n.sendMsg(ctx, pkt.From, &StoreOKMsg{Header: n.replyHeader(m.Header.TxID)})
 	case *StoreOKMsg:
 		n.refreshContact(m.Header, pkt.From)
@@ -344,10 +348,12 @@ func (n *Node) wait(ctx context.Context, ch <-chan any, timeout time.Duration) e
 }
 
 func (n *Node) waitFor(ctx context.Context, ch <-chan any, timeout time.Duration) (any, error) {
+	t := time.NewTimer(timeout)
+	defer t.Stop()
 	select {
 	case msg := <-ch:
 		return msg, nil
-	case <-time.After(timeout):
+	case <-t.C:
 		return nil, errRequestTimeout
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -389,7 +395,7 @@ func (n *Node) PutValue(ctx context.Context, key NodeID, value []byte) error {
 	}
 	if len(closest) == 0 {
 		// Single-node network: store locally and call it a day.
-		n.store.Put(key, value, DefaultPresenceTTL)
+		n.store.Put(key, value, DefaultStoreTTL)
 		return nil
 	}
 	var wg sync.WaitGroup
@@ -407,7 +413,7 @@ func (n *Node) PutValue(ctx context.Context, key NodeID, value []byte) error {
 	}
 	wg.Wait()
 	// Always cache locally too.
-	n.store.Put(key, value, DefaultPresenceTTL)
+	n.store.Put(key, value, DefaultStoreTTL)
 	for _, e := range errs {
 		if e == nil {
 			return nil // any one success is enough
@@ -498,7 +504,7 @@ func (n *Node) iterativeFindValue(ctx context.Context, key NodeID) ([]byte, []Co
 	contacts, err := n.iterativeFind(ctx, key, true, &found)
 	if found != nil {
 		// Cache the value locally for the rest of its TTL so re-lookups are cheap.
-		n.store.Put(key, found, DefaultPresenceTTL)
+		n.store.Put(key, found, DefaultStoreTTL)
 		return found, nil, nil
 	}
 	return nil, contacts, err

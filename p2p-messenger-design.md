@@ -212,7 +212,7 @@ TTL   = 60-120 секунд
 
 **Параметры Kademlia:**
 - K-bucket size: 20.
-- ID space: 256 бит (хеш destination).
+- ID space: 128 бит (destination hash = первые 16 байт SHA-256 от `ed_pub‖x_pub`, см. §3).
 - Replication factor: K (presence-запись хранится на K ближайших узлах).
 
 ### Защита от Sybil — S/Kademlia
@@ -519,7 +519,7 @@ WebRTC использует свой UDP внутри pion — мы не упр�
 | 4 | Signaling channel (`pkg/noise`, `pkg/signaling`) | ~2 нед |
 | 5 | STUN/TURN volunteers (`pkg/stun`, `pkg/turn`) | ~1 нед |
 | 6 | WebRTC session (`pkg/webrtc`) | ~2 нед |
-| 7 | Chat application (`internal/chat`, `internal/contacts`, `internal/storage`, `internal/ui`) | ~3-4 нед |
+| 7 | Chat application (`internal/chat`, `internal/storage`, `internal/messenger`, `internal/network`, `internal/httpui`) — v2: drop fyne, browser owns WebRTC | ~3-4 нед |
 | 8 | Hardening & MVP release | ~2 нед |
 
 ---
@@ -541,11 +541,14 @@ WebRTC использует свой UDP внутри pion — мы не упр�
 
 ## 13. Открытые вопросы (на будущее)
 
-- Wire format для signaling-сообщений (protobuf / CBOR / своё бинарное) — решение в фазе 4.
-- UI-библиотека (`bubbletea` / `tview` / plain stdin) — фаза 7.
-- SQLite driver — `modernc.org/sqlite` (pure Go) vs `mattn/go-sqlite3` (CGO) — фаза 7.
-- Конкретные параметры PoW в S/Kademlia — фаза 3.
-- Стратегия выбора disjoint paths — фаза 3.
+Решённые в ходе реализации:
+- ✅ Wire format для signaling — кастомный uvarint-prefixed binary (`pkg/wire`), решение Phase 4 / decisions log 2026-05-01.
+- ✅ UI-библиотека — изначально fyne, в v2 (2026-05-02) переделано на browser UI поверх HTTP+SSE.
+- ✅ SQLite driver — `modernc.org/sqlite` (pure Go).
+
+Открыты:
+- Конкретные параметры PoW в S/Kademlia — Phase 3 deferred, hardening pass.
+- Стратегия выбора disjoint paths — Phase 3 deferred.
 - Push-уведомления для mobile (если делать).
 - Onion routing для signaling traffic-analysis resistance — post-MVP.
 - Механизм синхронизации между устройствами одного пользователя — post-MVP.

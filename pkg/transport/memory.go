@@ -35,10 +35,18 @@ func (a MemoryAddr) Network() string { return "mem" }
 func (a MemoryAddr) String() string { return "mem:" + a.id }
 
 // MemoryTransport is a Transport backed by a MemoryHub.
+//
+// `in` is the multi-producer fan-in chan (any peer transport sends to it
+// via Send). It is **never closed** — multiple writers cannot all be made
+// to stop sending atomically with a close, so closing would race with
+// in-flight Sends and panic. Instead, Close signals via `closed` and the
+// forwarder drains `in` then closes `out` so external Inbox consumers get
+// the standard "channel closed" exit.
 type MemoryTransport struct {
 	hub  *MemoryHub
 	addr MemoryAddr
 	in   chan Packet
+	out  chan Packet
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -58,12 +66,32 @@ func (h *MemoryHub) NewNamedMemoryTransport(id string) *MemoryTransport {
 		hub:    h,
 		addr:   MemoryAddr{id: id},
 		in:     make(chan Packet, 256),
+		out:    make(chan Packet, 256),
 		closed: make(chan struct{}),
 	}
+	go t.forward()
 	h.mu.Lock()
 	h.peers[id] = t
 	h.mu.Unlock()
 	return t
+}
+
+// forward proxies in→out and is the single closer of out, so external
+// Inbox consumers see a normal channel-close on shutdown.
+func (t *MemoryTransport) forward() {
+	defer close(t.out)
+	for {
+		select {
+		case <-t.closed:
+			return
+		case pkt := <-t.in:
+			select {
+			case t.out <- pkt:
+			case <-t.closed:
+				return
+			}
+		}
+	}
 }
 
 // LocalAddr returns the transport's MemoryAddr.
@@ -110,16 +138,18 @@ func (t *MemoryTransport) Send(ctx context.Context, to net.Addr, payload []byte)
 }
 
 // Inbox delivers received packets.
-func (t *MemoryTransport) Inbox() <-chan Packet { return t.in }
+func (t *MemoryTransport) Inbox() <-chan Packet { return t.out }
 
-// Close removes the transport from the hub and closes the inbox.
+// Close removes the transport from the hub and signals the forwarder.
+// `t.in` is intentionally NOT closed: it has multiple producers (other
+// transports' Send calls), and a receiver-side close would race with
+// in-flight sends and panic. Senders detect shutdown via `t.closed`.
 func (t *MemoryTransport) Close() error {
 	t.closeOnce.Do(func() {
 		t.hub.mu.Lock()
 		delete(t.hub.peers, t.addr.id)
 		t.hub.mu.Unlock()
 		close(t.closed)
-		close(t.in)
 	})
 	return nil
 }

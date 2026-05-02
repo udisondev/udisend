@@ -36,7 +36,6 @@ import (
 	"github.com/udisondev/udisend/pkg/presence"
 	"github.com/udisondev/udisend/pkg/signaling"
 	"github.com/udisondev/udisend/pkg/transport"
-	uwebrtc "github.com/udisondev/udisend/pkg/webrtc"
 )
 
 // Config configures Open.
@@ -81,7 +80,7 @@ func Open(ctx context.Context, cfg Config) (*Messenger, error) {
 		cfg.Listen = "127.0.0.1:0"
 	}
 	if cfg.PresenceTTL == 0 {
-		cfg.PresenceTTL = dht.DefaultPresenceTTL
+		cfg.PresenceTTL = presence.DefaultRecordTTL
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -182,15 +181,13 @@ func (m *Messenger) SetIncomingHandler(fn func(*Session)) {
 func (m *Messenger) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 
-	wg.Add(1)
-	go func() { defer wg.Done(); m.node.Run(ctx) }()
+	wg.Go(func() { m.node.Run(ctx) })
 
 	if len(m.cfg.Bootstrap) > 0 {
 		m.bootstrapAll(ctx)
 	}
 
-	wg.Add(1)
-	go func() { defer wg.Done(); m.publisher.Run(ctx) }()
+	wg.Go(func() { m.publisher.Run(ctx) })
 
 	<-ctx.Done()
 	wg.Wait()
@@ -202,10 +199,7 @@ func (m *Messenger) Run(ctx context.Context) {
 func (m *Messenger) bootstrapAll(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, addr := range m.cfg.Bootstrap {
-		addr := addr
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			netAddr, err := m.transport.Dial(addr)
 			if err != nil {
 				m.cfg.Logger.Warn("messenger: bootstrap parse", "addr", addr, "err", err)
@@ -218,7 +212,7 @@ func (m *Messenger) bootstrapAll(ctx context.Context) {
 			} else {
 				m.cfg.Logger.Info("messenger: bootstrap ok", "addr", addr)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -325,11 +319,8 @@ func (m *Messenger) lookupPeerPublic(ctx context.Context, peer identity.Hash) (i
 // sessionIDFromChannel returns the canonical hex form of the channel's
 // signaling.SessionID — the UI uses this string as a stable handle.
 func sessionIDFromChannel(ch *signaling.Channel) string {
-	// signaling.Channel does not expose the SessionID directly; we fabricate
-	// one from the peer hash + connection nonce. The UI doesn't need the
-	// real one for any cryptographic property — it just needs a stable
-	// string to correlate with its RTCPeerConnection.
-	return hex.EncodeToString(append([]byte(ch.Peer().String()), []byte(time.Now().UTC().Format(time.RFC3339Nano))...))
+	sid := ch.SessionID()
+	return hex.EncodeToString(sid[:])
 }
 
 // nodeAdapter / resolverDelegate identical to v1.
@@ -348,10 +339,6 @@ type resolverDelegate struct{ m *Messenger }
 func (r *resolverDelegate) Lookup(ctx context.Context, peer identity.Hash) (*presence.Record, error) {
 	return r.m.resolver.Lookup(ctx, peer)
 }
-
-// Touch the uwebrtc import so go vet doesn't complain when the
-// SignedSDP types live there but are referenced only from session.go.
-var _ = uwebrtc.SDPTypeOffer
 
 // Errors surfaced to UI callers.
 var (

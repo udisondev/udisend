@@ -22,7 +22,7 @@
 - [ ] Phase 4 — Signaling channel
 - [ ] Phase 5 — STUN/TURN volunteers
 - [ ] Phase 6 — WebRTC session
-- [ ] Phase 7 — Chat application + fyne UI
+- [ ] Phase 7 — Chat application (v2: browser UI поверх HTTP+SSE; fyne dropped 2026-05-02)
 
 ## Известные технические долги (overnight-deferred)
 

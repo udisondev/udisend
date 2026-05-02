@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -111,9 +112,11 @@ func (t *UDPTransport) recvLoop() {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			// Transient errors (e.g. connection refused on Linux for a
-			// previous Send) — log and continue. We don't have a logger
-			// in this package; drop silently.
+			// Transient errors (e.g. ICMP "port unreachable" on Linux for a
+			// previous Send) — log at Debug and continue. Sleep briefly so a
+			// repeating fault does not pin a CPU core.
+			slog.Default().Debug("transport: udp read", "err", err)
+			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 		payload := make([]byte, n)

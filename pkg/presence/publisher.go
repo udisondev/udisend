@@ -10,6 +10,10 @@ import (
 	"github.com/udisondev/udisend/pkg/identity"
 )
 
+// DefaultRecordTTL is the default validity window for a published presence
+// record. Publishers re-sign and re-publish every Refresh (default TTL/2).
+const DefaultRecordTTL = 90 * time.Second
+
 // DHT is the subset of *dht.Node used by the publisher / resolver. Defined
 // as an interface so tests can substitute a fake.
 type DHT interface {
@@ -42,7 +46,7 @@ type PublisherConfig struct {
 // NewPublisher returns a Publisher ready to be Run.
 func NewPublisher(cfg PublisherConfig) *Publisher {
 	if cfg.TTL == 0 {
-		cfg.TTL = dht.DefaultPresenceTTL
+		cfg.TTL = DefaultRecordTTL
 	}
 	if cfg.Refresh == 0 {
 		cfg.Refresh = cfg.TTL / 2

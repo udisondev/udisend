@@ -4,12 +4,77 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/udisondev/udisend/internal/storage"
 	"github.com/udisondev/udisend/pkg/identity"
 	"github.com/udisondev/udisend/pkg/presence"
 )
+
+// ICEServer is the JSON-friendly form of an ICE server entry passed to
+// the browser's RTCPeerConnection configuration.
+type ICEServer struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
+}
+
+// ICEServers discovers volunteer STUN/TURN servers from the local routing
+// table by resolving each known contact's presence record and filtering
+// by Capability bits. Best-effort: peers that fail to resolve within
+// `lookupTTL` are skipped silently. TURN entries are emitted only if a
+// shared secret is known to this messenger (currently never — TURN auth
+// is bridged through cmd/network's --turn-secret flag).
+//
+// design.md §6: "Перед инициированием звонка/линка клиент делает DHT
+// lookup узлов с capability CanSTUN/CanTURN. Выбирает 3-5 узлов и
+// передаёт их адреса в webrtc.Configuration.ICEServers."
+func (m *Messenger) ICEServers(ctx context.Context) []ICEServer {
+	const (
+		lookupTTL = 1500 * time.Millisecond
+		maxServers = 5
+	)
+	contacts := m.node.Table().All()
+	if len(contacts) == 0 {
+		return nil
+	}
+
+	type result struct {
+		urls []string
+	}
+	results := make(chan result, len(contacts))
+	var wg sync.WaitGroup
+	for _, c := range contacts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rctx, cancel := context.WithTimeout(ctx, lookupTTL)
+			defer cancel()
+			rec, err := m.resolver.Lookup(rctx, c.ID)
+			if err != nil || rec == nil {
+				return
+			}
+			r := result{}
+			if rec.Capabilities.Has(presence.CapCanSTUN) {
+				r.urls = append(r.urls, "stun:"+rec.Address)
+			}
+			if len(r.urls) > 0 {
+				results <- r
+			}
+		}()
+	}
+	go func() { wg.Wait(); close(results) }()
+
+	var out []ICEServer
+	for r := range results {
+		out = append(out, ICEServer{URLs: r.urls})
+		if len(out) >= maxServers {
+			break
+		}
+	}
+	return out
+}
 
 // AddContact registers a peer in the local TOFU store. The peer's public
 // identity is fetched via presence; the contact's verified flag stays
@@ -24,6 +89,7 @@ func (m *Messenger) AddContact(ctx context.Context, hash identity.Hash, alias st
 	if err != nil {
 		return err
 	}
+
 	c := storage.Contact{
 		Hash:        hash,
 		Public:      rec.Public,
@@ -31,6 +97,7 @@ func (m *Messenger) AddContact(ctx context.Context, hash identity.Hash, alias st
 		Fingerprint: rec.Public.Fingerprint(),
 		AddedAt:     time.Now().UTC(),
 	}
+
 	return m.storage.UpsertContact(ctx, c)
 }
 
@@ -41,6 +108,7 @@ var ErrPeerOffline = errors.New("peer not visible on the network: their messenge
 func (m *Messenger) resolveWithRetry(ctx context.Context, hash identity.Hash) (*presence.Record, error) {
 	const attempts = 4
 	const delay = 800 * time.Millisecond
+
 	var lastErr error
 	for i := range attempts {
 		attemptCtx, cancel := context.WithTimeout(ctx, 4*time.Second)

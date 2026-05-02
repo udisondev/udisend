@@ -188,16 +188,21 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 			Verified:    c.Verified,
 		})
 	}
+	iceCtx, iceCancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer iceCancel()
+	ice := s.mngr.ICEServers(iceCtx)
 	resp := struct {
-		Identity identityView  `json:"identity"`
-		Contacts []contactView `json:"contacts"`
+		Identity   identityView           `json:"identity"`
+		Contacts   []contactView          `json:"contacts"`
+		ICEServers []messenger.ICEServer  `json:"ice_servers"`
 	}{
 		Identity: identityView{
 			Hash:        s.mngr.Identity().Public().DestinationHash().String(),
 			Fingerprint: s.mngr.Identity().Public().Fingerprint(),
 			Address:     s.mngr.LocalAddress(),
 		},
-		Contacts: cv,
+		Contacts:   cv,
+		ICEServers: ice,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

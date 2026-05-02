@@ -1,10 +1,10 @@
 // Package storage is the SQLite layer for the messenger client. It owns
 // contacts (TOFU + verification), message history and the outbox. Pure-Go
-// driver (modernc.org/sqlite) so the messenger binary stays CGO-free apart
-// from fyne.
+// driver (modernc.org/sqlite) keeps the messenger binary CGO-free.
 package storage
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	_ "embed"
@@ -75,7 +75,7 @@ func (s *Store) UpsertContact(ctx context.Context, c Contact) error {
 	}
 	// Existing — fingerprint check.
 	xSlice := c.Public.XPub
-	if !bytesEqual(existingEd, []byte(c.Public.EdPub)) || !bytesEqual(existingX, xSlice[:]) {
+	if !bytes.Equal(existingEd, []byte(c.Public.EdPub)) || !bytes.Equal(existingX, xSlice[:]) {
 		return ErrFingerprintChanged
 	}
 	_, err = s.db.ExecContext(ctx, `
@@ -315,14 +315,3 @@ func boolInt(b bool) int {
 	return 0
 }
 
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}

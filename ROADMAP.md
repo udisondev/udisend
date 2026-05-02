@@ -238,24 +238,24 @@
 - `pkg/webrtc` — обёртка над `pion/webrtc/v4`: PeerConnection lifecycle, SDP exchange через signaling, DataChannel API, ICE candidate exchange.
 
 ### Tasks
-- [x] `pkg/webrtc/session.go` — Session с PeerConnection, DataChannel, OnTrack handler, Initiator/Responder roles.
+- [❌] ~~`pkg/webrtc/session.go` — Session с PeerConnection, DataChannel, OnTrack handler, Initiator/Responder roles.~~ — **CANCELLED in v2** (commit `375afb5`): WebRTC переехал в браузер, Go больше не держит PeerConnection. Файл удалён. См. decisions log 2026-05-02.
 - [x] `pkg/webrtc/signed_sdp.go` — SignedSDP envelope (kind+sdp+ed25519 sig), Sign/Verify/Marshal.
-- [x] Vanilla ICE: ждём GatheringCompletePromise, затем кидаем целиком offer/answer (включая ICE candidates) — отдельный candidate-trickling не нужен.
-- [x] ICE servers через `Config.ICEServers` (формируется из presence на уровне приложения).
-- [x] DataChannel reliable+ordered (default).
-- [ ] 🌙 DTLS-fingerprint runtime cross-validation — `[OVERNIGHT-DEFERRED]` (pion v4 не выставляет post-DTLS fingerprint в публичном API).
+- [❌] ~~Vanilla ICE: ждём GatheringCompletePromise…~~ — теперь в браузере (нативный `RTCPeerConnection`); Go только ферри SignedSDP.
+- [x] ICE servers через presence (формируется на уровне приложения и пробрасывается в браузер; интеграция — см. отдельная задача в плане доработки).
+- [❌] ~~DataChannel reliable+ordered (default).~~ — браузерный DataChannel.
+- [ ] 🌙 DTLS-fingerprint runtime cross-validation — `[OVERNIGHT-DEFERRED]` (pion v4 не выставляет post-DTLS fingerprint в публичном API; в v2 — задача браузерной стороны).
 - [x] **Tests:**
   - [x] Unit: SignedSDP roundtrip + sign/verify happy + tamper-detect.
-  - [x] Integration: 2 пира через memory transport + signaling Service устанавливают WebRTC, обмениваются "hello over webrtc".
+  - [❌] ~~Integration: 2 пира через memory transport + signaling Service устанавливают WebRTC, обмениваются "hello over webrtc".~~ — тест жил в `pkg/webrtc/session_test.go`, удалён вместе с `session.go`.
   - [ ] 🌙 DTLS fingerprint mismatch detected — `[OVERNIGHT-DEFERRED]`.
   - [ ] 🌙 Cross-NAT (через TURN volunteer) — `[OVERNIGHT-DEFERRED]`.
 
 ### Acceptance criteria
-- [x] WebRTC PeerConnection устанавливается между двумя инстансами через memory signaling (test).
-- [x] DataChannel ready для bidirectional bytes.
+- [❌] ~~WebRTC PeerConnection устанавливается между двумя инстансами через memory signaling (test).~~ — invalidated by v2 cut (нет Go-теста, реальная установка проверяется в браузере; e2e-проверка отложена в Phase 7).
+- [❌] ~~DataChannel ready для bidirectional bytes.~~ — invalidated by v2 cut.
 - [x] SDP signature tamper detected.
 - [ ] 🌙 DTLS-fingerprint mismatch detected — `[OVERNIGHT-DEFERRED]`.
-- [x] ICE servers формируются из presence (механизм есть; интеграция — Phase 7).
+- [ ] ⏳ ICE servers формируются из presence — **частично**: механизм бит'ов есть в `pkg/presence`, но lookup CapCanSTUN/CapCanTURN и проброс в браузер не реализованы (см. план «volunteer ICE discovery»).
 
 ---
 
@@ -265,40 +265,41 @@
 
 **Deliverable:** `cmd/messenger` запускает CLI клиент. Два пользователя на разных машинах могут общаться полным набором фич.
 
-### Packages
-- `internal/chat` — application protocol (типы сообщений, framing, ACK).
-- `internal/contacts` — контакты, TOFU store, fingerprint verification.
-- `internal/storage` — SQLite layer для истории, контактов, outbox.
-- `internal/ui` — desktop GUI на `fyne.io/fyne/v2` (см. decisions log 2026-05-01).
-- `internal/messenger` — сборка messenger клиента.
-- `internal/network` — сборка network-узла.
+### Packages (v2-актуально)
+- `internal/chat` — application-protocol типы и kinds (фактически используется только в браузере, в Go — рудимент v1).
+- `internal/storage` — SQLite layer (контакты + TOFU + история + outbox); contacts-логика живёт здесь, отдельного `internal/contacts` нет.
+- `internal/httpui` — HTTP+SSE bridge между Go-runtime и браузером (REST API + EventSource); появился в v2 вместо `internal/ui` (fyne).
+- `internal/messenger` — Go-runtime: identity, DHT, presence, signaling.Service, storage; **chat/file/call логика теперь в браузере**, не в Go.
+- `internal/network` — сборка network-узла (DHT + presence-publisher + опциональные STUN/TURN).
 - `internal/config` — конфиг загрузка для обоих бинарей.
+- ~~`internal/ui`~~ — **удалён в v2**, см. decisions log 2026-05-02.
+- ~~`internal/contacts`~~ — не создавался, контакт-логика осталась в `internal/storage` + `internal/messenger/api.go`.
 
 ### Tasks
-- [ ] **Решить SQLite driver** (`modernc.org/sqlite` vs `mattn/go-sqlite3`).
-- [x] ~~**Решить UI library**~~ — `fyne.io/fyne/v2` (см. decisions log 2026-05-01).
 - [x] ~~**SQLite driver**~~ — `modernc.org/sqlite` (pure Go).
-- [x] `internal/storage/schema.sql` + `internal/storage/store.go` — contacts (TOFU detect ErrFingerprintChanged), messages history, outbox.
+- [❌] ~~**UI library = fyne.io/fyne/v2**~~ — отменено в v2 (decisions log 2026-05-02). Заменено браузерным UI поверх HTTP+SSE.
+- [x] `internal/storage/schema.sql` + `internal/storage/store.go` — contacts (TOFU detect ErrFingerprintChanged), messages history, outbox CRUD.
 - [x] `internal/chat/protocol.go` — Message + Kind* (text/file/ack/call/typing/presence) + FileOffer/Chunk/End/Ack codecs + FuzzDecodeMessage.
-- [x] `internal/messenger/messenger.go|sessions.go|api.go` — Open/Run/Close, AddContact, VerifyContact, SendText, SendFile (chunked), StartCall/Accept/Reject/End, ensureSession (auto-establish webrtc через signaling), incoming-file assembly + sha256 verify, outbox flush loop.
-- [x] `internal/network/network.go` — Open/Run, DHT + signaling relay + presence publisher, опциональные STUN/TURN при `--public-ip`.
+- [⚠️] `internal/messenger/messenger.go|session.go|api.go` — Open/Run/Close, AddContact, VerifyContact, signaling.Channel-обёртка через `Session`, lookup peer pubkey. **Чего НЕТ в Go (по дизайну v2):** SendText, SendFile (chunked), StartCall/Accept/Reject/End, ensureSession, incoming-file assembly + sha256 verify, outbox flush loop — всё это в браузерной стороне. См. ASSUMPTIONS.md «Что теперь делает Go».
+- [x] `internal/network/network.go` — Open/Run, DHT + presence publisher, опциональные STUN/TURN при `--public-ip`. **Hop-by-hop signaling relay не реализован** (envelope с recipient ≠ self отбрасывается); заявленная роль relay-узла пока не выполняется. См. план доработки.
 - [x] `internal/config/identity.go` — LoadOrCreateIdentity (seed file, mode 0600).
-- [x] `internal/ui/app.go` — fyne GUI: contacts list (presence dot), Add/Verify, history view, send/file/call buttons, status bar.
+- [x] `internal/httpui` — HTTP+SSE bridge: REST API (`/api/snapshot`, `/api/contacts/*`, `/api/history`, `/api/session/*`, `/api/signal/send`) + EventSource для server→browser push, bearer-token auth. Заменяет ушедший `internal/ui`.
 - [x] `cmd/network/main.go` — флаги + `internal/network.Open/Run`.
-- [x] `cmd/messenger/main.go` — флаги + `internal/messenger.Open/Run` + `internal/ui.Run`.
-- [x] **Tests:**
+- [x] `cmd/messenger/main.go` — флаги + `internal/messenger.Open/Run` + `internal/httpui.Server.Run` (не `internal/ui.Run` как в v1).
+- [⚠️] **Tests:**
   - [x] Unit: chat framing roundtrip + tampered + fuzz; storage CRUD + ErrFingerprintChanged.
-  - [x] Integration (`//go:build integration`): network-node + 2 messengers через UDP loopback → AddContact via presence → SendText → received.
-  - [ ] 🌙 E2E полный сценарий (file + call + offline + outbox flush) — `[OVERNIGHT-DEFERRED]` (текст-флоу прошёл, остальное — добавить тесты).
+  - [⚠️] Integration: один integration test в `internal/httpui/server_test.go` (без build-tag) — два messenger'а через signaling pipe + AddContact + signal send. **`//go:build integration` build-tag не используется**, integration-тесты идут наравне с unit-тестами через `go test ./...`.
+  - [ ] 🌙 E2E полный сценарий (file + call + offline + outbox flush) — `[OVERNIGHT-DEFERRED]` (текст-флоу прошёл в integration-тесте httpui; остальное — следующая итерация).
+  - [ ] ⏳ Smoke/unit тесты для `internal/messenger`, `internal/network`, `internal/config` — отсутствуют; см. план доработки.
 
 ### Acceptance criteria
-- [x] Два messenger'а на одной машине через network-узел устанавливают сессию (integration test).
-- [x] Обмен текстом end-to-end (integration test).
-- [x] File transfer infrastructure: offer + chunks + end + sha256 verify (mechanism готов; полный E2E тест на больших файлах — `[OVERNIGHT-DEFERRED]`).
-- [ ] 🌙 Аудио/видео-звонок с реальным media playback — `[OVERNIGHT-DEFERRED]` (call signaling реализован; capture + render — следующая итерация. См. ASSUMPTIONS.md).
+- [x] Два messenger'а через signaling pipe устанавливают сессию (`internal/httpui/server_test.go`).
+- [⚠️] Обмен текстом end-to-end — текст идёт через браузерный DataChannel; Go-сторона тестирует только подъём signaling-канала. Полноценный e2e теста с двумя браузерами и DataChannel — отсутствует.
+- [⚠️] File transfer — реализован в JS-стороне над DataChannel (offer + chunks + sha256 verify); Go хранит только storage-метаданные. `internal/chat/protocol.go` определяет Go-формат, но в реальном data path не используется.
+- [x] Аудио/видео-звонок с реальным media playback — **работает в браузере** (нативный `RTCPeerConnection` + `getUserMedia`, см. ASSUMPTIONS.md «Видео-звонки — теперь работают из коробки»). v1-acceptance, помеченный 🌙, в v2 закрыт.
 - [x] TOFU: storage.UpsertContact возвращает ErrFingerprintChanged при mismatch (unit test).
-- [x] Outbox: `AddOutboxItem` + `flushOutboxFor` срабатывает при ensureSession (механизм есть, e2e regression test — `[OVERNIGHT-DEFERRED]`).
-- [ ] 🌙 NAT-traversal через TURN volunteer — `[OVERNIGHT-DEFERRED]`.
+- [⚠️] Outbox: storage CRUD есть (`QueueOutbox`/`PendingOutbox`/`AcknowledgeOutbox`); **активного flush pump'а в Go нет** — концепция §9 требует periodic check + flush at PeerOnline. См. план доработки.
+- [ ] 🌙 NAT-traversal через TURN volunteer — `[OVERNIGHT-DEFERRED]`. Сейчас в браузерном `app.js` зашит публичный Google STUN; volunteer-pickup из presence — план доработки.
 
 ---
 
@@ -329,7 +330,7 @@
 
 ### What ships overnight
 
-- **Runnable MVP:** `cmd/network` + `cmd/messenger` (fyne) собираются и запускаются.
+- **Runnable MVP:** `cmd/network` + `cmd/messenger` (browser UI через HTTP+SSE) собираются и запускаются. Изначально планировался fyne; v2-сдвиг (drop fyne, browser owns WebRTC) — см. decisions log 2026-05-02.
 - **End-to-end текст** через DHT + signaling + WebRTC DataChannel — verified by integration test.
 - **File transfer** — каркас (offer + chunks + sha256 verify) реализован end-to-end в коде; полный E2E regression test отложен.
 - **Call signaling** — invite/accept/reject/end через DataChannel; **media playback (audio/video frames) не реализован** — следующая итерация.
@@ -358,6 +359,10 @@
 - `[2026-05-01] [PHASE 7] DECISION: UI = fyne (fyne.io/fyne/v2), не CLI/TUI.` — RATIONALE: пользователь явно попросил desktop-клиент с fyne для overnight-run. Фаза 7 в части `internal/ui` пересматривается под fyne; bubbletea/tview — снимаются. Trade-off: cgo-зависимость в messenger-бинаре (libgl/xorg-dev на Linux); pure-Go выбор для остального стека (modernc.org/sqlite) сохраняется.
 - `[2026-05-01] [PHASE 4] DECISION: wire format для DHT/signaling — кастомный uvarint-prefixed binary в pkg/wire.` — RATIONALE: одна реализация (Go), нулевые внешние deps на wire layer, простой fuzz-таргет. CBOR/protobuf — будущий рефактор, изолирован одним пакетом.
 - `[2026-05-01] [OVERNIGHT] CONTEXT: unattended overnight run на ветке auto/overnight-mvp.` — пользователь оставил auto-mode, потребовал runnable MVP (cmd/network + cmd/messenger fyne) с text/files/video. Все одиночные решения и cuts документированы в `ASSUMPTIONS.md`. Post-phase 3-iteration ревью пропущено для всех фаз 1–8, чек-лист — в `review/PENDING.md`. Не сделанные пункты ROADMAP помечены `[OVERNIGHT-DEFERRED]`.
+- `[2026-05-02] [PHASE 7] DECISION: drop fyne; WebRTC переезжает в браузер; Go = HTTP+SSE bridge.` — RATIONALE: video-render в fyne требовал кастомного VP8-decode + canvas.Image blit, что не успевало в overnight. Браузерный нативный `RTCPeerConnection` + `<video>` + `getUserMedia` решает это из коробки, плюс убирает 30 MB fyne-зависимостей из messenger-бинаря. Trade-off: пользователь теперь должен открыть URL в браузере; messenger печатает его в логи. Это override решения от 2026-05-01 ("UI = fyne"). Удалены `internal/ui`, `pkg/webrtc/session.go`, `internal/messenger/sessions.go`. Подробнее — ASSUMPTIONS.md §«Главный архитектурный сдвиг (v2)».
+- `[2026-05-02] [PHASE 7] DECISION: HTTP-bridge — SSE + REST вместо WebSocket.` — RATIONALE: runtime-permission-system заблокировал внешний WS-модуль (`nhooyr.io/websocket`). SSE (server→browser) + plain POST (browser→server) — чистый stdlib (`net/http`), ноль новых deps. Для use-case "одна вкладка на messenger" SSE достаточен и проще для дебага (DevTools Network → EventStream).
+- `[2026-05-02] [PHASE 7] DECISION: chat application protocol живёт в браузере, Go только подписывает SDP.` — RATIONALE: всё, что раньше планировалось в `internal/messenger.SendText/SendFile/StartCall`, теперь реализовано на JS поверх браузерного `RTCDataChannel`. Go-сторона выставляет тонкий API (`POST /api/signal/send`, `EventSource /api/events`), оборачивает SDP в `pkg/webrtc.SignedSDP` (Ed25519) и пересылает через `signaling.Channel`. `internal/chat/protocol.go` сохранён как формат, но фактически dead code — браузер использует свой JSON envelope (`internal/httpui/sse.go: envelope`).
+- `[2026-05-02] [PHASES 4–7] RETROSPECTIVE.` — все фазы формально закрыты ✅ в overall-progress, но **post-phase 3-iteration ревью пропущено** (известный overnight cut, см. `review/PENDING.md`). Acceptance criteria Phase 6 ("WebRTC PeerConnection устанавливается через memory signaling", "DataChannel ready") инвалидированы v2-сдвигом — соответствующие тесты удалены вместе с `pkg/webrtc/session.go`. Phase 7 acceptance частично переинтерпретированы под браузерный UI; Go-сторона покрыта только одним integration test'ом в `internal/httpui/server_test.go`.
 
 ---
 

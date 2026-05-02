@@ -45,11 +45,9 @@ func (h *harness) spawn(t *testing.T, seed io.Reader) *peer {
 	ctx, cancel := context.WithCancel(t.Context())
 	p := &peer{node: node, t: mt, id: id, stop: cancel}
 	h.peers = append(h.peers, p)
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
+	h.wg.Go(func() {
 		node.Run(ctx)
-	}()
+	})
 	t.Cleanup(func() {
 		cancel()
 		_ = mt.Close()
