@@ -116,8 +116,12 @@ func TestRelay_HopLimit(t *testing.T) {
 	target, _ := identity.Generate(rand.Reader)
 	targetHash := target.Public().DestinationHash()
 
+	// Route to a black hole — an unregistered MemoryAddr. transport.Send
+	// returns ErrUnknownPeer; no relay loop, just one NextHop call per
+	// forwarded envelope.
+	blackhole, _ := transport.ParseMemoryAddr("mem:blackhole")
 	router := newFakeRouter()
-	router.put(targetHash, relay.t.LocalAddr()) // route to anywhere; we only count calls
+	router.put(targetHash, blackhole)
 	relay.svc.SetRouter(router)
 
 	src := hub.NewMemoryTransport()

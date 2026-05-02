@@ -10,6 +10,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -352,6 +353,51 @@ func (s *Store) SeenPeers(ctx context.Context, limit int) ([]string, error) {
 func (s *Store) ForgetSeenPeer(ctx context.Context, address string) error {
 	_, err := s.db.ExecContext(ctx, "DELETE FROM seen_peers WHERE address = ?", address)
 	return err
+}
+
+// SeenPeersDiverse returns up to `limit` cached bootstrap addresses,
+// preferring diverse /24 IPv4 (and full IPv6) prefixes so the next
+// startup is harder to eclipse with a Sybil cluster colocated in one
+// subnet (design.md §8). Within each prefix the most-recent address
+// wins; prefixes are ordered by their freshest entry's last_seen.
+func (s *Store) SeenPeersDiverse(ctx context.Context, limit int) ([]string, error) {
+	all, err := s.SeenPeers(ctx, 0)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, limit)
+	for _, addr := range all {
+		key := subnetKey(addr)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, addr)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// subnetKey reduces an "ip:port" / "host:port" address to the prefix the
+// diverse-bootstrap filter should treat as a single neighbourhood. For
+// IPv4 — first three octets ("/24"). For IPv6 — first 64 bits ("/64").
+// For non-IP / unparsable addresses the host field itself is used.
+func subnetKey(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return host
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4[0:3].String()
+	}
+	return ip.To16()[0:8].String()
 }
 
 func boolInt(b bool) int {

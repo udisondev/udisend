@@ -1,17 +1,25 @@
 // Package turn provides a thin wrapper around pion/turn/v4 sufficient to
-// run an embedded TURN relay inside a udisend network node. Auth uses
-// long-term-credentials with a shared static realm — adequate for
-// localhost demos but NOT production. See ASSUMPTIONS.md for the
-// hardening checklist (per-IP rate-limit, abuse mitigations).
+// run an embedded TURN relay inside a udisend network node. Auth follows
+// RFC 7635 ephemeral credentials (username = "<expiry-unix>:<user>",
+// password = HMAC-SHA1(secret, username)) and is gated by a per-IP token
+// bucket against abuse.
 package turn
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
+	"time"
 
 	pionturn "github.com/pion/turn/v4"
+
+	"github.com/udisondev/udisend/pkg/ratelimit"
 )
 
 // Realm is the static realm advertised in TURN responses. Clients echo
@@ -36,10 +44,28 @@ type Config struct {
 	ListenAddr string
 
 	// SharedSecret is the static TURN long-term-credentials secret.
-	// Clients derive a username/password from this. For overnight scope
-	// we accept any username paired with HMAC-SHA1(SharedSecret, username).
+	// Clients derive ephemeral credentials from it (username =
+	// "<expiry>:<user>", password = HMAC(secret, username)).
 	SharedSecret string
+
+	// MaxCredentialLifetime caps how far in the future a client may set
+	// its username's expiry timestamp. 24h by default. Older expiries are
+	// rejected outright.
+	MaxCredentialLifetime time.Duration
+
+	// AuthRate / AuthBurst control the per-source-IP token bucket on auth
+	// attempts. Defaults: 5 attempts/sec, burst 10. Zero rate disables
+	// limiting.
+	AuthRate  float64
+	AuthBurst float64
 }
+
+// Defaults — tuned conservative for an MVP volunteer relay.
+const (
+	DefaultMaxCredentialLifetime = 24 * time.Hour
+	DefaultAuthRate              = 5
+	DefaultAuthBurst             = 10
+)
 
 // NewServer binds the TURN listener and registers the auth handler. Call
 // Close to release resources.
@@ -47,27 +73,51 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.PublicIP == "" {
 		return nil, errors.New("turn: PublicIP required")
 	}
+
 	if cfg.ListenAddr == "" {
 		return nil, errors.New("turn: ListenAddr required")
 	}
+
 	if cfg.SharedSecret == "" {
 		return nil, errors.New("turn: SharedSecret required")
 	}
+
 	conn, err := net.ListenPacket("udp4", cfg.ListenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("turn: listen: %w", err)
 	}
+
 	publicIP := net.ParseIP(cfg.PublicIP)
 	if publicIP == nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("turn: invalid public IP %q", cfg.PublicIP)
 	}
 
+	if cfg.MaxCredentialLifetime <= 0 {
+		cfg.MaxCredentialLifetime = DefaultMaxCredentialLifetime
+	}
+	if cfg.AuthRate == 0 {
+		cfg.AuthRate = DefaultAuthRate
+	}
+	if cfg.AuthBurst == 0 {
+		cfg.AuthBurst = DefaultAuthBurst
+	}
+	limiter := ratelimit.New(cfg.AuthRate, cfg.AuthBurst)
+
 	server, err := pionturn.NewServer(pionturn.ServerConfig{
 		Realm: Realm,
-		AuthHandler: func(username, _ string, _ net.Addr) ([]byte, bool) {
-			key := pionturn.GenerateAuthKey(username, Realm, cfg.SharedSecret)
-			return key, true
+		AuthHandler: func(username, realm string, srcAddr net.Addr) ([]byte, bool) {
+			if !limiter.Allow(authKey(srcAddr)) {
+				return nil, false
+			}
+			if realm != "" && realm != Realm {
+				return nil, false
+			}
+			if !validUsername(username, cfg.MaxCredentialLifetime) {
+				return nil, false
+			}
+			password := computePassword(cfg.SharedSecret, username)
+			return pionturn.GenerateAuthKey(username, Realm, password), true
 		},
 		PacketConnConfigs: []pionturn.PacketConnConfig{
 			{
@@ -83,6 +133,7 @@ func NewServer(cfg Config) (*Server, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("turn: server: %w", err)
 	}
+
 	return &Server{server: server, conn: conn}, nil
 }
 
@@ -97,3 +148,60 @@ func (s *Server) Run(ctx context.Context) error {
 
 // Close stops the server.
 func (s *Server) Close() error { return s.server.Close() }
+
+// validUsername parses an RFC 7635-style ephemeral TURN username
+// "<expiry-unix>:<user>" and rejects malformed, expired, or
+// far-future entries (cap = maxLifetime past now).
+func validUsername(username string, maxLifetime time.Duration) bool {
+	colon := strings.IndexByte(username, ':')
+	if colon <= 0 {
+		return false
+	}
+	exp, err := strconv.ParseInt(username[:colon], 10, 64)
+	if err != nil {
+		return false
+	}
+	now := time.Now().Unix()
+	if exp <= now {
+		return false
+	}
+	if exp > now+int64(maxLifetime/time.Second) {
+		return false
+	}
+	return true
+}
+
+// authKey extracts the rate-limit bucket key from a source address.
+func authKey(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	if u, ok := addr.(*net.UDPAddr); ok && u.IP != nil {
+		return u.IP.String()
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return host
+}
+
+// computePassword derives the RFC 7635 ephemeral password
+// (base64(HMAC-SHA1(secret, username))) — same value the client must
+// present and the same value the server uses to derive the auth key.
+func computePassword(secret, username string) string {
+	mac := hmac.New(sha1.New, []byte(secret))
+	mac.Write([]byte(username))
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// EphemeralCredential builds the username/password pair a TURN client
+// should present given the shared secret and a desired expiry. The
+// password is the base64-encoded HMAC-SHA1; the client passes it as the
+// raw `Password` string, and pion will internally key-derive it the
+// same way the server does in AuthHandler.
+func EphemeralCredential(secret, user string, expiry time.Time) (username, password string) {
+	username = fmt.Sprintf("%d:%s", expiry.Unix(), user)
+	password = computePassword(secret, username)
+	return
+}

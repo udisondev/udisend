@@ -119,9 +119,11 @@ func Open(ctx context.Context, cfg Config) (*Messenger, error) {
 		return nil, err
 	}
 
-	// design.md §7: if no CLI --bootstrap, seed from previously-seen peers.
+	// design.md §7-8: if no CLI --bootstrap, seed from previously-seen
+	// peers — preferring subnet-diverse entries so a Sybil cluster
+	// colocated in one /24 cannot eclipse our routing-table from cache.
 	if len(cfg.Bootstrap) == 0 {
-		if cached, err := store.SeenPeers(ctx, 50); err == nil && len(cached) > 0 {
+		if cached, err := store.SeenPeersDiverse(ctx, 50); err == nil && len(cached) > 0 {
 			cfg.Bootstrap = cached
 			cfg.Logger.Info("messenger: bootstrap from cache", "n", len(cached))
 		}

@@ -1,0 +1,102 @@
+// Package ratelimit provides a tiny per-key token-bucket limiter used by
+// DHT and signaling layers to dampen DoS storms (design.md §8). One
+// bucket per "key" (typically a source IP); each Allow consumes a token
+// or returns false. Buckets refill at `rate` tokens per second and cap
+// at `burst`. Idle keys older than 5 minutes are forgotten so attackers
+// can't grow the map without bound.
+package ratelimit
+
+import (
+	"sync"
+	"time"
+)
+
+// Limiter is a token-bucket per key with periodic GC of idle entries.
+// Safe for concurrent use.
+type Limiter struct {
+	rate  float64       // tokens per second
+	burst float64       // max bucket capacity
+	idle  time.Duration // forget keys idle longer than this
+
+	mu      sync.Mutex
+	buckets map[string]*bucket
+	clock   func() time.Time
+}
+
+type bucket struct {
+	tokens   float64
+	lastSeen time.Time
+}
+
+// New returns a Limiter with the given refill rate and burst capacity.
+// rate <= 0 disables limiting (Allow always returns true). burst < 1 is
+// rounded up to 1.
+func New(rate, burst float64) *Limiter {
+	return NewWithClock(rate, burst, time.Now)
+}
+
+// NewWithClock is New with an injected clock for deterministic tests.
+func NewWithClock(rate, burst float64, clock func() time.Time) *Limiter {
+	if burst < 1 {
+		burst = 1
+	}
+	if clock == nil {
+		clock = time.Now
+	}
+	return &Limiter{
+		rate:    rate,
+		burst:   burst,
+		idle:    5 * time.Minute,
+		buckets: make(map[string]*bucket),
+		clock:   clock,
+	}
+}
+
+// Allow consumes one token for `key` and returns true if available. With
+// a non-positive rate it always returns true.
+func (l *Limiter) Allow(key string) bool {
+	if l == nil || l.rate <= 0 {
+		return true
+	}
+	now := l.clock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b, ok := l.buckets[key]
+	if !ok {
+		b = &bucket{tokens: l.burst, lastSeen: now}
+		l.buckets[key] = b
+	}
+	elapsed := now.Sub(b.lastSeen).Seconds()
+	if elapsed > 0 {
+		b.tokens += elapsed * l.rate
+		if b.tokens > l.burst {
+			b.tokens = l.burst
+		}
+	}
+	b.lastSeen = now
+	if b.tokens < 1 {
+		l.gc(now)
+		return false
+	}
+	b.tokens--
+	l.gc(now)
+	return true
+}
+
+// gc removes buckets that have been idle longer than l.idle. Caller must
+// hold l.mu. Cheap because it runs at most once per Allow.
+func (l *Limiter) gc(now time.Time) {
+	cutoff := now.Add(-l.idle)
+	for k, b := range l.buckets {
+		if b.lastSeen.Before(cutoff) {
+			delete(l.buckets, k)
+		}
+	}
+}
+
+// Size reports how many keys have an active bucket — useful for tests.
+func (l *Limiter) Size() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.buckets)
+}

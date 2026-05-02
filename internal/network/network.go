@@ -74,7 +74,8 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 		Logger:    cfg.Logger,
 	})
 
-	dhtNode := dht.NewNode(cfg.Identity, tr, nil, dht.Config{
+	store := presence.NewRateLimitedStore(dht.NewMemoryStore(nil))
+	dhtNode := dht.NewNode(cfg.Identity, tr, store, dht.Config{
 		Logger:       cfg.Logger,
 		ExtraHandler: signalSvc.HandlePacket,
 	})

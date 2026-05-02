@@ -55,12 +55,22 @@ func (c Capability) String() string {
 }
 
 // Record is a single presence advertisement, signed by the publisher.
+//
+// UptimeHint is a hint to clients about the publisher's continuous
+// uptime in seconds; used by ICE-server selection (design.md §5/§6) to
+// prefer stable volunteers. Advisory only — the publisher is trusted to
+// report honestly; clients should bound expectations.
+//
+// MaxRelaySlots advertises how many concurrent signaling-relay sessions
+// the publisher is willing to serve. 0 means "unlimited / not advertised".
 type Record struct {
-	Public       identity.PublicIdentity
-	Address      string
-	Capabilities Capability
-	IssuedAt     time.Time
-	Signature    identity.Signature
+	Public        identity.PublicIdentity
+	Address       string
+	Capabilities  Capability
+	IssuedAt      time.Time
+	UptimeHint    uint32
+	MaxRelaySlots uint16
+	Signature     identity.Signature
 }
 
 // Errors returned by the package.
@@ -71,7 +81,13 @@ var (
 	ErrIdentityMismatch = errors.New("presence: pubkey/destination mismatch")
 )
 
-const recordVersion byte = 0x01
+// Wire-format versions. v2 adds UptimeHint (uint32) and MaxRelaySlots
+// (uint16) after Capabilities, both covered by the signature. v1 records
+// are still accepted on decode (UptimeHint/MaxRelaySlots default to 0).
+const (
+	recordVersion   byte = 0x02
+	recordVersionV1 byte = 0x01
+)
 
 // MaxAddressLen caps the serialised address length (defensive; real
 // addresses are tens of bytes).
@@ -122,10 +138,11 @@ func (r *Record) DestinationHash() identity.Hash {
 	return r.Public.DestinationHash()
 }
 
-// MarshalBinary encodes the record in a stable wire format. The layout:
+// MarshalBinary encodes the record in a stable wire format (version 2):
 //
 //	version(1) | pub_identity(65) | address(uvarint|str) |
-//	  capabilities(4) | issued_at_unix(8) | signature(64)
+//	  capabilities(4) | issued_at_unix(8) |
+//	  uptime_hint(4) | max_relay_slots(2) | signature(64)
 func (r *Record) MarshalBinary() ([]byte, error) {
 	if len(r.Address) > MaxAddressLen {
 		return nil, fmt.Errorf("%w: address too long", ErrInvalidRecord)
@@ -140,18 +157,21 @@ func (r *Record) MarshalBinary() ([]byte, error) {
 	w.WriteString(r.Address)
 	w.WriteUint32(uint32(r.Capabilities))
 	w.WriteUint64(uint64(r.IssuedAt.Unix()))
+	w.WriteUint32(r.UptimeHint)
+	w.WriteUint16(r.MaxRelaySlots)
 	w.WriteFixed(r.Signature[:])
 	return w.Bytes(), nil
 }
 
-// UnmarshalBinary parses a Record produced by MarshalBinary.
+// UnmarshalBinary parses a Record produced by MarshalBinary. Both v1 and
+// v2 layouts are accepted; v1 records have UptimeHint/MaxRelaySlots zero.
 func (r *Record) UnmarshalBinary(data []byte) error {
 	b := wire.NewBuffer(data)
 	ver, err := b.ReadUint8()
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
-	if ver != recordVersion {
+	if ver != recordVersion && ver != recordVersionV1 {
 		return fmt.Errorf("%w: version=%d", ErrInvalidRecord, ver)
 	}
 	pubBlob, err := b.ReadFixed(1 + identity.PublicKeySize)
@@ -176,6 +196,18 @@ func (r *Record) UnmarshalBinary(data []byte) error {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
 	r.IssuedAt = time.Unix(int64(ts), 0).UTC()
+	if ver >= recordVersion {
+		uptime, err := b.ReadUint32()
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
+		}
+		r.UptimeHint = uptime
+		slots, err := b.ReadUint16()
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
+		}
+		r.MaxRelaySlots = slots
+	}
 	sig, err := b.ReadFixed(identity.SignatureSize)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
@@ -188,7 +220,8 @@ func (r *Record) UnmarshalBinary(data []byte) error {
 }
 
 // signingBytes returns the bytes covered by the signature (everything
-// except the signature itself).
+// except the signature itself). v2 records cover UptimeHint and
+// MaxRelaySlots so a forwarder cannot tweak them.
 func (r *Record) signingBytes() ([]byte, error) {
 	pub, err := r.Public.MarshalBinary()
 	if err != nil {
@@ -200,5 +233,7 @@ func (r *Record) signingBytes() ([]byte, error) {
 	w.WriteString(r.Address)
 	w.WriteUint32(uint32(r.Capabilities))
 	w.WriteUint64(uint64(r.IssuedAt.Unix()))
+	w.WriteUint32(r.UptimeHint)
+	w.WriteUint16(r.MaxRelaySlots)
 	return w.Bytes(), nil
 }

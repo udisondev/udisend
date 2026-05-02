@@ -162,6 +162,8 @@ WebRTC слой использует свой набор (DTLS 1.3 + AES-GCM и�
 
 В формате полей крипто-материалов есть `algorithm_id`. Сейчас всегда `0x01`. Когда понадобится — выпускается клиент с поддержкой `0x02` (например, post-quantum). Старые клиенты используют `0x01`, новые между собой могут `0x02`.
 
+**Реализация:** в udisend `algorithm_id` представлен через `version`-byte каждого signed wire-format'а — version transparently fixes the crypto suite. Текущие версии: `presence.Record v2`, `signaling.Envelope v2`, `webrtc.SignedSDP v1` → all use suite `0x01` (Ed25519 + X25519 + ChaCha20-Poly1305 + BLAKE2b). Будущая суита получит свой версии-byte; декодеры останутся совместимыми за счёт TLV-расширений (см. §7).
+
 ### Двухуровневая криптография
 
 1. **Signaling layer** — Noise XK end-to-end между двумя пирами по их identity keys. Signaling сообщения проходят через relay-узлы — без шифрования relay'и видели бы SDP.
@@ -177,8 +179,10 @@ WebRTC слой использует свой набор (DTLS 1.3 + AES-GCM и�
 3. A шлёт `signed_offer` через signaling-канал к B (зашифровано Noise XK).
 4. B расшифровывает, проверяет Ed25519-подпись против известного pubkey пира A (TOFU при первом контакте).
 5. B принимает SDP, генерирует свой signed answer тем же путём.
-6. При установке WebRTC-сессии B проверяет, что DTLS-fingerprint, который он видит в реальном handshake, совпадает с fingerprint из подписанного SDP.
-7. Если MITM подменил SDP по пути — fingerprint не совпадёт, сессия рвётся.
+6. Браузерный `RTCPeerConnection` отвергает DTLS handshake, в котором сертификат не совпадает с `a=fingerprint:` в принятом SDP. Поскольку SDP подписан Ed25519 и подпись проверяется ДО `setRemoteDescription`, любая подмена fingerprint по пути ломает Ed25519-подпись и пакет отбрасывается ещё на signaling-стороне.
+7. Если MITM подменил SDP по пути — `signed.Verify(peerPub)` в Go fail’ится, payload не доходит до браузера, сессия не устанавливается.
+
+**Реализация:** связка `pkg/webrtc.SignedSDP.Sign/Verify` (Ed25519 над `kind || sdp`) выполняется в Go перед тем как передать SDP в браузер. Дополнительная пост-DTLS cross-validation через `RTCPeerConnection.getStats()` концептуально возможна и помогла бы как defense-in-depth (catch implementation bugs), но native browser API уже отказывает несовпадающим fingerprint'ам — сценарий «browser принял несовпадающий cert» означает уже компрометированный браузер, против которого приложение не защитит.
 
 Без этого binding signaling-relay смог бы подменить SDP и провести MITM на WebRTC.
 

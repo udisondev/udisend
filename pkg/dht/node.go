@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/udisondev/udisend/pkg/identity"
+	"github.com/udisondev/udisend/pkg/ratelimit"
 	"github.com/udisondev/udisend/pkg/transport"
 	"github.com/udisondev/udisend/pkg/wire"
 )
@@ -44,7 +45,20 @@ type Config struct {
 	// the DHT does not handle natively. Used by pkg/signaling to multiplex
 	// MsgRelay frames over the same socket.
 	ExtraHandler PacketHandler
+	// InboundRate / InboundBurst configure the per-source-IP DoS limiter on
+	// inbound packets (design.md §8). Zero rate disables limiting.
+	InboundRate  float64
+	InboundBurst float64
 }
+
+// DefaultInboundRate / DefaultInboundBurst are conservative caps suitable
+// for a network node serving thousands of clients without paying for
+// real DDoS mitigation infrastructure: 100 packets per second per
+// source IP, with a burst tolerance of 200.
+const (
+	DefaultInboundRate  = 100
+	DefaultInboundBurst = 200
+)
 
 func (c *Config) defaults() {
 	if c.K == 0 {
@@ -62,6 +76,12 @@ func (c *Config) defaults() {
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
+	if c.InboundRate == 0 {
+		c.InboundRate = DefaultInboundRate
+	}
+	if c.InboundBurst == 0 {
+		c.InboundBurst = DefaultInboundBurst
+	}
 }
 
 // Node is a participant in the Kademlia DHT. It owns a routing table, a
@@ -73,6 +93,7 @@ type Node struct {
 	table     *RoutingTable
 	store     Store
 	cfg       Config
+	limiter   *ratelimit.Limiter
 
 	pendingMu sync.Mutex
 	pending   map[TxID]chan any
@@ -94,6 +115,7 @@ func NewNode(id *identity.Identity, t transport.Transport, store Store, cfg Conf
 		table:     NewRoutingTable(id.Public().DestinationHash(), cfg.K),
 		store:     store,
 		cfg:       cfg,
+		limiter:   ratelimit.New(cfg.InboundRate, cfg.InboundBurst),
 		pending:   make(map[TxID]chan any),
 		closed:    make(chan struct{}),
 	}
@@ -140,6 +162,10 @@ func (n *Node) Close() {
 }
 
 func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
+	if !n.limiter.Allow(sourceKey(pkt.From)) {
+		n.cfg.Logger.Debug("dht: inbound rate-limited", "from", pkt.From)
+		return
+	}
 	typ, body, err := wire.DecodeFrame(pkt.Payload)
 	if err != nil {
 		n.cfg.Logger.Debug("dht: bad frame", "from", pkt.From, "err", err)
@@ -533,6 +559,22 @@ func hasUnqueried(list []Contact, queried map[NodeID]bool) bool {
 		}
 	}
 	return false
+}
+
+// sourceKey returns the rate-limit bucket key for a packet origin: host
+// portion of host:port for routable transports, raw addr otherwise.
+func sourceKey(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	if u, ok := addr.(*net.UDPAddr); ok && u.IP != nil {
+		return u.IP.String()
+	}
+	s := addr.String()
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		return h
+	}
+	return s
 }
 
 func encodeContacts(cs []Contact) []EncodedContact {
