@@ -145,8 +145,8 @@
 - [x] `(*Record).MarshalBinary` / `UnmarshalBinary` (versioned).
 - [x] `pkg/presence/store.go` — Cache с TTL + Sweep + monotonic IssuedAt replacement.
 - [x] `pkg/presence/publisher.go` — Publisher (periodic refresh) + Resolver (DHT lookup + cache).
-- [ ] 🌙 `pkg/dht/skademlia.go` — PoW validator — `[OVERNIGHT-DEFERRED]` (см. ASSUMPTIONS).
-- [ ] 🌙 disjoint paths lookup — `[OVERNIGHT-DEFERRED]`.
+- [x] PoW validator — `pkg/identity.PoWBits/GenerateWithPoW` (Sybil-resistance opt-in: design.md §4).
+- [ ] 🌙 disjoint paths lookup — `[OVERNIGHT-DEFERRED]` (требует расширения iterativeFind, см. review/threat-model.md).
 - [x] **Tests:**
   - [x] Unit: подпись/верификация happy + bad-sig + tampered + expired.
   - [x] Marshal roundtrip + post-marshal verify.
@@ -181,20 +181,20 @@
 - [x] `pkg/signaling/envelope.go` — Envelope (recipient/sender hashes + session_id + inner_type + payload), Encode/Decode/DecodeBody.
 - [x] `pkg/signaling/service.go` — Service: Connect / SetHandler / HandlePacket (как dht.Node ExtraHandler), Noise XK 3-message handshake.
 - [x] `pkg/signaling/channel.go` — Channel: Send/Recv/Close, pending-buffer для DATA до завершения handshake.
-- [ ] 🌙 hop-by-hop routing для multi-hop signaling — `[OVERNIGHT-DEFERRED]` (overnight scope = direct delivery).
+- [x] hop-by-hop routing для multi-hop signaling — `pkg/signaling.Service.relay` + `Router` interface + `internal/network.dhtRouter` с iterative path discovery; MaxHops=8.
 - [x] **Tests:**
   - [x] Noise handshake happy path + tampered + wrong-static rejection.
   - [x] Service: connect → bidirectional exchange, Connect для unknown peer возвращает error.
   - [x] Envelope roundtrip + FuzzDecodeEnvelope.
   - [ ] 🌙 3-узловая сеть с relay-узлом — `[OVERNIGHT-DEFERRED]`.
-  - [ ] 🌙 Replay protection — `[OVERNIGHT-DEFERRED]`.
+  - [x] Replay protection — Noise XK AEAD nonce + duplicate-HELLO_INIT drop. Tests in `pkg/signaling/replay_test.go`.
 - [x] Fuzz: signaling envelope decoder.
 
 ### Acceptance criteria
 - [x] Noise XK handshake аутентифицирует identity (тест с подменой responder static).
-- [ ] 🌙 1-3 hop relay — `[OVERNIGHT-DEFERRED]`.
+- [x] 1-3 hop relay — `Service.relay` + dhtRouter path discovery. Tests in `pkg/signaling/relay_test.go`.
 - [x] MITM на relay не видит plaintext (Noise XK pattern гарантирует это; relay-узлы только пересылают MsgRelay frames).
-- [ ] 🌙 Replay protection — `[OVERNIGHT-DEFERRED]`.
+- [x] Replay protection — see above (Noise nonce + dup-INIT drop).
 - [x] `-race` зелёный.
 
 ---
@@ -213,7 +213,7 @@
 ### Tasks
 - [x] `pkg/stun/stun.go` — встроенный STUN responder (binding requests).
 - [x] `pkg/turn/turn.go` — встроенный TURN relay с long-term-credentials auth (shared secret).
-- [ ] 🌙 `pkg/turn/auth.go` — production-grade rate-limited auth — `[OVERNIGHT-DEFERRED]`.
+- [x] `pkg/turn` — RFC 7635 ephemeral credentials + per-IP rate-limit + `MaxCredentialLifetime`. `EphemeralCredential` helper for clients.
 - [ ] 🌙 `pkg/bootstrap/detect.go` — детект публичного IP — `[OVERNIGHT-DEFERRED]` (для localhost demo не нужно).
 - [x] Capability bits в `pkg/presence` готовы (CapCanSTUN, CapCanTURN, CapPublicIP).
 - [x] **Tests:**
@@ -298,8 +298,8 @@
 - [⚠️] File transfer — реализован в JS-стороне над DataChannel (offer + chunks + sha256 verify); Go хранит только storage-метаданные. `internal/chat/protocol.go` определяет Go-формат, но в реальном data path не используется.
 - [x] Аудио/видео-звонок с реальным media playback — **работает в браузере** (нативный `RTCPeerConnection` + `getUserMedia`, см. ASSUMPTIONS.md «Видео-звонки — теперь работают из коробки»). v1-acceptance, помеченный 🌙, в v2 закрыт.
 - [x] TOFU: storage.UpsertContact возвращает ErrFingerprintChanged при mismatch (unit test).
-- [⚠️] Outbox: storage CRUD есть (`QueueOutbox`/`PendingOutbox`/`AcknowledgeOutbox`); **активного flush pump'а в Go нет** — концепция §9 требует periodic check + flush at PeerOnline. См. план доработки.
-- [ ] 🌙 NAT-traversal через TURN volunteer — `[OVERNIGHT-DEFERRED]`. Сейчас в браузерном `app.js` зашит публичный Google STUN; volunteer-pickup из presence — план доработки.
+- [x] Outbox: storage CRUD + `Messenger.outboxPump` periodic flush + `SetPeerOnlineHandler` SSE-event "peer_online" pushed to UI when a recipient with pending items becomes resolvable. Tests in `internal/messenger/outbox_test.go`.
+- [x] NAT-traversal через TURN volunteer — `Messenger.ICEServers` + `/api/snapshot.ice_servers` + browser `STATE.iceServers` (with public STUN as fallback only when no volunteer is reachable).
 
 ---
 
@@ -311,14 +311,14 @@
 
 ### Tasks
 - [ ] 🌙 Threat-model audit — `[OVERNIGHT-DEFERRED]`. Чек-лист в `review/PENDING.md`.
-- [ ] 🌙 Replay-attack test (signaling + chat) — `[OVERNIGHT-DEFERRED]`.
-- [ ] 🌙 Eclipse-attack simulation на DHT — `[OVERNIGHT-DEFERRED]`.
-- [ ] 🌙 DoS rate-limiting (DHT + signaling) — `[OVERNIGHT-DEFERRED]`.
+- [x] Replay-attack test (signaling) — `pkg/signaling/replay_test.go`.
+- [ ] 🌙 Eclipse-attack simulation на DHT — частично: bootstrap diversity (`SeenPeersDiverse`), full simulation deferred.
+- [x] DoS rate-limiting (DHT + signaling) — `pkg/ratelimit` + `pkg/dht.Node` per-IP token bucket; signaling rides the same socket so it inherits.
 - [ ] 🌙 PGO baseline — `[OVERNIGHT-DEFERRED]`.
 - [ ] 🌙 Benchmark suite — `[OVERNIGHT-DEFERRED]`.
-- [ ] 🌙 Reproducible builds — `[OVERNIGHT-DEFERRED]`.
-- [ ] 🌙 Signed release artifacts — `[OVERNIGHT-DEFERRED]`.
-- [ ] 🌙 CONTRIBUTING.md / threat-model.md / security.md — `[OVERNIGHT-DEFERRED]`.
+- [x] Reproducible builds — `Taskfile.yml::build:reproducible` (-trimpath, -buildvcs=false, fixed ldflags, sha256sum).
+- [x] Signed release artifacts — `Taskfile.yml::release:sign` (minisign default, cosign via COSIGN=1).
+- [x] threat-model — `review/threat-model.md`. CONTRIBUTING.md / security.md still pending.
 - [ ] 🌙 Public protocol spec (separate document) — `[OVERNIGHT-DEFERRED]`.
 - [x] **Demo run instructions** — см. `ASSUMPTIONS.md` § Demo + `Taskfile.yml` (`task run-network`, `task run-alice`, `task run-bob`).
 

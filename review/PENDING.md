@@ -24,20 +24,36 @@
 - [ ] Phase 6 — WebRTC session
 - [ ] Phase 7 — Chat application (v2: browser UI поверх HTTP+SSE; fyne dropped 2026-05-02)
 
-## Известные технические долги (overnight-deferred)
+## Известные технические долги
 
-- [ ] **S/Kademlia hardening:** PoW на nodeID, disjoint paths, sibling lists. Без этого Sybil-resistance ослаблена.
-- [ ] **DHT integration tests:** 100-узловая memory-сеть + 5-узловой testcontainers cluster. Сейчас — только 3-5 узлов через memory transport.
-- [ ] **Replay protection** в signaling (sequence numbers / nonce window) — каркас есть, тесты на replay не написаны.
-- [ ] **TURN production-grade auth:** rate-limiting per-IP, abuse mitigations. Сейчас — anonymous + short-term HMAC, не production.
-- [ ] **Threat-model audit** (`p2p-messenger-design.md` §8) — каждая атака должна иметь либо тест, либо явно accepted risk.
-- [ ] **Eclipse-attack simulation** на DHT.
-- [ ] **DoS rate-limiting** на DHT и signaling.
+Закрыто в текущем raunde архитектурного ревью:
+
+- [x] **S/Kademlia hardening — PoW** (`pkg/identity.PoWBits/GenerateWithPoW`).
+- [x] **Replay protection в signaling** — Noise XK AEAD nonce + dup-INIT drop. Tests in `pkg/signaling/replay_test.go`.
+- [x] **TURN production-grade auth** — RFC 7635 ephemeral credentials + per-IP rate-limit (`pkg/turn`).
+- [x] **Threat-model audit** — `review/threat-model.md`.
+- [x] **DoS rate-limiting (DHT)** — `pkg/ratelimit` + `pkg/dht.Node`.
+- [x] **Reproducible builds** — `Taskfile.yml::build:reproducible`.
+- [x] **Signed release artifacts** — `Taskfile.yml::release:sign`.
+- [x] **Sybil presence rate-limit per IP** — `pkg/presence.RateLimitedStore`.
+- [x] **Eclipse mitigation (bootstrap diversity)** — `internal/storage.SeenPeersDiverse`.
+- [x] **Hop-by-hop signaling relay** — `pkg/signaling.Service.relay` + dhtRouter path discovery.
+- [x] **TLV-tolerant decoders** (forward compat) — `pkg/wire.SkipUnknownTLVs`.
+- [x] **Volunteer ICE discovery** — `Messenger.ICEServers`.
+- [x] **Outbox flush pump** — `Messenger.outboxPump` + SSE peer_online event.
+- [x] **TOFU verification UI flow** — modal showing both safety numbers.
+- [x] **Bootstrap persistence cache** — `internal/storage` seen_peers.
+
+Остаётся:
+
+- [ ] **S/Kademlia: disjoint paths + sibling lists** — требуют расширения iterativeFind.
+- [ ] **DHT integration tests:** 100-узловая memory-сеть + 5-узловой testcontainers cluster.
 - [ ] **PGO baseline:** capture production profile, commit `default.pgo`.
-- [ ] **Reproducible builds** (с GOFLAGS, fixed timestamps).
-- [ ] **Signed release artifacts.**
+- [ ] **Eclipse simulation** (a/b test on the bootstrap-diversity mitigation).
 - [ ] **Fuzz-тесты прогнаны 30s+ в CI** для каждого decoder'а.
-- [ ] **Покрытие** ≥ 80% для `pkg/*` (фактическое — см. отчёт coverage в финальном коммите).
+- [ ] **Покрытие** ≥ 80% для `pkg/*`.
 - [ ] **WebRTC NAT integration:** 2 узла за разными NAT через TURN volunteer.
 - [ ] **E2E-тест полного сценария:** TOFU → message → file → call → offline → outbox flush.
 - [ ] **godoc:** все exported идентификаторы в `pkg/*` имеют godoc-комментарии.
+- [ ] **Hardcoded community bootstrap list + DNS-seeds** — нужны реальные адреса операторов.
+- [ ] **CONTRIBUTING.md / security.md / public protocol spec.**
