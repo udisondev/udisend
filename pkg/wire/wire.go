@@ -137,6 +137,15 @@ func NewBuffer(b []byte) *Buffer { return &Buffer{buf: b} }
 // NewWriter returns a Buffer ready for appending.
 func NewWriter() *Buffer { return &Buffer{buf: make([]byte, 0, 64)} }
 
+// NewWriterSized returns a Buffer with capacity sized to fit `size` bytes
+// without reallocation. Falls back to the default 64B floor for tiny hints.
+func NewWriterSized(size int) *Buffer {
+	if size < 64 {
+		size = 64
+	}
+	return &Buffer{buf: make([]byte, 0, size)}
+}
+
 // Bytes returns the underlying byte slice (shared, not copied).
 func (b *Buffer) Bytes() []byte { return b.buf }
 

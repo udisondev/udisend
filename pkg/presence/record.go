@@ -155,17 +155,23 @@ func (r *Record) DestinationHash() identity.Hash {
 //	version(1) | pub_identity(65) | address(uvarint|str) |
 //	  capabilities(4) | issued_at_unix(8) |
 //	  uptime_hint(4) | max_relay_slots(2) | signature(64)
+//
+// Builds the result in a single allocation by inlining the public-identity
+// layout instead of calling PublicIdentity.MarshalBinary into a separate
+// buffer.
 func (r *Record) MarshalBinary() ([]byte, error) {
 	if len(r.Address) > MaxAddressLen {
 		return nil, fmt.Errorf("%w: address too long", ErrInvalidRecord)
 	}
-	pub, err := r.Public.MarshalBinary()
-	if err != nil {
-		return nil, err
+	if len(r.Public.EdPub) != ed25519PublicKeySize {
+		return nil, ErrInvalidRecord
 	}
-	w := wire.NewWriter()
+	const fixed = 1 + 1 + identity.PublicKeySize + 4 + 8 + 4 + 2 + identity.SignatureSize
+	w := wire.NewWriterSized(fixed + 2 + len(r.Address))
 	w.WriteUint8(recordVersion)
-	w.WriteFixed(pub)
+	w.WriteUint8(publicIdentityVersion)
+	w.WriteFixed(r.Public.EdPub)
+	w.WriteFixed(r.Public.XPub[:])
 	w.WriteString(r.Address)
 	w.WriteUint32(uint32(r.Capabilities))
 	w.WriteUint64(uint64(r.IssuedAt.Unix()))
@@ -242,14 +248,23 @@ func (r *Record) UnmarshalBinary(data []byte) error {
 // signingBytes returns the bytes covered by the signature (everything
 // except the signature itself). v2 records cover UptimeHint and
 // MaxRelaySlots so a forwarder cannot tweak them.
+//
+// Builds the pre-image in a single allocation: appends the public-identity
+// directly without going through PublicIdentity.MarshalBinary's separate
+// buffer.
 func (r *Record) signingBytes() ([]byte, error) {
-	pub, err := r.Public.MarshalBinary()
-	if err != nil {
-		return nil, err
+	if len(r.Public.EdPub) != ed25519PublicKeySize {
+		return nil, ErrInvalidRecord
 	}
-	w := wire.NewWriter()
+	// Pre-size: 1 (version) + 1 + PublicKeySize (pub identity blob) +
+	// uvarint(<=2) + len(address) + 4 (caps) + 8 (issuedAt) + 4 (uptime) + 2 (slots).
+	const fixed = 1 + 1 + identity.PublicKeySize + 4 + 8 + 4 + 2
+	w := wire.NewWriterSized(fixed + 2 + len(r.Address))
 	w.WriteUint8(recordVersion)
-	w.WriteFixed(pub)
+	// Inlined PublicIdentity wire layout: version(1) | ed_pub(32) | x_pub(32).
+	w.WriteUint8(publicIdentityVersion)
+	w.WriteFixed(r.Public.EdPub)
+	w.WriteFixed(r.Public.XPub[:])
 	w.WriteString(r.Address)
 	w.WriteUint32(uint32(r.Capabilities))
 	w.WriteUint64(uint64(r.IssuedAt.Unix()))
@@ -257,3 +272,11 @@ func (r *Record) signingBytes() ([]byte, error) {
 	w.WriteUint16(r.MaxRelaySlots)
 	return w.Bytes(), nil
 }
+
+// publicIdentityVersion mirrors identity.publicMarshalVersion (kept private
+// in pkg/identity). v1 is the only emitted version.
+const publicIdentityVersion byte = 0x01
+
+// ed25519PublicKeySize matches ed25519.PublicKeySize without the import
+// cost — used for a sanity check on r.Public before we marshal it inline.
+const ed25519PublicKeySize = 32
