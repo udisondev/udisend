@@ -211,7 +211,7 @@ func DecodeMsg(frame []byte) (any, error) {
 		if err := m.Header.read(b); err != nil {
 			return nil, err
 		}
-		if err := b.AssertEmpty(); err != nil {
+		if err := b.SkipUnknownTLVs(); err != nil {
 			return nil, err
 		}
 		return &m, nil
@@ -220,7 +220,7 @@ func DecodeMsg(frame []byte) (any, error) {
 		if err := m.Header.read(b); err != nil {
 			return nil, err
 		}
-		if err := b.AssertEmpty(); err != nil {
+		if err := b.SkipUnknownTLVs(); err != nil {
 			return nil, err
 		}
 		return &m, nil
@@ -234,7 +234,7 @@ func DecodeMsg(frame []byte) (any, error) {
 			return nil, err
 		}
 		copy(m.Target[:], raw)
-		if err := b.AssertEmpty(); err != nil {
+		if err := b.SkipUnknownTLVs(); err != nil {
 			return nil, err
 		}
 		return &m, nil
@@ -248,7 +248,7 @@ func DecodeMsg(frame []byte) (any, error) {
 			return nil, err
 		}
 		m.Contacts = cs
-		if err := b.AssertEmpty(); err != nil {
+		if err := b.SkipUnknownTLVs(); err != nil {
 			return nil, err
 		}
 		return &m, nil
@@ -267,7 +267,7 @@ func DecodeMsg(frame []byte) (any, error) {
 			return nil, err
 		}
 		m.Value = val
-		if err := b.AssertEmpty(); err != nil {
+		if err := b.SkipUnknownTLVs(); err != nil {
 			return nil, err
 		}
 		return &m, nil
@@ -276,7 +276,7 @@ func DecodeMsg(frame []byte) (any, error) {
 		if err := m.Header.read(b); err != nil {
 			return nil, err
 		}
-		if err := b.AssertEmpty(); err != nil {
+		if err := b.SkipUnknownTLVs(); err != nil {
 			return nil, err
 		}
 		return &m, nil
@@ -290,7 +290,7 @@ func DecodeMsg(frame []byte) (any, error) {
 			return nil, err
 		}
 		copy(m.Key[:], raw)
-		if err := b.AssertEmpty(); err != nil {
+		if err := b.SkipUnknownTLVs(); err != nil {
 			return nil, err
 		}
 		return &m, nil
@@ -304,7 +304,7 @@ func DecodeMsg(frame []byte) (any, error) {
 			return nil, err
 		}
 		m.Value = val
-		if err := b.AssertEmpty(); err != nil {
+		if err := b.SkipUnknownTLVs(); err != nil {
 			return nil, err
 		}
 		return &m, nil

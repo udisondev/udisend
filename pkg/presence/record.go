@@ -181,7 +181,7 @@ func (r *Record) UnmarshalBinary(data []byte) error {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
 	copy(r.Signature[:], sig)
-	if err := b.AssertEmpty(); err != nil {
+	if err := b.SkipUnknownTLVs(); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
 	return nil

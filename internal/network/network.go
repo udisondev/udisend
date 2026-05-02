@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
@@ -77,6 +78,7 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 		Logger:       cfg.Logger,
 		ExtraHandler: signalSvc.HandlePacket,
 	})
+	signalSvc.SetRouter(dhtRouter{node: dhtNode})
 
 	pubAddr := tr.LocalAddr().String()
 	caps := presence.CapCanRelay | presence.CapCanBootstrap
@@ -193,6 +195,19 @@ func (a nodeAdapter) PutValue(ctx context.Context, key dht.NodeID, value []byte)
 
 func (a nodeAdapter) LookupValue(ctx context.Context, key dht.NodeID) ([]byte, []dht.Contact, error) {
 	return a.n.LookupValue(ctx, key)
+}
+
+// dhtRouter satisfies signaling.Router by delegating to the routing table.
+type dhtRouter struct{ node *dht.Node }
+
+// NextHop returns the closest known contact's transport address for the
+// destination hash, or false if the routing table has no candidates.
+func (r dhtRouter) NextHop(target identity.Hash) (net.Addr, bool) {
+	closest := r.node.Table().Closest(target, 1)
+	if len(closest) == 0 {
+		return nil, false
+	}
+	return closest[0].Addr, true
 }
 
 // noopResolver satisfies signaling.AddressResolver for a node that doesn't

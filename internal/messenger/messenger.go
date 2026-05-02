@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -128,6 +129,7 @@ func Open(ctx context.Context, cfg Config) (*Messenger, error) {
 		ExtraHandler: sig.HandlePacket,
 	})
 	m.node = node
+	sig.SetRouter(dhtRouter{node: node})
 
 	caps := presence.CapPublicIP // every messenger advertises its address
 	m.resolver = presence.NewResolver(nodeAdapter{node}, cfg.PresenceTTL)
@@ -332,6 +334,17 @@ func (a nodeAdapter) PutValue(ctx context.Context, key dht.NodeID, value []byte)
 
 func (a nodeAdapter) LookupValue(ctx context.Context, key dht.NodeID) ([]byte, []dht.Contact, error) {
 	return a.n.LookupValue(ctx, key)
+}
+
+// dhtRouter satisfies signaling.Router by delegating to the routing table.
+type dhtRouter struct{ node *dht.Node }
+
+func (r dhtRouter) NextHop(target identity.Hash) (net.Addr, bool) {
+	closest := r.node.Table().Closest(target, 1)
+	if len(closest) == 0 {
+		return nil, false
+	}
+	return closest[0].Addr, true
 }
 
 type resolverDelegate struct{ m *Messenger }

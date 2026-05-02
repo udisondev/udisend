@@ -23,7 +23,17 @@ import (
 	"github.com/udisondev/udisend/pkg/wire"
 )
 
-const envelopeVersion byte = 0x01
+// Wire format version. v2 adds the `hops` byte for hop-by-hop relay
+// loop-prevention; older v1 envelopes are still accepted (hops treated
+// as 0).
+const (
+	envelopeVersion   byte = 0x02
+	envelopeVersionV1 byte = 0x01
+
+	// MaxHops bounds how many relay hops an envelope may traverse before
+	// being dropped. design.md §4 (hop-by-hop signaling routing).
+	MaxHops byte = 8
+)
 
 // SessionIDSize is the length of a session identifier.
 const SessionIDSize = 16
@@ -51,10 +61,16 @@ const (
 const MaxInnerSize = 64 * 1024
 
 // Envelope is the on-wire representation of one signaling packet.
+//
+// Hops counts how many relay forwards this envelope has traversed. The
+// initiating peer sets it to 0; each forwarder increments before sending
+// onwards. Envelopes with Hops >= MaxHops are dropped by relays to break
+// loops. v1 envelopes (no Hops field) decode as Hops=0.
 type Envelope struct {
 	Recipient identity.Hash
 	Sender    identity.Hash
 	SessionID SessionID
+	Hops      byte
 	InnerType byte
 	Payload   []byte
 }
@@ -75,6 +91,7 @@ func (e *Envelope) Encode() ([]byte, error) {
 	w.WriteFixed(e.Recipient[:])
 	w.WriteFixed(e.Sender[:])
 	w.WriteFixed(e.SessionID[:])
+	w.WriteUint8(e.Hops)
 	w.WriteUint8(e.InnerType)
 	w.WriteBytes(e.Payload)
 	return wire.EncodeFrame(dht.MsgRelay, w.Bytes())
@@ -102,7 +119,7 @@ func DecodeBody(payload []byte) (*Envelope, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}
-	if ver != envelopeVersion {
+	if ver != envelopeVersion && ver != envelopeVersionV1 {
 		return nil, fmt.Errorf("%w: version=%d", ErrEnvelope, ver)
 	}
 	rec, err := b.ReadFixed(identity.HashSize)
@@ -117,6 +134,13 @@ func DecodeBody(payload []byte) (*Envelope, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}
+	var hops byte
+	if ver >= envelopeVersion {
+		hops, err = b.ReadUint8()
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
+		}
+	}
 	innerType, err := b.ReadUint8()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
@@ -125,10 +149,11 @@ func DecodeBody(payload []byte) (*Envelope, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}
-	if err := b.AssertEmpty(); err != nil {
+	if err := b.SkipUnknownTLVs(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}
 	env := &Envelope{
+		Hops:      hops,
 		InnerType: innerType,
 		Payload:   inner,
 	}

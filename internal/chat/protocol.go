@@ -18,17 +18,17 @@ type MessageKind uint8
 
 // Kind values.
 const (
-	KindText       MessageKind = 1
-	KindFileOffer  MessageKind = 2
-	KindFileChunk  MessageKind = 3
-	KindFileEnd    MessageKind = 4
-	KindAck        MessageKind = 5
-	KindCallInvite MessageKind = 6
-	KindCallAccept MessageKind = 7
-	KindCallReject MessageKind = 8
-	KindCallEnd    MessageKind = 9
-	KindTyping     MessageKind = 10
-	KindPresence   MessageKind = 11 // ping-pong heartbeat
+	KindText MessageKind = iota + 1
+	KindFileOffer
+	KindFileChunk
+	KindFileEnd
+	KindAck
+	KindCallInvite
+	KindCallAccept
+	KindCallReject
+	KindCallEnd
+	KindTyping
+	KindPresence
 )
 
 // String returns a human-readable kind for logs/UI.
@@ -97,50 +97,62 @@ func (m *Message) Encode() ([]byte, error) {
 	if len(m.Body) > MaxBodySize {
 		return nil, fmt.Errorf("%w: body too large", ErrDecode)
 	}
+
 	w := wire.NewWriter()
 	w.WriteUint8(messageVersion)
 	w.WriteUint8(uint8(m.Kind))
 	w.WriteFixed(m.ID[:])
 	w.WriteUint64(uint64(m.Timestamp.UnixNano()))
 	w.WriteBytes(m.Body)
+
 	return w.Bytes(), nil
 }
 
 // Decode parses a Message produced by Encode.
 func Decode(data []byte) (*Message, error) {
 	b := wire.NewBuffer(data)
+
 	ver, err := b.ReadUint8()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDecode, err)
 	}
+
 	if ver != messageVersion {
 		return nil, fmt.Errorf("%w: version=%d", ErrDecode, ver)
 	}
+
 	kind, err := b.ReadUint8()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDecode, err)
 	}
+
 	idBytes, err := b.ReadFixed(MessageIDSize)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDecode, err)
 	}
+
 	ts, err := b.ReadUint64()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDecode, err)
 	}
+
 	body, err := b.ReadBytes(MaxBodySize)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDecode, err)
 	}
-	if err := b.AssertEmpty(); err != nil {
+
+	if err := b.SkipUnknownTLVs(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDecode, err)
 	}
+
 	m := &Message{
 		Kind:      MessageKind(kind),
 		Timestamp: time.Unix(0, int64(ts)).UTC(),
 		Body:      body,
 	}
+
 	copy(m.ID[:], idBytes)
+
 	return m, nil
 }
 
@@ -155,38 +167,50 @@ type FileOffer struct {
 // EncodeFileOffer serialises a file-offer body.
 func EncodeFileOffer(o FileOffer) []byte {
 	w := wire.NewWriter()
+
 	w.WriteFixed(o.FileID[:])
 	w.WriteString(o.Name)
 	w.WriteUint64(o.Size)
 	w.WriteString(o.SHA256Hex)
+
 	return w.Bytes()
 }
 
 // DecodeFileOffer parses a file-offer body.
 func DecodeFileOffer(body []byte) (FileOffer, error) {
 	b := wire.NewBuffer(body)
+
 	var o FileOffer
+
 	idBytes, err := b.ReadFixed(MessageIDSize)
 	if err != nil {
 		return o, err
 	}
+
 	copy(o.FileID[:], idBytes)
+
 	name, err := b.ReadString(1024)
 	if err != nil {
 		return o, err
 	}
+
 	o.Name = name
+
 	size, err := b.ReadUint64()
 	if err != nil {
 		return o, err
 	}
+
 	o.Size = size
+
 	hash, err := b.ReadString(128)
 	if err != nil {
 		return o, err
 	}
+
 	o.SHA256Hex = hash
-	return o, b.AssertEmpty()
+
+	return o, b.SkipUnknownTLVs()
 }
 
 // FileChunk is the body of KindFileChunk.
@@ -208,23 +232,31 @@ func EncodeFileChunk(c FileChunk) []byte {
 // DecodeFileChunk parses a chunk body.
 func DecodeFileChunk(body []byte) (FileChunk, error) {
 	b := wire.NewBuffer(body)
+
 	var c FileChunk
+
 	idBytes, err := b.ReadFixed(MessageIDSize)
 	if err != nil {
 		return c, err
 	}
+
 	copy(c.FileID[:], idBytes)
+
 	off, err := b.ReadUint64()
 	if err != nil {
 		return c, err
 	}
+
 	c.Offset = off
+
 	data, err := b.ReadBytes(MaxBodySize)
 	if err != nil {
 		return c, err
 	}
+
 	c.Data = data
-	return c, b.AssertEmpty()
+
+	return c, b.SkipUnknownTLVs()
 }
 
 // FileEnd is the body of KindFileEnd: a marker indicating no further chunks.
@@ -242,8 +274,11 @@ func DecodeFileEnd(body []byte) (FileEnd, error) {
 	if len(body) != MessageIDSize {
 		return FileEnd{}, ErrDecode
 	}
+
 	var e FileEnd
+
 	copy(e.FileID[:], body)
+
 	return e, nil
 }
 
@@ -260,7 +295,9 @@ func DecodeAck(body []byte) (Ack, error) {
 	if len(body) != MessageIDSize {
 		return Ack{}, ErrDecode
 	}
+
 	var a Ack
 	copy(a.ID[:], body)
+
 	return a, nil
 }

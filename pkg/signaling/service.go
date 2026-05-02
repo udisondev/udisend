@@ -28,6 +28,15 @@ type AddressResolver interface {
 	Lookup(ctx context.Context, peer identity.Hash) (*presence.Record, error)
 }
 
+// Router is the subset of routing-table behaviour the signaling Service
+// needs to forward envelopes whose recipient is not us. NextHop returns
+// the next-hop address closest to `target` and ok=true, or ok=false if
+// the local node knows no route. Implementations must be safe for
+// concurrent use.
+type Router interface {
+	NextHop(target identity.Hash) (net.Addr, bool)
+}
+
 // Handler is invoked when a remote peer establishes a session.
 type Handler func(peer identity.Hash, ch *Channel)
 
@@ -37,6 +46,7 @@ type Service struct {
 	id        *identity.Identity
 	transport transport.Transport
 	resolver  AddressResolver
+	router    atomic.Pointer[Router]
 	logger    *slog.Logger
 
 	mu       sync.Mutex
@@ -58,7 +68,10 @@ type Config struct {
 	Identity  *identity.Identity
 	Transport transport.Transport
 	Resolver  AddressResolver
-	Logger    *slog.Logger
+	// Router, if non-nil, enables hop-by-hop forwarding of envelopes whose
+	// recipient is not us. Without it, foreign envelopes are dropped.
+	Router Router
+	Logger *slog.Logger
 }
 
 // NewService constructs a signaling service. The caller must register
@@ -67,7 +80,7 @@ func NewService(cfg Config) *Service {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &Service{
+	s := &Service{
 		id:        cfg.Identity,
 		transport: cfg.Transport,
 		resolver:  cfg.Resolver,
@@ -75,12 +88,28 @@ func NewService(cfg Config) *Service {
 		sessions:  make(map[sessionKey]*Channel),
 		closed:    make(chan struct{}),
 	}
+	if cfg.Router != nil {
+		r := cfg.Router
+		s.router.Store(&r)
+	}
+	return s
 }
 
 // SetHandler registers a callback invoked on every accepted incoming session.
 func (s *Service) SetHandler(h Handler) {
 	hp := h
 	s.handler.Store(&hp)
+}
+
+// SetRouter wires (or replaces) the routing-table backend used by relay
+// forwarding. Pass nil to disable forwarding (envelopes whose recipient
+// is not us will then be dropped silently).
+func (s *Service) SetRouter(r Router) {
+	if r == nil {
+		s.router.Store(nil)
+		return
+	}
+	s.router.Store(&r)
 }
 
 // Close terminates all sessions.
@@ -107,11 +136,42 @@ func (s *Service) HandlePacket(ctx context.Context, pkt transport.Packet, typ by
 		return true
 	}
 	if env.Recipient != s.id.Public().DestinationHash() {
-		// Not for us. Future: relay forward. Today: drop.
+		s.relay(ctx, env)
 		return true
 	}
 	s.dispatch(ctx, pkt.From, env)
 	return true
+}
+
+// relay forwards an envelope whose recipient is not us. design.md §4
+// (hop-by-hop signaling routing). Drops with a warning if Hops is at
+// MaxHops, if no Router is configured, or if no next hop is known.
+func (s *Service) relay(ctx context.Context, env *Envelope) {
+	rp := s.router.Load()
+	if rp == nil {
+		return
+	}
+	if env.Hops >= MaxHops {
+		s.logger.Debug("signaling: relay drop (hop limit)",
+			"recipient", env.Recipient, "hops", env.Hops)
+		return
+	}
+	next, ok := (*rp).NextHop(env.Recipient)
+	if !ok {
+		s.logger.Debug("signaling: relay drop (no route)",
+			"recipient", env.Recipient)
+		return
+	}
+	env.Hops++
+	blob, err := env.Encode()
+	if err != nil {
+		s.logger.Warn("signaling: relay encode", "err", err)
+		return
+	}
+	if err := s.transport.Send(ctx, next, blob); err != nil {
+		s.logger.Warn("signaling: relay send",
+			"recipient", env.Recipient, "next", next, "err", err)
+	}
 }
 
 func (s *Service) dispatch(ctx context.Context, from net.Addr, env *Envelope) {

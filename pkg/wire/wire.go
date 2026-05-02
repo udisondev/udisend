@@ -222,6 +222,52 @@ func (b *Buffer) AssertEmpty() error {
 	return nil
 }
 
+// MaxExtensions caps the number of unknown TLV extensions a single decode
+// will tolerate; past this we assume the input is malicious or malformed.
+const MaxExtensions = 32
+
+// SkipUnknownTLVs consumes any bytes remaining in the buffer as a sequence
+// of `tag(uvarint) || length(uvarint) || value[length]` extension blocks
+// and discards them. This is the forward-compatibility hook described in
+// p2p-messenger-design.md §7: "extensions (TLV) — опциональные поля в
+// конце; неизвестные пропускаются". Returns ErrShortBuffer / ErrTrailingBytes
+// only if the trailing bytes do not form valid TLVs at all.
+//
+// Callers that consume known leading fields and then want to be tolerant
+// of forward-compatible additions should call SkipUnknownTLVs instead of
+// AssertEmpty before returning success.
+func (b *Buffer) SkipUnknownTLVs() error {
+	for i := 0; b.Remaining() > 0; i++ {
+		if i >= MaxExtensions {
+			return fmt.Errorf("wire: more than %d trailing extensions", MaxExtensions)
+		}
+		if _, err := b.ReadUvarint(); err != nil {
+			return err
+		}
+		length, err := b.ReadUvarint()
+		if err != nil {
+			return err
+		}
+		if length > MaxFrameSize {
+			return ErrFrameTooLarge
+		}
+		if uint64(b.Remaining()) < length {
+			return ErrShortBuffer
+		}
+		b.off += int(length)
+	}
+	return nil
+}
+
+// WriteTLV appends a `tag || length || value` extension block. Receivers
+// that know `tag` parse the value; receivers that don't recognise it skip
+// the block via SkipUnknownTLVs and continue.
+func (b *Buffer) WriteTLV(tag uint64, value []byte) {
+	b.WriteUvarint(tag)
+	b.WriteUvarint(uint64(len(value)))
+	b.WriteFixed(value)
+}
+
 // Discard skips ahead by n bytes. Returns ErrShortBuffer if not enough
 // remain.
 func (b *Buffer) Discard(n int) error {

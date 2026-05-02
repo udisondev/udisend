@@ -60,14 +60,14 @@ func KindFromString(s string) (byte, bool) {
 
 // Inner-message type codes carried over a signaling channel.
 const (
-	SDPTypeOffer  byte = 0x01
-	SDPTypeAnswer byte = 0x02
-	SDPTypeBye    byte = 0x03
+	SDPTypeOffer byte = iota + 1
+	SDPTypeAnswer
+	SDPTypeBye
 	// SDPTypeICE carries a single ICE candidate (JSON-encoded
 	// RTCIceCandidateInit). Signed for parity with offer/answer — the
 	// per-candidate signing cost is negligible and lets us treat the
 	// signal pipe uniformly on both ends.
-	SDPTypeICE byte = 0x04
+	SDPTypeICE
 )
 
 // SignedSDP is a SDP description authenticated by the publisher.
@@ -89,9 +89,11 @@ const sdpEnvelopeVersion byte = 0x01
 // signingBytes returns the bytes covered by the Ed25519 signature.
 func (s *SignedSDP) signingBytes() []byte {
 	w := wire.NewWriter()
+
 	w.WriteUint8(sdpEnvelopeVersion)
 	w.WriteUint8(s.Kind)
 	w.WriteString(s.SDP)
+
 	return w.Bytes()
 }
 
@@ -115,41 +117,53 @@ func (s *SignedSDP) MarshalBinary() ([]byte, error) {
 	if len(s.SDP) > MaxSDPSize {
 		return nil, fmt.Errorf("%w: SDP too long", ErrSDPDecode)
 	}
+
 	w := wire.NewWriter()
+
 	w.WriteUint8(sdpEnvelopeVersion)
 	w.WriteUint8(s.Kind)
 	w.WriteString(s.SDP)
 	w.WriteFixed(s.Signature[:])
+
 	return w.Bytes(), nil
 }
 
 // UnmarshalBinary decodes a payload produced by MarshalBinary.
 func (s *SignedSDP) UnmarshalBinary(data []byte) error {
 	b := wire.NewBuffer(data)
+
 	ver, err := b.ReadUint8()
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrSDPDecode, err)
 	}
+
 	if ver != sdpEnvelopeVersion {
 		return fmt.Errorf("%w: version=%d", ErrSDPDecode, ver)
 	}
+
 	kind, err := b.ReadUint8()
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrSDPDecode, err)
 	}
+
 	sdp, err := b.ReadString(MaxSDPSize)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrSDPDecode, err)
 	}
+
 	sig, err := b.ReadFixed(identity.SignatureSize)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrSDPDecode, err)
 	}
-	if err := b.AssertEmpty(); err != nil {
+
+	if err := b.SkipUnknownTLVs(); err != nil {
 		return fmt.Errorf("%w: %v", ErrSDPDecode, err)
 	}
+
 	s.Kind = kind
 	s.SDP = sdp
+
 	copy(s.Signature[:], sig)
+
 	return nil
 }
