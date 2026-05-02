@@ -46,7 +46,12 @@ type Config struct {
 	Listen      string // UDP listen address
 	StorageDir  string
 	PresenceTTL time.Duration
-	Logger      *slog.Logger
+	// OutboxInterval controls how often the runtime re-checks recipients of
+	// pending outbox items; on each tick recipients whose presence is
+	// resolvable get a "peer_online" notification so the UI can drain. Zero
+	// uses the default (30 s); negative disables the pump entirely.
+	OutboxInterval time.Duration
+	Logger         *slog.Logger
 }
 
 // Messenger is the per-user runtime.
@@ -67,8 +72,15 @@ type Messenger struct {
 	incomingMu sync.RWMutex
 	incoming   func(*Session)
 
+	peerOnlineMu sync.RWMutex
+	peerOnline   func(identity.Hash)
+
 	closeOnce sync.Once
 }
+
+// DefaultOutboxInterval is the period between outbox flush ticks when
+// Config.OutboxInterval is zero.
+const DefaultOutboxInterval = 30 * time.Second
 
 type sessionKey struct {
 	peer identity.Hash
@@ -129,7 +141,7 @@ func Open(ctx context.Context, cfg Config) (*Messenger, error) {
 		ExtraHandler: sig.HandlePacket,
 	})
 	m.node = node
-	sig.SetRouter(dhtRouter{node: node})
+	sig.SetRouter(dhtRouter{node: node, timeout: messengerPathLookupTimeout})
 
 	caps := presence.CapPublicIP // every messenger advertises its address
 	m.resolver = presence.NewResolver(nodeAdapter{node}, cfg.PresenceTTL)
@@ -168,6 +180,24 @@ func (m *Messenger) SetIncomingHandler(fn func(*Session)) {
 	m.incoming = fn
 }
 
+// SetPeerOnlineHandler registers a callback fired by the outbox flush pump
+// each time a recipient with pending items becomes resolvable in presence.
+// The UI uses this to wake up its delivery flow over DataChannel.
+func (m *Messenger) SetPeerOnlineHandler(fn func(identity.Hash)) {
+	m.peerOnlineMu.Lock()
+	defer m.peerOnlineMu.Unlock()
+	m.peerOnline = fn
+}
+
+func (m *Messenger) firePeerOnline(peer identity.Hash) {
+	m.peerOnlineMu.RLock()
+	fn := m.peerOnline
+	m.peerOnlineMu.RUnlock()
+	if fn != nil {
+		fn(peer)
+	}
+}
+
 // Run starts the background loops. Order matters here:
 //
 //  1. The DHT receive loop must run first — bootstrap responses
@@ -191,8 +221,67 @@ func (m *Messenger) Run(ctx context.Context) {
 
 	wg.Go(func() { m.publisher.Run(ctx) })
 
+	if interval := m.outboxInterval(); interval > 0 {
+		wg.Go(func() { m.outboxPump(ctx, interval) })
+	}
+
 	<-ctx.Done()
 	wg.Wait()
+}
+
+func (m *Messenger) outboxInterval() time.Duration {
+	switch {
+	case m.cfg.OutboxInterval < 0:
+		return 0
+	case m.cfg.OutboxInterval == 0:
+		return DefaultOutboxInterval
+	default:
+		return m.cfg.OutboxInterval
+	}
+}
+
+// outboxPump periodically calls FlushOutboxOnce. Exits on ctx cancel.
+func (m *Messenger) outboxPump(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			m.FlushOutboxOnce(ctx)
+		}
+	}
+}
+
+// FlushOutboxOnce iterates contacts with pending outbox items, resolves
+// their presence, and fires the peer-online handler for those reachable.
+// Browser-side delivery (over DataChannel) is the UI's job; the runtime
+// only signals that the recipient is now visible. Exposed for tests.
+func (m *Messenger) FlushOutboxOnce(ctx context.Context) {
+	contacts, err := m.storage.ListContacts(ctx)
+	if err != nil {
+		m.cfg.Logger.Debug("messenger: outbox flush: list contacts", "err", err)
+		return
+	}
+	for _, c := range contacts {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		items, err := m.storage.PendingForPeer(ctx, c.Hash)
+		if err != nil || len(items) == 0 {
+			continue
+		}
+		rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, lookupErr := m.resolver.Lookup(rctx, c.Hash)
+		cancel()
+		if lookupErr != nil {
+			continue
+		}
+		m.firePeerOnline(c.Hash)
+	}
 }
 
 // bootstrapAll dials every configured bootstrap peer in parallel and
@@ -336,15 +425,36 @@ func (a nodeAdapter) LookupValue(ctx context.Context, key dht.NodeID) ([]byte, [
 	return a.n.LookupValue(ctx, key)
 }
 
-// dhtRouter satisfies signaling.Router by delegating to the routing table.
-type dhtRouter struct{ node *dht.Node }
+// dhtRouter satisfies signaling.Router by delegating to the routing table,
+// with a bounded iterative-lookup fallback (design.md §4 path requests).
+type dhtRouter struct {
+	node    *dht.Node
+	timeout time.Duration
+}
 
-func (r dhtRouter) NextHop(target identity.Hash) (net.Addr, bool) {
+const messengerPathLookupTimeout = 1500 * time.Millisecond
+
+func (r dhtRouter) NextHop(ctx context.Context, target identity.Hash) (net.Addr, bool) {
 	closest := r.node.Table().Closest(target, 1)
-	if len(closest) == 0 {
-		return nil, false
+	if len(closest) > 0 && closest[0].ID == target {
+		return closest[0].Addr, true
 	}
-	return closest[0].Addr, true
+	lctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	if found, err := r.node.LookupNode(lctx, target); err == nil {
+		for _, c := range found {
+			if c.ID == target {
+				return c.Addr, true
+			}
+		}
+		if len(found) > 0 {
+			return found[0].Addr, true
+		}
+	}
+	if len(closest) > 0 {
+		return closest[0].Addr, true
+	}
+	return nil, false
 }
 
 type resolverDelegate struct{ m *Messenger }

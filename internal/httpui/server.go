@@ -97,7 +97,23 @@ func NewServer(cfg Config) (*Server, error) {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	cfg.Messenger.SetIncomingHandler(s.onIncomingSession)
+	cfg.Messenger.SetPeerOnlineHandler(s.onPeerOnline)
 	return s, nil
+}
+
+// onPeerOnline broadcasts a peer-online envelope to every connected SSE
+// client so the UI can drain pending outbox items for that peer.
+func (s *Server) onPeerOnline(peer identity.Hash) {
+	env := envelope{Type: "peer_online", Peer: peer.String()}
+	s.wsMu.Lock()
+	clients := make([]*sseClient, 0, len(s.wsConns))
+	for c := range s.wsConns {
+		clients = append(clients, c)
+	}
+	s.wsMu.Unlock()
+	for _, c := range clients {
+		c.send(env)
+	}
 }
 
 // URL returns the user-friendly URL with the auth token baked in.

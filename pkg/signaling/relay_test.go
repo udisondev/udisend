@@ -35,7 +35,7 @@ func (f *fakeRouter) put(target identity.Hash, addr net.Addr) {
 	f.mu.Unlock()
 }
 
-func (f *fakeRouter) NextHop(target identity.Hash) (net.Addr, bool) {
+func (f *fakeRouter) NextHop(_ context.Context, target identity.Hash) (net.Addr, bool) {
 	f.mu.Lock()
 	addr, ok := f.table[target]
 	f.mu.Unlock()

@@ -78,7 +78,7 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 		Logger:       cfg.Logger,
 		ExtraHandler: signalSvc.HandlePacket,
 	})
-	signalSvc.SetRouter(dhtRouter{node: dhtNode})
+	signalSvc.SetRouter(newDHTRouter(dhtNode))
 
 	pubAddr := tr.LocalAddr().String()
 	caps := presence.CapCanRelay | presence.CapCanBootstrap
@@ -197,17 +197,64 @@ func (a nodeAdapter) LookupValue(ctx context.Context, key dht.NodeID) ([]byte, [
 	return a.n.LookupValue(ctx, key)
 }
 
-// dhtRouter satisfies signaling.Router by delegating to the routing table.
-type dhtRouter struct{ node *dht.Node }
+// routingBackend is the subset of dht.Node behaviour dhtRouter needs.
+// Interface form lets unit tests substitute a stub.
+type routingBackend interface {
+	Closest(target identity.Hash, n int) []dht.Contact
+	LookupNode(ctx context.Context, target identity.Hash) ([]dht.Contact, error)
+}
 
-// NextHop returns the closest known contact's transport address for the
-// destination hash, or false if the routing table has no candidates.
-func (r dhtRouter) NextHop(target identity.Hash) (net.Addr, bool) {
-	closest := r.node.Table().Closest(target, 1)
-	if len(closest) == 0 {
-		return nil, false
+// dhtRouter satisfies signaling.Router via routingBackend, with a bounded
+// iterative-lookup fallback (design.md §4 path requests).
+type dhtRouter struct {
+	backend routingBackend
+	timeout time.Duration
+}
+
+const defaultPathLookupTimeout = 1500 * time.Millisecond
+
+func newDHTRouter(node *dht.Node) dhtRouter {
+	return dhtRouter{backend: nodeRouting{node}, timeout: defaultPathLookupTimeout}
+}
+
+// NextHop resolves a recipient destination hash to the address of the
+// next routing hop. Fast path: routing table has `target` directly.
+// Slow path: bounded iterative LookupNode tries to discover a route
+// through the DHT. If lookup returns nothing, fall back to the closest
+// known contact (best-effort hop). Returns false only when both the
+// local table is empty and lookup yields nothing.
+func (r dhtRouter) NextHop(ctx context.Context, target identity.Hash) (net.Addr, bool) {
+	closest := r.backend.Closest(target, 1)
+	if len(closest) > 0 && closest[0].ID == target {
+		return closest[0].Addr, true
 	}
-	return closest[0].Addr, true
+	lctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	if found, err := r.backend.LookupNode(lctx, target); err == nil {
+		for _, c := range found {
+			if c.ID == target {
+				return c.Addr, true
+			}
+		}
+		if len(found) > 0 {
+			return found[0].Addr, true
+		}
+	}
+	if len(closest) > 0 {
+		return closest[0].Addr, true
+	}
+	return nil, false
+}
+
+// nodeRouting wraps *dht.Node into routingBackend.
+type nodeRouting struct{ n *dht.Node }
+
+func (b nodeRouting) Closest(target identity.Hash, n int) []dht.Contact {
+	return b.n.Table().Closest(target, n)
+}
+
+func (b nodeRouting) LookupNode(ctx context.Context, target identity.Hash) ([]dht.Contact, error) {
+	return b.n.LookupNode(ctx, target)
 }
 
 // noopResolver satisfies signaling.AddressResolver for a node that doesn't

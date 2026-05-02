@@ -32,9 +32,10 @@ type AddressResolver interface {
 // needs to forward envelopes whose recipient is not us. NextHop returns
 // the next-hop address closest to `target` and ok=true, or ok=false if
 // the local node knows no route. Implementations must be safe for
-// concurrent use.
+// concurrent use and may issue bounded DHT path-requests inside (the
+// passed ctx caps the round trip).
 type Router interface {
-	NextHop(target identity.Hash) (net.Addr, bool)
+	NextHop(ctx context.Context, target identity.Hash) (net.Addr, bool)
 }
 
 // Handler is invoked when a remote peer establishes a session.
@@ -156,7 +157,7 @@ func (s *Service) relay(ctx context.Context, env *Envelope) {
 			"recipient", env.Recipient, "hops", env.Hops)
 		return
 	}
-	next, ok := (*rp).NextHop(env.Recipient)
+	next, ok := (*rp).NextHop(ctx, env.Recipient)
 	if !ok {
 		s.logger.Debug("signaling: relay drop (no route)",
 			"recipient", env.Recipient)
