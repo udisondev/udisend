@@ -1,6 +1,7 @@
 package signaling
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -45,6 +46,7 @@ type Handler func(peer identity.Hash, ch *Channel)
 // connect / accept API.
 type Service struct {
 	id        *identity.Identity
+	selfDH    identity.Hash // cached id.Public().DestinationHash() — used per packet
 	transport transport.Transport
 	resolver  AddressResolver
 	router    atomic.Pointer[Router]
@@ -83,6 +85,7 @@ func NewService(cfg Config) *Service {
 	}
 	s := &Service{
 		id:        cfg.Identity,
+		selfDH:    cfg.Identity.Public().DestinationHash(),
 		transport: cfg.Transport,
 		resolver:  cfg.Resolver,
 		logger:    cfg.Logger,
@@ -146,12 +149,17 @@ func (s *Service) HandlePacket(ctx context.Context, pkt transport.Packet, typ by
 	if typ != dht.MsgRelay {
 		return false
 	}
+	select {
+	case <-s.closed:
+		return true // service shut down — don't insert into a cleared map
+	default:
+	}
 	env, err := DecodeBody(payload)
 	if err != nil {
 		s.logger.Debug("signaling: bad envelope", "from", pkt.From, "err", err)
 		return true
 	}
-	if env.Recipient != s.id.Public().DestinationHash() {
+	if env.Recipient != s.selfDH {
 		s.relay(ctx, env)
 		return true
 	}
@@ -268,7 +276,7 @@ func (s *Service) acceptInit(ctx context.Context, from net.Addr, env *Envelope) 
 	}
 
 	key := sessionKey{peer: env.Sender, sid: env.SessionID}
-	ch := s.newChannel(env.Sender, env.SessionID, from, resp, false)
+	ch := s.newChannel(env.Sender, env.SessionID, from, resp)
 	s.mu.Lock()
 	s.sessions[key] = ch
 	s.mu.Unlock()
@@ -277,7 +285,9 @@ func (s *Service) acceptInit(ctx context.Context, from net.Addr, env *Envelope) 
 	// never sends HELLO_FINAL the channel sits forever consuming memory
 	// (pending buffer, slot in s.sessions). Schedule eviction after the
 	// same window Connect honours; a real peer always finishes within it.
-	time.AfterFunc(HandshakeTimeout, func() {
+	// Stored on the Channel so handleFinal can Stop the timer once the
+	// handshake completes successfully.
+	ch.handshakeTimer = time.AfterFunc(HandshakeTimeout, func() {
 		if ch.noise.Done() {
 			return
 		}
@@ -308,21 +318,12 @@ func (s *Service) verifySenderIdentity(parent context.Context, sender identity.H
 		return true // unknown / slow: defer to higher layer
 	}
 
-	expected := rec.Public.XPub
 	got, err := sess.PeerStatic()
 	if err != nil {
 		return false
 	}
-	if len(got) != len(expected) {
-		return false
-	}
-	for i := range expected {
-		if got[i] != expected[i] {
-			return false
-		}
-	}
 
-	return true
+	return bytes.Equal(got, rec.Public.XPub[:])
 }
 
 // Connect initiates a handshake with `peer` and returns the open channel.
@@ -340,7 +341,7 @@ func (s *Service) Connect(ctx context.Context, peer identity.Hash) (*Channel, er
 		return nil, fmt.Errorf("signaling: noise init: %w", err)
 	}
 	sid := NewSessionID()
-	ch := s.newChannel(peer, sid, addr, init, true)
+	ch := s.newChannel(peer, sid, addr, init)
 	s.mu.Lock()
 	s.sessions[sessionKey{peer: peer, sid: sid}] = ch
 	s.mu.Unlock()
@@ -395,7 +396,7 @@ func (s *Service) unregister(key sessionKey) {
 func (s *Service) sendEnvelope(ctx context.Context, ch *Channel, innerType byte, payload []byte) error {
 	env := &Envelope{
 		Recipient: ch.peer,
-		Sender:    s.id.Public().DestinationHash(),
+		Sender:    s.selfDH,
 		SessionID: ch.sid,
 		InnerType: innerType,
 		Payload:   payload,

@@ -33,7 +33,13 @@ const (
 
 	// privateMarshalVersion / publicMarshalVersion identify the wire layout.
 	privateMarshalVersion byte = 0x01
-	publicMarshalVersion  byte = 0x01
+	// PublicMarshalVersion is the wire-format version emitted by
+	// PublicIdentity.MarshalBinary. Exported so adjacent packages
+	// (e.g. pkg/presence) that inline the layout for hot-path encoding
+	// stay in sync if it ever bumps — bumping here without updating
+	// the inlined call sites would otherwise produce a silent drift.
+	PublicMarshalVersion byte = 0x01
+	publicMarshalVersion      = PublicMarshalVersion
 )
 
 // Errors returned by the package.

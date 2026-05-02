@@ -169,7 +169,7 @@ func (r *Record) MarshalBinary() ([]byte, error) {
 	const fixed = 1 + 1 + identity.PublicKeySize + 4 + 8 + 4 + 2 + identity.SignatureSize
 	w := wire.NewWriterSized(fixed + 2 + len(r.Address))
 	w.WriteUint8(recordVersion)
-	w.WriteUint8(publicIdentityVersion)
+	w.WriteUint8(identity.PublicMarshalVersion)
 	w.WriteFixed(r.Public.EdPub)
 	w.WriteFixed(r.Public.XPub[:])
 	w.WriteString(r.Address)
@@ -262,7 +262,7 @@ func (r *Record) signingBytes() ([]byte, error) {
 	w := wire.NewWriterSized(fixed + 2 + len(r.Address))
 	w.WriteUint8(recordVersion)
 	// Inlined PublicIdentity wire layout: version(1) | ed_pub(32) | x_pub(32).
-	w.WriteUint8(publicIdentityVersion)
+	w.WriteUint8(identity.PublicMarshalVersion)
 	w.WriteFixed(r.Public.EdPub)
 	w.WriteFixed(r.Public.XPub[:])
 	w.WriteString(r.Address)
@@ -272,10 +272,6 @@ func (r *Record) signingBytes() ([]byte, error) {
 	w.WriteUint16(r.MaxRelaySlots)
 	return w.Bytes(), nil
 }
-
-// publicIdentityVersion mirrors identity.publicMarshalVersion (kept private
-// in pkg/identity). v1 is the only emitted version.
-const publicIdentityVersion byte = 0x01
 
 // ed25519PublicKeySize matches ed25519.PublicKeySize without the import
 // cost — used for a sanity check on r.Public before we marshal it inline.
