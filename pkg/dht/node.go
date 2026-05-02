@@ -584,9 +584,9 @@ func sourceKey(addr net.Addr) string {
 }
 
 func encodeContacts(cs []Contact) []EncodedContact {
-	out := make([]EncodedContact, 0, len(cs))
-	for _, c := range cs {
-		out = append(out, EncodedContact{ID: c.ID, Addr: c.Addr.String()})
+	out := make([]EncodedContact, len(cs))
+	for i, c := range cs {
+		out[i] = EncodedContact{ID: c.ID, Addr: c.Addr.String()}
 	}
 	return out
 }

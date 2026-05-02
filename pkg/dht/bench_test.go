@@ -163,6 +163,58 @@ func BenchmarkDecodeMsg_Store(b *testing.B) {
 	}
 }
 
+// BenchmarkRoutingTable_ClosestEncode simulates the full FIND_NODE reply
+// path: look up K closest contacts and encode them into a NodesMsg frame.
+// This is what happens on every FIND_NODE / FIND_VALUE the network node
+// serves.
+func BenchmarkRoutingTable_ClosestEncode(b *testing.B) {
+	self := id("00000000000000000000000000000001")
+	rt := dht.NewRoutingTable(self, dht.DefaultK)
+	for i := range 256 {
+		var raw [identity.HashSize]byte
+		_, _ = rand.Read(raw[:])
+		var nid dht.NodeID
+		copy(nid[:], raw[:])
+		addrStr := "192.0.2." + itoa(i&255) + ":9000"
+		rt.Add(dht.Contact{
+			ID:   nid,
+			Addr: dummyAddr(addrStr),
+		})
+	}
+	target := id("0123456789abcdef0123456789abcdef")
+	hdr := benchHeader()
+	b.ReportAllocs()
+	for b.Loop() {
+		closest := rt.Closest(target, dht.DefaultK)
+		// Mirror dht.encodeContacts (unexported) inside the bench so we
+		// measure the same alloc shape the real handler pays.
+		encoded := make([]dht.EncodedContact, len(closest))
+		for j, c := range closest {
+			encoded[j] = dht.EncodedContact{ID: c.ID, Addr: c.Addr.String()}
+		}
+		_, err := dht.EncodeMsg(&dht.NodesMsg{Header: hdr, Contacts: encoded})
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// itoa is a tiny stack-allocating itoa for benchmarks; the stdlib version
+// allocates.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [4]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
 // BenchmarkRoutingTable_Closest exercises the Kademlia routing-table
 // `Closest` lookup that fires on every FIND_NODE / FIND_VALUE.
 func BenchmarkRoutingTable_Closest(b *testing.B) {
