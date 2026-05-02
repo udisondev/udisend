@@ -1,7 +1,7 @@
 package dht
 
 import (
-	"sort"
+	"slices"
 	"sync"
 	"time"
 )
@@ -99,11 +99,29 @@ func (rt *RoutingTable) Closest(target NodeID, n int) []Contact {
 		return nil
 	}
 	all := rt.All()
-	sort.Slice(all, func(i, j int) bool {
-		return Less(Distance(all[i].ID, target), Distance(all[j].ID, target))
+	slices.SortFunc(all, func(a, b Contact) int {
+		return distanceCompare(a.ID, b.ID, target)
 	})
 	if len(all) > n {
 		all = all[:n]
 	}
+
 	return all
+}
+
+// distanceCompare returns -1/0/+1 by XOR distance from target — the comparator
+// shape slices.SortFunc expects, equivalent to dht.Less for sorting.
+func distanceCompare(a, b, target NodeID) int {
+	da, db := Distance(a, target), Distance(b, target)
+	for i := range da {
+		if da[i] != db[i] {
+			if da[i] < db[i] {
+				return -1
+			}
+
+			return 1
+		}
+	}
+
+	return 0
 }

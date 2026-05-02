@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -413,8 +413,7 @@ func (n *Node) LookupNode(ctx context.Context, target NodeID) ([]Contact, error)
 // LookupValue runs an iterative FIND_VALUE for key. Returns (value, nil)
 // on success or (nil, contacts) if no peer holds the value.
 func (n *Node) LookupValue(ctx context.Context, key NodeID) ([]byte, []Contact, error) {
-	value, foundContacts, err := n.iterativeFindValue(ctx, key)
-	return value, foundContacts, err
+	return n.iterativeFindValue(ctx, key)
 }
 
 // PutValue stores key=value on the K closest known peers, in parallel.
@@ -431,15 +430,13 @@ func (n *Node) PutValue(ctx context.Context, key NodeID, value []byte) error {
 	var wg sync.WaitGroup
 	errs := make([]error, len(closest))
 	for i, c := range closest {
-		wg.Add(1)
-		go func(i int, c Contact) {
-			defer wg.Done()
+		wg.Go(func() {
 			storeCtx, cancel := context.WithTimeout(ctx, n.cfg.RequestTimeout)
 			defer cancel()
 			if err := n.Store(storeCtx, c.Addr, key, value); err != nil {
 				errs[i] = err
 			}
-		}(i, c)
+		})
 	}
 	wg.Wait()
 	// Always cache locally too.
@@ -541,18 +538,17 @@ func (n *Node) iterativeFindValue(ctx context.Context, key NodeID) ([]byte, []Co
 }
 
 func mergeShortlist(list []Contact, c Contact, target NodeID, k int) []Contact {
-	for _, e := range list {
-		if e.ID == c.ID {
-			return list
-		}
+	if slices.ContainsFunc(list, func(e Contact) bool { return e.ID == c.ID }) {
+		return list
 	}
 	list = append(list, c)
-	sort.Slice(list, func(i, j int) bool {
-		return Less(Distance(list[i].ID, target), Distance(list[j].ID, target))
+	slices.SortFunc(list, func(a, b Contact) int {
+		return distanceCompare(a.ID, b.ID, target)
 	})
 	if len(list) > k {
 		list = list[:k]
 	}
+
 	return list
 }
 

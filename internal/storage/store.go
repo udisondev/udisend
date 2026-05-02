@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -209,10 +210,10 @@ func (s *Store) LoadHistory(ctx context.Context, peer identity.Hash, limit int) 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// Reverse for oldest-first.
-	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
-		entries[i], entries[j] = entries[j], entries[i]
-	}
+	// SQL ordered DESC for "most recent N"; flip so the caller receives
+	// oldest-first which matches normal chat-history rendering.
+	slices.Reverse(entries)
+
 	return entries, nil
 }
 

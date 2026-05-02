@@ -438,7 +438,9 @@ func sessionIDFromChannel(ch *signaling.Channel) string {
 	return hex.EncodeToString(sid[:])
 }
 
-// nodeAdapter / resolverDelegate identical to v1.
+// nodeAdapter exposes the subset of *dht.Node that presence.NewPublisher /
+// presence.NewResolver consume — the rest of the *dht.Node API is hidden
+// from the presence layer to keep the seam thin.
 type nodeAdapter struct{ n *dht.Node }
 
 func (a nodeAdapter) PutValue(ctx context.Context, key dht.NodeID, value []byte) error {
@@ -487,7 +489,7 @@ func (r *resolverDelegate) Lookup(ctx context.Context, peer identity.Hash) (*pre
 	return r.m.resolver.Lookup(ctx, peer)
 }
 
-// Errors surfaced to UI callers.
-var (
-	ErrPeerUnknown = errors.New("messenger: peer unknown")
-)
+// ErrPeerUnknown is returned when the runtime has no public-identity
+// material for the peer — neither cached locally nor resolvable via
+// presence — so a session cannot be authenticated.
+var ErrPeerUnknown = errors.New("messenger: peer unknown")

@@ -46,9 +46,7 @@ func (m *Messenger) ICEServers(ctx context.Context) []ICEServer {
 	results := make(chan result, len(contacts))
 	var wg sync.WaitGroup
 	for _, c := range contacts {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			rctx, cancel := context.WithTimeout(ctx, lookupTTL)
 			defer cancel()
 			rec, err := m.resolver.Lookup(rctx, c.ID)
@@ -62,7 +60,7 @@ func (m *Messenger) ICEServers(ctx context.Context) []ICEServer {
 			if len(r.urls) > 0 {
 				results <- r
 			}
-		}()
+		})
 	}
 	go func() { wg.Wait(); close(results) }()
 
