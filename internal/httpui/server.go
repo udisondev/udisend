@@ -9,6 +9,7 @@ package httpui
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -164,17 +165,28 @@ func (s *Server) requireToken(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) checkToken(r *http.Request) bool {
-	if t := r.URL.Query().Get("token"); t != "" && t == s.authToken {
+	if t := r.URL.Query().Get("token"); t != "" && tokenEqual(t, s.authToken) {
 		return true
 	}
+
 	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") && strings.TrimPrefix(auth, "Bearer ") == s.authToken {
+	if t, ok := strings.CutPrefix(auth, "Bearer "); ok && tokenEqual(t, s.authToken) {
 		return true
 	}
-	if c, err := r.Cookie("udisend_token"); err == nil && c.Value == s.authToken {
+
+	if c, err := r.Cookie("udisend_token"); err == nil && tokenEqual(c.Value, s.authToken) {
 		return true
 	}
+
 	return false
+}
+
+// tokenEqual is constant-time equality for HTTP-bridge auth tokens. The
+// token is high-entropy so a length-mismatch leak is harmless, but the
+// constant-time comparison removes a class of "this is fine on
+// loopback, embarrassing the day someone exposes it" remarks.
+func tokenEqual(got, want string) bool {
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 // handleSnapshot returns identity + contacts + recent history per peer.

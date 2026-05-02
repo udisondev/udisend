@@ -27,9 +27,15 @@ type Channel struct {
 	remote  net.Addr
 	service *Service
 
-	noise   *noise.Session
-	inbox   chan []byte
-	ready   chan struct{}
+	// sendMu serialises Channel.Send: flynn/noise.CipherState advances
+	// the AEAD nonce on each Encrypt and is NOT goroutine-safe; concurrent
+	// Encrypt calls would race the counter and re-use a nonce, breaking
+	// confidentiality and authenticity. The HTTP+SSE bridge fans out
+	// /api/signal/send requests across goroutines so this is reachable.
+	sendMu sync.Mutex
+	noise  *noise.Session
+	inbox  chan []byte
+	ready  chan struct{}
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -59,7 +65,16 @@ func (c *Channel) SessionID() SessionID { return c.sid }
 
 // Send encrypts payload and ships it. The payload is one logical message;
 // peers see it as a single Recv() call.
+//
+// Encrypt + send are serialised via sendMu so the AEAD nonce counter
+// inside the noise CipherState is never advanced concurrently. Holding
+// the lock across the transport.Send is fine: signaling traffic is low
+// volume (SDP + ICE + small app messages), and out-of-order delivery
+// would already break the receiver's nonce sequence anyway.
 func (c *Channel) Send(ctx context.Context, payload []byte) error {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+
 	if !c.noise.Done() {
 		return errors.New("signaling: handshake not complete")
 	}
@@ -67,6 +82,7 @@ func (c *Channel) Send(ctx context.Context, payload []byte) error {
 	if err != nil {
 		return err
 	}
+
 	return c.service.sendEnvelope(ctx, c, InnerData, ct)
 }
 

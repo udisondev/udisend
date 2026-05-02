@@ -1,6 +1,7 @@
 package dht
 
 import (
+	"net"
 	"sync"
 	"time"
 )
@@ -12,6 +13,16 @@ type Store interface {
 	Get(key NodeID) ([]byte, bool)
 	// Sweep removes entries whose TTL has elapsed relative to `now`.
 	Sweep(now time.Time)
+}
+
+// SourcedStore is an optional Store extension. When the DHT node hands
+// a STORE RPC to a Store that implements this interface, the source
+// address of the packet is passed too so per-source-IP defenses
+// (Sybil rate-limit, abuse heuristics) can key on the real network
+// origin rather than fields the publisher claims about themselves.
+type SourcedStore interface {
+	Store
+	PutFromSource(key NodeID, value []byte, ttl time.Duration, source net.Addr)
 }
 
 // MemoryStore is the default in-memory Store with TTL eviction.

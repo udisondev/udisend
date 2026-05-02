@@ -206,7 +206,11 @@ func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
 		n.deliver(m.Header.TxID, m)
 	case *StoreMsg:
 		n.refreshContact(m.Header, pkt.From)
-		n.store.Put(m.Key, m.Value, DefaultStoreTTL)
+		if ss, ok := n.store.(SourcedStore); ok {
+			ss.PutFromSource(m.Key, m.Value, DefaultStoreTTL, pkt.From)
+		} else {
+			n.store.Put(m.Key, m.Value, DefaultStoreTTL)
+		}
 		_ = n.sendMsg(ctx, pkt.From, &StoreOKMsg{Header: n.replyHeader(m.Header.TxID)})
 	case *StoreOKMsg:
 		n.refreshContact(m.Header, pkt.From)

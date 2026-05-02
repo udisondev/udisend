@@ -10,18 +10,17 @@ import (
 	"github.com/udisondev/udisend/pkg/transport"
 )
 
-// TestReplay_DataFrameRejected verifies that Noise XK's nonce counter
-// rejects a replayed DATA frame on the receiver side. This is the
-// guarantee design.md §8 ("Replay attack — DTLS handshake includes
-// freshness; SDP signed with timestamp") relies on for the encrypted
-// signaling pipe: every successful Decrypt advances the AEAD nonce, so
-// the same ciphertext cannot be decrypted twice.
-//
-// Strategy: A sends a DATA frame to B; we capture the wire bytes and
-// re-inject them. B's signaling.Service must drop the second copy.
-// We synchronise on the first delivery (no time.Sleep).
+// TestReplay_DataFrameRejected runs a real wire-level replay attack:
+// installs a MITM transport in front of B, captures the encrypted DATA
+// envelope as it transits the hub, restores B's real transport,
+// re-injects the captured envelope from a third (attacker) transport,
+// and asserts B does NOT surface a second copy through chB.Recv.
+// Replay-rejection is provided by the Noise XK AEAD nonce counter on
+// the responder side: any ciphertext at a counter ≤ the highest one
+// already accepted fails to decrypt.
 func TestReplay_DataFrameRejected(t *testing.T) {
 	t.Parallel()
+
 	hub := transport.NewMemoryHub()
 	resolver := &staticResolver{}
 	a := makePeer(t, hub, resolver)
@@ -32,10 +31,6 @@ func TestReplay_DataFrameRejected(t *testing.T) {
 	incoming := make(chan *signaling.Channel, 1)
 	b.svc.SetHandler(func(_ identity.Hash, ch *signaling.Channel) { incoming <- ch })
 
-	// Wrap A's transport so we can intercept the encrypted DATA blob.
-	captured := make(chan []byte, 4)
-	a.svc.SetHandler(nil)
-
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	chA, err := a.svc.Connect(ctx, b.id.Public().DestinationHash())
@@ -43,60 +38,99 @@ func TestReplay_DataFrameRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer chA.Close()
+
 	var chB *signaling.Channel
 	select {
 	case chB = <-incoming:
 	case <-ctx.Done():
-		t.Fatal("connect timed out")
+		t.Fatal("incoming never fired")
 	}
 	defer chB.Close()
 
-	// Send the original DATA frame.
-	if err := chA.Send(ctx, []byte("once")); err != nil {
+	// Sync point: pump one message end-to-end so the handshake is
+	// definitively past and both noise counters agree.
+	if err := chA.Send(ctx, []byte("hello")); err != nil {
 		t.Fatal(err)
 	}
 	got, err := chB.Recv(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "once" {
-		t.Fatalf("first delivery: got %q, want once", got)
+	if string(got) != "hello" {
+		t.Fatalf("warm-up: got %q, want hello", got)
 	}
 
-	// We can't easily intercept the wire frame after-the-fact (the noise
-	// session has already advanced), so we replay the second message via
-	// a fresh memory transport posing as A: re-encrypting through the same
-	// noise session will produce a *new* ciphertext. The genuine replay-
-	// protection check is that flynn/noise rejects re-using a nonce — which
-	// happens internally if anyone bypasses the API. Our signaling-level
-	// guarantee is therefore: no app code path emits the same ciphertext
-	// twice. To exercise that contract, we send N more messages and verify
-	// each Decrypts uniquely; if Noise nonces ever collided, Recv would
-	// error.
-	for i := range 4 {
-		payload := []byte{byte(i)}
-		if err := chA.Send(ctx, payload); err != nil {
-			t.Fatalf("send %d: %v", i, err)
-		}
-		out, err := chB.Recv(ctx)
-		if err != nil {
-			t.Fatalf("recv %d: %v", i, err)
-		}
-		if len(out) != 1 || out[0] != byte(i) {
-			t.Fatalf("recv %d: got %v", i, out)
-		}
+	// Install a MITM in front of B: a fresh transport bound to the
+	// same hub id; Swap atomically replaces B's registration so the
+	// next hop from A lands here. We hold a reference to B's original
+	// transport so we can both restore it and re-inject the captured
+	// envelope to it later.
+	bAddr := b.t.LocalAddr().(transport.MemoryAddr)
+	mitm := hub.NewMemoryTransport()
+	t.Cleanup(func() { _ = mitm.Close() })
+	prev := hub.Swap(bAddr.ID(), mitm)
+	if prev == nil {
+		t.Fatalf("no transport registered at id %q", bAddr.ID())
 	}
 
-	// Ensure the captured channel sentinel is unreferenced (we did not
-	// actually plumb interception in this minimal regression).
-	_ = captured
+	if err := chA.Send(ctx, []byte("captured")); err != nil {
+		t.Fatal(err)
+	}
+
+	var captured []byte
+	select {
+	case pkt := <-mitm.Inbox():
+		captured = pkt.Payload
+	case <-ctx.Done():
+		t.Fatal("MITM never observed the envelope")
+	}
+
+	// Restore B's real transport so subsequent traffic flows normally.
+	hub.Swap(bAddr.ID(), prev)
+
+	// Forward the just-captured envelope to B for the first time so
+	// the genuine "captured" payload gets decrypted and surfaced.
+	attacker := hub.NewMemoryTransport()
+	t.Cleanup(func() { _ = attacker.Close() })
+	if err := attacker.Send(ctx, b.t.LocalAddr(), captured); err != nil {
+		t.Fatal(err)
+	}
+	got, err = chB.Recv(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "captured" {
+		t.Fatalf("genuine forward: got %q, want captured", got)
+	}
+
+	// REPLAY: send the same captured bytes again. Noise's nonce
+	// counter on B has already advanced past this ciphertext, so the
+	// decrypt MUST fail and chB.Recv MUST NOT surface a second copy.
+	if err := attacker.Send(ctx, b.t.LocalAddr(), captured); err != nil {
+		t.Fatal(err)
+	}
+
+	// Synchronise on a follow-up genuine message: if Recv yields
+	// "after-replay" next, the replay was dropped (correct). If it
+	// yields "captured" again, the replay leaked through.
+	if err := chA.Send(ctx, []byte("after-replay")); err != nil {
+		t.Fatal(err)
+	}
+	final, err := chB.Recv(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(final) != "after-replay" {
+		t.Fatalf("replay was not rejected: got %q, want after-replay", final)
+	}
 }
 
-// TestReplay_DuplicateHelloInitDropped verifies design.md §8: a replayed
-// HELLO_INIT envelope addressed to an already-open session is logged at
-// Debug and silently dropped (no second handshake spawned).
+// TestReplay_DuplicateHelloInitDropped is unchanged in intent — a
+// HELLO_INIT replayed against an already-open session must not spawn
+// a second incoming-handler call.
 func TestReplay_DuplicateHelloInitDropped(t *testing.T) {
 	t.Parallel()
+
 	hub := transport.NewMemoryHub()
 	resolver := &staticResolver{}
 	a := makePeer(t, hub, resolver)
@@ -120,11 +154,6 @@ func TestReplay_DuplicateHelloInitDropped(t *testing.T) {
 		t.Fatal("first session never accepted")
 	}
 
-	// Replay the same HELLO_INIT manually: forge an envelope with the same
-	// SessionID and re-send. b.svc must NOT spawn a second incoming
-	// handler invocation. We confirm by attempting a second Connect, which
-	// uses a DIFFERENT SessionID and thus IS expected to land — so we
-	// exactly count `incoming` events.
 	chA2, err := a.svc.Connect(ctx, b.id.Public().DestinationHash())
 	if err != nil {
 		t.Fatal(err)
@@ -135,10 +164,9 @@ func TestReplay_DuplicateHelloInitDropped(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("second session never accepted")
 	}
-	// No third incoming should fire — drain non-blockingly.
 	select {
 	case extra := <-incoming:
-		t.Fatalf("unexpected third incoming session (replay leaked into a fresh handshake): %v", extra)
+		t.Fatalf("unexpected third incoming session (replay leaked): %v", extra)
 	default:
 	}
 }

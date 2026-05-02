@@ -393,12 +393,20 @@ func (m *Messenger) installSession(peer identity.Hash, ch *signaling.Channel, pe
 		inbox:     make(chan SignalEvent, 32),
 		closed:    make(chan struct{}),
 	}
+	// Snapshot any colliding session inside the lock, then call its
+	// shutdown OUTSIDE — Session.shutdown re-acquires sessionsMu via
+	// removeSession, which would self-deadlock under sync.Mutex's
+	// non-reentrant rules. Same pattern as Close.
+	key := sessionKey{peer: peer, sid: sid}
 	m.sessionsMu.Lock()
-	if old, ok := m.sessions[sessionKey{peer: peer, sid: sid}]; ok {
+	old := m.sessions[key]
+	m.sessions[key] = s
+	m.sessionsMu.Unlock()
+
+	if old != nil {
 		old.shutdown()
 	}
-	m.sessions[sessionKey{peer: peer, sid: sid}] = s
-	m.sessionsMu.Unlock()
+
 	return s
 }
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -39,10 +40,10 @@ func TestSignalingBridge_TwoMessengers(t *testing.T) {
 	bobSSE := openSSE(t, ctx, bob)
 	defer bobSSE.Close()
 
-	// Wait for presence to propagate.
-	time.Sleep(2 * time.Second)
-
-	// Alice adds Bob (also seeds bob's contacts).
+	// Alice adds Bob — this is the natural sync on presence: the
+	// runtime's resolveWithRetry loops AddContact for ~3 attempts with
+	// 800 ms backoff, so by the time it returns nil, Bob's record has
+	// been resolved through the DHT. No arbitrary sleep needed.
 	if _, err := postJSON(alice, "/api/contacts/add", map[string]any{
 		"hash": bob.hash, "alias": "bob",
 	}); err != nil {
@@ -132,8 +133,10 @@ func startMessenger(t *testing.T, ctx context.Context, name, root, udp, http str
 		srv.Close()
 		mngr.Close()
 	})
-	// Wait briefly for the HTTP listener to be ready.
-	time.Sleep(100 * time.Millisecond)
+
+	// Poll until the HTTP listener accepts connections.
+	waitListenerReady(t, ctx, srv.LocalAddress())
+
 	return &peer{
 		mngr:  mngr,
 		srv:   srv,
@@ -171,6 +174,7 @@ type sseStream struct {
 
 func openSSE(t *testing.T, ctx context.Context, p *peer) *sseStream {
 	t.Helper()
+
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+p.srv.LocalAddress()+"/api/events", nil)
 	req.Header.Set("Authorization", "Bearer "+p.token)
 	resp, err := http.DefaultClient.Do(req)
@@ -180,12 +184,37 @@ func openSSE(t *testing.T, ctx context.Context, p *peer) *sseStream {
 	if resp.StatusCode != 200 {
 		t.Fatalf("SSE status %d", resp.StatusCode)
 	}
+
 	s := &sseStream{resp: resp, stop: make(chan struct{})}
 	go s.read()
-	// Give the server-side a moment to register the SSE client.
-	time.Sleep(50 * time.Millisecond)
+
+	// The SSE handler now registers the client BEFORE flushing headers
+	// (see internal/httpui/sse.go), so once Do() returned a 200 the
+	// registration is already visible to onIncomingSession. No sleep
+	// or polling needed.
+
 	return s
 }
+
+// waitListenerReady polls a TCP address until it accepts a connection
+// or ctx expires. Replaces the previous time.Sleep(100ms).
+func waitListenerReady(t *testing.T, ctx context.Context, addr string) {
+	t.Helper()
+
+	for {
+		conn, err := net.Dial("tcp", addr)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("listener at %s never came up: %v", addr, err)
+		default:
+		}
+	}
+}
+
 
 func (s *sseStream) read() {
 	defer s.resp.Body.Close()

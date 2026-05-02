@@ -54,12 +54,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	flusher.Flush()
 
+	// Register the client BEFORE flushing headers so any concurrent
+	// onIncomingSession sees the registration before the HTTP client
+	// observes a "200 OK" — otherwise tests racing on `Do()` returning
+	// vs registerClient running can drop the very first incoming
+	// session in production-like scenarios too.
 	c := &sseClient{
 		server:   s,
 		id:       clientCounter.Add(1),
@@ -70,6 +70,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	s.registerClient(c)
 	defer s.unregisterClient(c)
 	defer c.shutdown()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher.Flush()
 
 	// Keep-alive ticker — SSE comments every 25s prevent intermediate proxies
 	// (and overly aggressive browsers) from killing an idle connection.

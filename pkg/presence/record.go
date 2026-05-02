@@ -81,13 +81,14 @@ var (
 	ErrIdentityMismatch = errors.New("presence: pubkey/destination mismatch")
 )
 
-// Wire-format versions. v2 adds UptimeHint (uint32) and MaxRelaySlots
-// (uint16) after Capabilities, both covered by the signature. v1 records
-// are still accepted on decode (UptimeHint/MaxRelaySlots default to 0).
-const (
-	recordVersion   byte = 0x02
-	recordVersionV1 byte = 0x01
-)
+// recordVersion is the only wire-format version this codebase emits.
+// A short-lived v1 layout (without UptimeHint/MaxRelaySlots) existed in
+// pre-MVP commits but was never deployed; it is intentionally not
+// accepted here — keeping the signing-bytes preimage in sync with the
+// wire layout matters more than backward compatibility no real client
+// can demand. Forward compatibility comes from TLV extensions appended
+// after the signature (see UnmarshalBinary).
+const recordVersion byte = 0x02
 
 // MaxAddressLen caps the serialised address length (defensive; real
 // addresses are tens of bytes).
@@ -163,17 +164,19 @@ func (r *Record) MarshalBinary() ([]byte, error) {
 	return w.Bytes(), nil
 }
 
-// UnmarshalBinary parses a Record produced by MarshalBinary. Both v1 and
-// v2 layouts are accepted; v1 records have UptimeHint/MaxRelaySlots zero.
+// UnmarshalBinary parses a Record produced by MarshalBinary. Only the
+// current wire format is accepted; trailing unknown TLV blocks are
+// tolerated for forward compatibility.
 func (r *Record) UnmarshalBinary(data []byte) error {
 	b := wire.NewBuffer(data)
 	ver, err := b.ReadUint8()
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
-	if ver != recordVersion && ver != recordVersionV1 {
+	if ver != recordVersion {
 		return fmt.Errorf("%w: version=%d", ErrInvalidRecord, ver)
 	}
+
 	pubBlob, err := b.ReadFixed(1 + identity.PublicKeySize)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
@@ -181,41 +184,47 @@ func (r *Record) UnmarshalBinary(data []byte) error {
 	if err := r.Public.UnmarshalBinary(pubBlob); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
+
 	addr, err := b.ReadString(MaxAddressLen)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
 	r.Address = addr
+
 	caps, err := b.ReadUint32()
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
 	r.Capabilities = Capability(caps)
+
 	ts, err := b.ReadUint64()
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
 	r.IssuedAt = time.Unix(int64(ts), 0).UTC()
-	if ver >= recordVersion {
-		uptime, err := b.ReadUint32()
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
-		}
-		r.UptimeHint = uptime
-		slots, err := b.ReadUint16()
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
-		}
-		r.MaxRelaySlots = slots
+
+	uptime, err := b.ReadUint32()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
+	r.UptimeHint = uptime
+
+	slots, err := b.ReadUint16()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
+	}
+	r.MaxRelaySlots = slots
+
 	sig, err := b.ReadFixed(identity.SignatureSize)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
 	copy(r.Signature[:], sig)
+
 	if err := b.SkipUnknownTLVs(); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}
+
 	return nil
 }
 

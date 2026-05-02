@@ -15,15 +15,30 @@ import (
 const DefaultMaxRecordsPerIP = 16
 
 // RateLimitedStore wraps a dht.Store and enforces a per-source-IP cap on
-// stored presence records. Non-presence values pass through unchanged
-// (the underlying dht.Store sees them, the limit does not apply). Updates
-// to an existing key by the same IP do not count against the limit.
+// stored presence records. It implements dht.SourcedStore so the DHT
+// node hands the real packet origin (`net.Addr`) — keying the cap on
+// the claimed `Record.Address` would let an attacker pin the cap on a
+// victim's IP and lock them out.
+//
+// Records that fail signature verification are dropped before any
+// counter is touched (no slot is consumed by garbage). Non-presence
+// blobs (anything that fails to unmarshal as Record) pass through to
+// the inner store unchanged: the rate limit applies to presence only.
 type RateLimitedStore struct {
 	inner dht.Store
 
 	// MaxPerIP is the per-IP record cap. Zero means DefaultMaxRecordsPerIP.
 	// Negative disables limiting (useful for tests).
 	MaxPerIP int
+
+	// VerifyTTL bounds record IssuedAt freshness during signature
+	// validation. Zero means "do not enforce expiry" — verify the
+	// signature only.
+	VerifyTTL time.Duration
+
+	// Clock returns the wall-clock used for verification freshness.
+	// Defaults to time.Now.
+	Clock func() time.Time
 
 	mu      sync.Mutex
 	keyByIP map[string]map[dht.NodeID]struct{} // ip → set of keys it owns
@@ -39,22 +54,39 @@ func NewRateLimitedStore(inner dht.Store) *RateLimitedStore {
 	}
 }
 
-// Put stores value under key. If the value parses as a presence Record
-// and the source IP already owns MaxPerIP distinct keys (and key is new),
-// the call is silently dropped — Sybil hosts can't flood a victim's
-// neighbourhood with hundreds of fake records by spinning identities.
+// Put is the unsourced path — used by callers that do not know the
+// network origin (local writes, tests). It applies no per-IP limit
+// because there is no "per IP" to apply against.
 func (s *RateLimitedStore) Put(key dht.NodeID, value []byte, ttl time.Duration) {
-	var rec Record
-	if err := rec.UnmarshalBinary(value); err != nil {
-		// Not a presence record — pass through without rate limiting.
-		s.inner.Put(key, value, ttl)
-		return
-	}
-	ip := extractIP(rec.Address)
+	s.inner.Put(key, value, ttl)
+}
+
+// PutFromSource is the rate-limited entry point used by the DHT node
+// when a STORE RPC arrives from `source`. Presence records are decoded
+// + signature-verified before any slot is allocated. Mismatches between
+// the record's claimed Address and `source` are tolerated (peers behind
+// NAT routinely have them) — the cap keys on `source` only.
+func (s *RateLimitedStore) PutFromSource(key dht.NodeID, value []byte, ttl time.Duration, source net.Addr) {
+	ip := addrIP(source)
 	if ip == "" {
 		s.inner.Put(key, value, ttl)
 		return
 	}
+
+	var rec Record
+	if err := rec.UnmarshalBinary(value); err != nil {
+		// Not a presence record — pass through; the rate limit applies
+		// only to the presence layer.
+		s.inner.Put(key, value, ttl)
+		return
+	}
+
+	now := s.now()
+	if err := rec.Verify(now, s.VerifyTTL); err != nil {
+		// Forged or stale records do not consume a slot.
+		return
+	}
+
 	limit := s.MaxPerIP
 	if limit == 0 {
 		limit = DefaultMaxRecordsPerIP
@@ -72,7 +104,6 @@ func (s *RateLimitedStore) Put(key dht.NodeID, value []byte, ttl time.Duration) 
 		return
 	}
 	if isUpdate && prev != ip {
-		// IP migrated for this key: tear down the old IP's slot.
 		if old := s.keyByIP[prev]; old != nil {
 			delete(old, key)
 			if len(old) == 0 {
@@ -87,6 +118,7 @@ func (s *RateLimitedStore) Put(key dht.NodeID, value []byte, ttl time.Duration) 
 	keys[key] = struct{}{}
 	s.ipByKey[key] = ip
 	s.mu.Unlock()
+
 	s.inner.Put(key, value, ttl)
 }
 
@@ -95,20 +127,51 @@ func (s *RateLimitedStore) Get(key dht.NodeID) ([]byte, bool) {
 	return s.inner.Get(key)
 }
 
-// Sweep is a pass-through. Per-IP slot counters are NOT pruned for
-// expired entries because we don't know the inner store's eviction; on
-// restart the maps reset. This is acceptable for MVP — the cap is a
-// soft bound, not a security boundary.
+// Sweep delegates to the inner store and prunes per-IP bookkeeping for
+// keys the inner store no longer holds — so an attacker churning
+// short-TTL records does not permanently consume a victim IP's slot
+// budget.
 func (s *RateLimitedStore) Sweep(now time.Time) {
 	s.inner.Sweep(now)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for key, ip := range s.ipByKey {
+		if _, alive := s.inner.Get(key); alive {
+			continue
+		}
+		delete(s.ipByKey, key)
+		if owned := s.keyByIP[ip]; owned != nil {
+			delete(owned, key)
+			if len(owned) == 0 {
+				delete(s.keyByIP, ip)
+			}
+		}
+	}
 }
 
-// extractIP pulls the host portion of an "ip:port" address. Returns "" if
-// the address is malformed.
-func extractIP(addr string) string {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return addr // best-effort: treat the whole string as the host
+func (s *RateLimitedStore) now() time.Time {
+	if s.Clock != nil {
+		return s.Clock()
 	}
+
+	return time.Now().UTC()
+}
+
+// addrIP extracts the host portion of a net.Addr so the rate-limiter
+// keys on subnet/host rather than ephemeral source ports.
+func addrIP(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	if u, ok := addr.(*net.UDPAddr); ok && u.IP != nil {
+		return u.IP.String()
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+
 	return host
 }

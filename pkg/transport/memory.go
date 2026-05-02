@@ -34,6 +34,11 @@ func (a MemoryAddr) Network() string { return "mem" }
 // String returns the canonical "mem:id" form.
 func (a MemoryAddr) String() string { return "mem:" + a.id }
 
+// ID returns the bare id portion (without the "mem:" scheme prefix).
+// Tests that need to swap registrations on a hub use this to look up
+// the existing entry by its caller-chosen / counter-derived id.
+func (a MemoryAddr) ID() string { return a.id }
+
 // MemoryTransport is a Transport backed by a MemoryHub.
 //
 // `in` is the multi-producer fan-in chan (any peer transport sends to it
@@ -70,10 +75,29 @@ func (h *MemoryHub) NewNamedMemoryTransport(id string) *MemoryTransport {
 		closed: make(chan struct{}),
 	}
 	go t.forward()
+
 	h.mu.Lock()
 	h.peers[id] = t
 	h.mu.Unlock()
+
 	return t
+}
+
+// Swap atomically replaces the hub registration for `id` and returns
+// the previously-registered transport (nil if none). Tests use it to
+// install a man-in-the-middle in front of an existing peer and then
+// restore it. Production code should not call this.
+func (h *MemoryHub) Swap(id string, t *MemoryTransport) *MemoryTransport {
+	h.mu.Lock()
+	prev := h.peers[id]
+	if t == nil {
+		delete(h.peers, id)
+	} else {
+		h.peers[id] = t
+	}
+	h.mu.Unlock()
+
+	return prev
 }
 
 // forward proxies in→out and is the single closer of out, so external

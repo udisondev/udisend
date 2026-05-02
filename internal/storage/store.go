@@ -383,21 +383,29 @@ func (s *Store) SeenPeersDiverse(ctx context.Context, limit int) ([]string, erro
 
 // subnetKey reduces an "ip:port" / "host:port" address to the prefix the
 // diverse-bootstrap filter should treat as a single neighbourhood. For
-// IPv4 — first three octets ("/24"). For IPv6 — first 64 bits ("/64").
-// For non-IP / unparsable addresses the host field itself is used.
+// IPv4 — first three octets ("/24") rendered as "10.0.0". For IPv6 —
+// first 64 bits ("/64") rendered as "2001:db8::/64"-style hex. For
+// non-IP / unparsable addresses the host field itself is used.
+//
+// The returned string is only used as a map key, so any deterministic
+// representation works — but a readable one is friendlier when these
+// land in debug logs.
 func subnetKey(addr string) string {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
 	}
+
 	ip := net.ParseIP(host)
 	if ip == nil {
 		return host
 	}
 	if v4 := ip.To4(); v4 != nil {
-		return v4[0:3].String()
+		return fmt.Sprintf("%d.%d.%d", v4[0], v4[1], v4[2])
 	}
-	return ip.To16()[0:8].String()
+	v6 := ip.To16()
+
+	return fmt.Sprintf("%x:%x:%x:%x", v6[0:2], v6[2:4], v6[4:6], v6[6:8])
 }
 
 func boolInt(b bool) int {
