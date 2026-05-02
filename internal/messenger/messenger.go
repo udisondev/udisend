@@ -119,6 +119,14 @@ func Open(ctx context.Context, cfg Config) (*Messenger, error) {
 		return nil, err
 	}
 
+	// design.md §7: if no CLI --bootstrap, seed from previously-seen peers.
+	if len(cfg.Bootstrap) == 0 {
+		if cached, err := store.SeenPeers(ctx, 50); err == nil && len(cached) > 0 {
+			cfg.Bootstrap = cached
+			cfg.Logger.Info("messenger: bootstrap from cache", "n", len(cached))
+		}
+	}
+
 	m := &Messenger{
 		cfg:       cfg,
 		id:        cfg.Identity,
@@ -300,8 +308,14 @@ func (m *Messenger) bootstrapAll(ctx context.Context) {
 			defer cancel()
 			if err := m.node.Bootstrap(bctx, netAddr); err != nil {
 				m.cfg.Logger.Warn("messenger: bootstrap", "addr", addr, "err", err)
-			} else {
-				m.cfg.Logger.Info("messenger: bootstrap ok", "addr", addr)
+				if rmErr := m.storage.ForgetSeenPeer(ctx, addr); rmErr != nil {
+					m.cfg.Logger.Debug("messenger: forget seen peer", "addr", addr, "err", rmErr)
+				}
+				return
+			}
+			m.cfg.Logger.Info("messenger: bootstrap ok", "addr", addr)
+			if recErr := m.storage.RecordSeenPeer(ctx, addr); recErr != nil {
+				m.cfg.Logger.Debug("messenger: record seen peer", "addr", addr, "err", recErr)
 			}
 		})
 	}

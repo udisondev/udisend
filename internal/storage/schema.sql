@@ -30,3 +30,13 @@ CREATE TABLE IF NOT EXISTS outbox (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS outbox_peer ON outbox(peer_hash);
+
+-- seen_peers caches network addresses we've successfully reached. On a
+-- subsequent start with no CLI --bootstrap, the runtime seeds itself from
+-- this table (design.md §7 "Bootstrap-список", item 2).
+CREATE TABLE IF NOT EXISTS seen_peers (
+    address TEXT PRIMARY KEY,
+    last_seen INTEGER NOT NULL,
+    success_count INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS seen_peers_last_seen ON seen_peers(last_seen DESC);

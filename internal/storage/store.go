@@ -308,6 +308,52 @@ func (s *Store) IncrementOutboxAttempts(ctx context.Context, id int64) error {
 	return err
 }
 
+// RecordSeenPeer remembers that we successfully reached `address`. Used by
+// the bootstrap layer to seed itself on subsequent runs without a CLI
+// --bootstrap flag (design.md §7). Timestamp is stored as unix nanos so
+// adjacent inserts within the same second can still be ordered.
+func (s *Store) RecordSeenPeer(ctx context.Context, address string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO seen_peers (address, last_seen, success_count) VALUES (?, ?, 1)
+		ON CONFLICT(address) DO UPDATE SET
+			last_seen = excluded.last_seen,
+			success_count = success_count + 1
+	`, address, time.Now().UnixNano())
+	return err
+}
+
+// SeenPeers returns up to `limit` cached bootstrap addresses, most recent
+// first. limit<=0 returns all.
+func (s *Store) SeenPeers(ctx context.Context, limit int) ([]string, error) {
+	q := "SELECT address FROM seen_peers ORDER BY last_seen DESC"
+	args := []any{}
+	if limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			return nil, err
+		}
+		out = append(out, addr)
+	}
+	return out, rows.Err()
+}
+
+// ForgetSeenPeer removes a cached bootstrap entry — used after repeated
+// dial failures so we stop wasting startup time on a dead address.
+func (s *Store) ForgetSeenPeer(ctx context.Context, address string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM seen_peers WHERE address = ?", address)
+	return err
+}
+
 func boolInt(b bool) int {
 	if b {
 		return 1

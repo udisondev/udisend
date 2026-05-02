@@ -83,6 +83,8 @@ aside#contacts-pane { background: var(--panel); border-right: 1px solid var(--bo
 #modal-root .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
 #modal-root .modal-actions button { padding: 8px 16px; border-radius: 6px; cursor: pointer; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); }
 #modal-root .modal-actions button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+#modal-root .muted { color: var(--muted); margin: 0 0 16px; font-size: 12px; }
+#modal-root .fp-block { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font: 13px ui-monospace, monospace; letter-spacing: 1.5px; word-break: break-all; margin: 4px 0 0; user-select: all; }
 
 /* ──────────────────────────────────────────────────────────────────
    Call modal — Telegram-style

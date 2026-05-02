@@ -773,14 +773,50 @@ function attachUIHandlers() {
     }
   });
 
-  els.verifyBtn.addEventListener('click', async () => {
+  els.verifyBtn.addEventListener('click', () => {
     if (!STATE.selectedHash) return;
     const c = STATE.contacts.find(x => x.hash === STATE.selectedHash);
     if (!c) return;
-    await api('/api/contacts/verify', { method: 'POST', body: { hash: c.hash, verified: !c.verified } });
-    await loadSnapshot();
-    selectContact(c.hash);
+    showVerifyModal(c);
   });
+}
+
+// showVerifyModal renders the TOFU compare flow described in
+// p2p-messenger-design.md §3: both safety numbers are displayed side by
+// side; the user is asked to compare them out-of-band (voice call, in
+// person, etc.) and only then mark the contact verified.
+function showVerifyModal(contact) {
+  const root = els.modalRoot;
+  const myFp = STATE.identity?.fingerprint || '';
+  const action = contact.verified ? 'Unverify' : 'Mark verified';
+  root.innerHTML = `
+    <div class="modal-backdrop">
+      <div class="modal">
+        <h3>Verify ${escapeHTML(contact.alias || contact.hash.slice(0, 12) + '…')}</h3>
+        <p class="muted">Compare these safety numbers out-of-band (voice/video call, in person). They must match exactly on both sides before you trust this contact.</p>
+        <label>You</label>
+        <pre class="fp-block" id="modal-fp-self">${escapeHTML(myFp)}</pre>
+        <label>${escapeHTML(contact.alias || 'Peer')}</label>
+        <pre class="fp-block" id="modal-fp-peer">${escapeHTML(contact.fingerprint || '')}</pre>
+        <div class="modal-actions">
+          <button id="modal-cancel">Cancel</button>
+          <button id="modal-confirm" class="primary">${action}</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById('modal-cancel').onclick = () => (root.innerHTML = '');
+  document.getElementById('modal-confirm').onclick = async () => {
+    try {
+      await api('/api/contacts/verify', {
+        method: 'POST',
+        body: { hash: contact.hash, verified: !contact.verified },
+      });
+      root.innerHTML = '';
+      await loadSnapshot();
+      selectContact(contact.hash);
+    } catch (e) { alert(e.message); }
+  };
 }
 
 function showAddContactModal() {
