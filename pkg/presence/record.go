@@ -188,7 +188,9 @@ func (r *Record) UnmarshalBinary(data []byte) error {
 		return fmt.Errorf("%w: version=%d", ErrInvalidRecord, ver)
 	}
 
-	pubBlob, err := b.ReadFixed(1 + identity.PublicKeySize)
+	// ReadFixedShared returns a sub-slice of the input buffer; UnmarshalBinary
+	// copies the key material into its own arrays, so we never retain it.
+	pubBlob, err := b.ReadFixedShared(1 + identity.PublicKeySize)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRecord, err)
 	}

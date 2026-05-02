@@ -122,12 +122,16 @@ func (rt *RoutingTable) Closest(target NodeID, n int) []Contact {
 }
 
 // distanceCompare returns -1/0/+1 by XOR distance from target — the comparator
-// shape slices.SortFunc expects, equivalent to dht.Less for sorting.
+// shape slices.SortFunc expects, equivalent to dht.Less for sorting. It
+// computes XOR-distances inline byte-by-byte and stops at the first
+// differing byte rather than materialising two full 16-byte arrays for
+// each comparison; the sort runs O(n log n) so the savings compound.
 func distanceCompare(a, b, target NodeID) int {
-	da, db := Distance(a, target), Distance(b, target)
-	for i := range da {
-		if da[i] != db[i] {
-			if da[i] < db[i] {
+	for i := range a {
+		da := a[i] ^ target[i]
+		db := b[i] ^ target[i]
+		if da != db {
+			if da < db {
 				return -1
 			}
 

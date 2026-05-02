@@ -261,6 +261,21 @@ func (b *Buffer) ReadFixedInto(dst []byte) error {
 	return nil
 }
 
+// ReadFixedShared returns a sub-slice of the buffer's backing array of
+// exactly n bytes and advances the cursor. Unlike ReadFixed it does NOT
+// copy: the caller must finish using the returned slice before any later
+// write to the same Buffer (Buffer is one-shot for reads in practice).
+// Useful as a zero-alloc shortcut for callers that immediately copy into
+// their own destination, like PublicIdentity.UnmarshalBinary.
+func (b *Buffer) ReadFixedShared(n int) ([]byte, error) {
+	if b.Remaining() < n {
+		return nil, ErrShortBuffer
+	}
+	out := b.buf[b.off : b.off+n]
+	b.off += n
+	return out, nil
+}
+
 // ReadString reads a uvarint-prefixed UTF-8 string in a single allocation
 // — the previous implementation went through ReadBytes which paid for the
 // byte slice and then again for the string conversion.
