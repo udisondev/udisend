@@ -114,15 +114,30 @@ func (s *Service) SetRouter(r Router) {
 }
 
 // Close terminates all sessions.
+//
+// Snapshot the active channels under s.mu, then drop the lock before
+// invoking ch.shutdown() — Channel.Close (which Session.Close in turn
+// triggers from a different goroutine) re-acquires s.mu via
+// service.unregister inside its own closeOnce.Do body. Holding s.mu
+// across the shutdown loop while the shutdown closure is queued behind
+// us creates an AB/BA cycle (Service.Close holds s.mu waits for
+// closeOnce; Channel.Close holds closeOnce waits for s.mu). Same
+// pattern as Messenger.Close documents.
 func (s *Service) Close() {
 	s.closeOnce.Do(func() {
 		close(s.closed)
+
 		s.mu.Lock()
+		toShutdown := make([]*Channel, 0, len(s.sessions))
 		for _, ch := range s.sessions {
-			ch.shutdown()
+			toShutdown = append(toShutdown, ch)
 		}
 		s.sessions = make(map[sessionKey]*Channel)
 		s.mu.Unlock()
+
+		for _, ch := range toShutdown {
+			ch.shutdown()
+		}
 	})
 }
 

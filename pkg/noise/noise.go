@@ -14,6 +14,7 @@ package noise
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/flynn/noise"
 	"golang.org/x/crypto/curve25519"
@@ -33,11 +34,17 @@ var cipherSuite = noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, no
 
 // Session encapsulates a single end of an XK handshake. After Done()
 // returns true the application can call Encrypt / Decrypt.
+//
+// `done` is observed concurrently by the responder DoS-guard timer in
+// pkg/signaling, so it is an atomic.Bool. The CipherState fields
+// themselves are mutated only by handshake methods that are externally
+// synchronised by the dispatcher / sendMu.
 type Session struct {
 	hs        *noise.HandshakeState
 	send      *noise.CipherState // app → peer
 	recv      *noise.CipherState // peer → app
 	initiator bool
+	done      atomic.Bool
 }
 
 // staticKeyFromIdentity pulls the X25519 keypair out of an identity. flynn
@@ -110,8 +117,9 @@ func (s *Session) ReadMessage(message []byte) ([]byte, error) {
 }
 
 // Done reports whether the handshake has completed and Encrypt / Decrypt
-// are now safe to call.
-func (s *Session) Done() bool { return s.send != nil }
+// are now safe to call. Reads atomically — the responder DoS-guard
+// timer in pkg/signaling polls this from a separate goroutine.
+func (s *Session) Done() bool { return s.done.Load() }
 
 // PeerStatic returns the responder's static key as observed during the
 // handshake. Initiators already know it; for responders it's the value
@@ -160,4 +168,7 @@ func (s *Session) maybeFinalize(cs1, cs2 *noise.CipherState) {
 	} else {
 		s.send, s.recv = cs2, cs1
 	}
+	// Publish readiness AFTER the cipher states are visible so any
+	// goroutine that observes Done()==true also sees a populated send/recv.
+	s.done.Store(true)
 }

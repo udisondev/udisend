@@ -103,22 +103,25 @@ func (c *Channel) Recv(ctx context.Context) ([]byte, error) {
 // authenticated BYE: an empty payload encrypted under the same noise
 // key used for DATA. A relay watching the wire cannot forge a BYE
 // because the AEAD nonce + key are private to the two endpoints.
+//
+// Encrypt + sendEnvelope run under the same sendMu used by Send so the
+// BYE's nonce is contiguous with any concurrent DATA frame — otherwise
+// a Send winning the lock between Encrypt and sendEnvelope would
+// produce a higher-nonce DATA delivered before our BYE, the receiver
+// would advance past our BYE's nonce, and the BYE would be rejected
+// as a replay. Best-effort: failure to send does not block teardown.
 func (c *Channel) Close() error {
 	c.closeOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 		defer cancel()
 
 		c.sendMu.Lock()
-		var ct []byte
 		if c.noise.Done() {
-			if encrypted, err := c.noise.Encrypt(nil, nil); err == nil {
-				ct = encrypted
+			if ct, err := c.noise.Encrypt(nil, nil); err == nil {
+				_ = c.service.sendEnvelope(ctx, c, InnerBye, ct)
 			}
 		}
 		c.sendMu.Unlock()
-		if ct != nil {
-			_ = c.service.sendEnvelope(ctx, c, InnerBye, ct)
-		}
 
 		c.service.unregister(sessionKey{peer: c.peer, sid: c.sid})
 		close(c.closed)
