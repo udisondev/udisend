@@ -485,7 +485,7 @@ func (n *Node) iterativeFind(
 		results := make(chan result, len(batch))
 		for _, c := range batch {
 			queried[c.ID] = true
-			go func(c Contact) {
+			go func() {
 				if wantValue {
 					val, contacts, err := n.FindValue(timeoutCtx, c.Addr, target)
 					if err != nil {
@@ -493,15 +493,15 @@ func (n *Node) iterativeFind(
 						return
 					}
 					results <- result{contacts: contacts, value: val, from: c.ID}
-				} else {
-					contacts, err := n.FindNode(timeoutCtx, c.Addr, target)
-					if err != nil {
-						results <- result{from: c.ID}
-						return
-					}
-					results <- result{contacts: contacts, from: c.ID}
+					return
 				}
-			}(c)
+				contacts, err := n.FindNode(timeoutCtx, c.Addr, target)
+				if err != nil {
+					results <- result{from: c.ID}
+					return
+				}
+				results <- result{contacts: contacts, from: c.ID}
+			}()
 		}
 		for range batch {
 			r := <-results

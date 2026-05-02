@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -186,9 +187,10 @@ var _ Transport = (*UDPTransport)(nil)
 
 // ParseMemoryAddr parses "mem:<id>" into a MemoryAddr.
 func ParseMemoryAddr(s string) (MemoryAddr, error) {
-	const prefix = "mem:"
-	if len(s) <= len(prefix) || s[:len(prefix)] != prefix {
+	id, ok := strings.CutPrefix(s, "mem:")
+	if !ok || id == "" {
 		return MemoryAddr{}, errors.New("transport: not a mem address")
 	}
-	return MemoryAddr{id: s[len(prefix):]}, nil
+
+	return MemoryAddr{id: id}, nil
 }

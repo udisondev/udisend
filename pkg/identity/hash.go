@@ -44,11 +44,4 @@ func ParseHash(s string) (Hash, error) {
 }
 
 // IsZero reports whether the hash is the all-zero sentinel (an invalid peer).
-func (h Hash) IsZero() bool {
-	for _, b := range h {
-		if b != 0 {
-			return false
-		}
-	}
-	return true
-}
+func (h Hash) IsZero() bool { return h == Hash{} }
