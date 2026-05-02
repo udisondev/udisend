@@ -43,9 +43,16 @@ type Channel struct {
 
 	pending [][]byte // DATA frames received before handshake completes
 	mu      sync.Mutex
+
+	// handshakeTimer fires HandshakeTimeout after acceptInit if the
+	// initiator never completes the handshake (responder DoS guard).
+	// nil for initiator-side channels. Stopped once handleFinal lands
+	// so a successful handshake doesn't leave a closure on the runtime
+	// timer wheel.
+	handshakeTimer *time.Timer
 }
 
-func (s *Service) newChannel(peer identity.Hash, sid SessionID, remote net.Addr, ns *noise.Session, _ bool) *Channel {
+func (s *Service) newChannel(peer identity.Hash, sid SessionID, remote net.Addr, ns *noise.Session) *Channel {
 	return &Channel{
 		peer:    peer,
 		sid:     sid,
@@ -178,6 +185,13 @@ func (c *Channel) handleFinal(env *Envelope) {
 		c.service.removeSession(sessionKey{peer: c.peer, sid: c.sid})
 		c.shutdown()
 		return
+	}
+
+	// Handshake complete — release the responder DoS-guard timer
+	// closure so the runtime timer wheel doesn't hold it for the rest
+	// of HandshakeTimeout. nil for initiator-side channels.
+	if c.handshakeTimer != nil {
+		c.handshakeTimer.Stop()
 	}
 
 	c.signalReady()

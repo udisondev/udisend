@@ -161,12 +161,17 @@ func (s *RateLimitedStore) now() time.Time {
 
 // addrIP extracts the host portion of a net.Addr so the rate-limiter
 // keys on subnet/host rather than ephemeral source ports.
+//
+// For *net.UDPAddr we use the raw IP bytes as a string — this is one
+// stdlib-intrinsic byte→string allocation per call instead of the
+// IP.String() formatter pass. The caller only uses the value as a map
+// key, where two equal IP byte sequences yield equal strings.
 func addrIP(addr net.Addr) string {
 	if addr == nil {
 		return ""
 	}
-	if u, ok := addr.(*net.UDPAddr); ok && u.IP != nil {
-		return u.IP.String()
+	if u, ok := addr.(*net.UDPAddr); ok && len(u.IP) > 0 {
+		return string(u.IP)
 	}
 	host, _, err := net.SplitHostPort(addr.String())
 	if err != nil {
