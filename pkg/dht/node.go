@@ -562,12 +562,19 @@ func hasUnqueried(list []Contact, queried map[NodeID]bool) bool {
 
 // sourceKey returns the rate-limit bucket key for a packet origin: host
 // portion of host:port for routable transports, raw addr otherwise.
+//
+// For *net.UDPAddr (the production hot path) we key on the raw IP bytes
+// converted to a string rather than the formatted IP literal — this is
+// one stdlib-intrinsic 4- or 16-byte allocation instead of an
+// IP.String() formatter pass that emits 12+ characters per IPv4. Map
+// equality semantics are unchanged since two equal []byte slices produce
+// equal Go strings.
 func sourceKey(addr net.Addr) string {
 	if addr == nil {
 		return ""
 	}
-	if u, ok := addr.(*net.UDPAddr); ok && u.IP != nil {
-		return u.IP.String()
+	if u, ok := addr.(*net.UDPAddr); ok && len(u.IP) > 0 {
+		return string(u.IP)
 	}
 	s := addr.String()
 	if h, _, err := net.SplitHostPort(s); err == nil {
