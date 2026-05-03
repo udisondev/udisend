@@ -8,7 +8,7 @@ import (
 
 	"github.com/udisondev/udisend/pkg/identity"
 	"github.com/udisondev/udisend/pkg/signaling"
-	uwebrtc "github.com/udisondev/udisend/pkg/webrtc"
+	"github.com/udisondev/udisend/pkg/webrtc"
 )
 
 // SignalEvent is the browser-friendly view of a signaling message that
@@ -47,11 +47,11 @@ func (s *Session) PeerPublic() identity.PublicIdentity { return s.peerPub }
 // Send signs the event and ships it through the encrypted signaling pipe.
 // Returns immediately after handing off to the transport.
 func (s *Session) Send(ctx context.Context, ev SignalEvent) error {
-	kind, ok := uwebrtc.KindFromString(ev.Kind)
+	kind, ok := webrtc.KindFromString(ev.Kind)
 	if !ok {
 		return fmt.Errorf("messenger: unknown signal kind %q", ev.Kind)
 	}
-	signed := uwebrtc.SignedSDP{Kind: kind, SDP: ev.Payload}
+	signed := webrtc.SignedSDP{Kind: kind, SDP: ev.Payload}
 	signed.Sign(s.messenger.id)
 	blob, err := signed.MarshalBinary()
 	if err != nil {
@@ -103,7 +103,7 @@ func (s *Session) recvLoop() {
 			s.shutdown()
 			return
 		}
-		var signed uwebrtc.SignedSDP
+		var signed webrtc.SignedSDP
 		if err := signed.UnmarshalBinary(blob); err != nil {
 			s.messenger.cfg.Logger.Warn("messenger: bad signed envelope", "peer", s.Peer, "err", err)
 			continue
@@ -112,13 +112,13 @@ func (s *Session) recvLoop() {
 			s.messenger.cfg.Logger.Warn("messenger: signed envelope verify", "peer", s.Peer, "err", err)
 			continue
 		}
-		ev := SignalEvent{Kind: uwebrtc.KindString(signed.Kind), Payload: signed.SDP}
+		ev := SignalEvent{Kind: webrtc.KindString(signed.Kind), Payload: signed.SDP}
 		select {
 		case s.inbox <- ev:
 		case <-s.closed:
 			return
 		}
-		if signed.Kind == uwebrtc.SDPTypeBye {
+		if signed.Kind == webrtc.SDPTypeBye {
 			s.shutdown()
 			return
 		}

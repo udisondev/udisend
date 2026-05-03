@@ -26,6 +26,13 @@ const (
 	// is available. Higher layers (presence) decide their own record TTL
 	// and pass it through Config / API.
 	DefaultStoreTTL = 90 * time.Second
+	// DefaultDisjoint is the number of independent lookup paths run in
+	// parallel during iterativeFind. design.md §4 / S-Kademlia §4.2:
+	// d=3 is the canonical paper recommendation — it caps the cost
+	// of a Sybil cluster on any one lookup at 1/d, since paths are
+	// disjoint by a shared visited-set guard. Set to 1 in Config to
+	// recover legacy single-path behaviour.
+	DefaultDisjoint = 3
 )
 
 // PacketHandler is invoked for inbound packets whose type is not consumed
@@ -49,6 +56,18 @@ type Config struct {
 	// inbound packets (design.md §8). Zero rate disables limiting.
 	InboundRate  float64
 	InboundBurst float64
+	// Disjoint is the number of independent paths run in parallel during
+	// an iterative lookup (S-Kademlia §4.2 disjoint-paths). Zero means
+	// DefaultDisjoint; 1 disables the feature and reverts to the
+	// single-path implementation. Initial shortlist contacts are
+	// partitioned round-robin between paths, and a shared visited-set
+	// guarantees that a peer touched by one path is never queried by
+	// another. design.md §4.
+	Disjoint int
+	// Siblings is the size of the sibling list — the s contacts closest
+	// to the local node, used as additional replication targets in
+	// PutValue (S-Kademlia §4.4). Zero means K. design.md §4.
+	Siblings int
 }
 
 // DefaultInboundRate / DefaultInboundBurst are conservative caps suitable
@@ -81,6 +100,12 @@ func (c *Config) defaults() {
 	}
 	if c.InboundBurst == 0 {
 		c.InboundBurst = DefaultInboundBurst
+	}
+	if c.Disjoint == 0 {
+		c.Disjoint = DefaultDisjoint
+	}
+	if c.Siblings == 0 {
+		c.Siblings = c.K
 	}
 }
 
@@ -415,20 +440,28 @@ func (n *Node) LookupValue(ctx context.Context, key NodeID) ([]byte, []Contact, 
 	return n.iterativeFindValue(ctx, key)
 }
 
-// PutValue stores key=value on the K closest known peers, in parallel.
+// PutValue stores key=value on the K closest known peers AND on the
+// local sibling list, in parallel. design.md §4 / S-Kademlia §4.4: the
+// sibling replicas keep the record alive even if a Sybil cluster
+// captures the K closest peers to `key` — their data is duplicated
+// onto our own neighbourhood, which the attacker would have to capture
+// independently.
 func (n *Node) PutValue(ctx context.Context, key NodeID, value []byte) error {
 	closest, err := n.LookupNode(ctx, key)
 	if err != nil {
 		return err
 	}
-	if len(closest) == 0 {
+	siblings := n.table.Siblings(n.cfg.Siblings)
+	targets := mergeContacts(closest, siblings)
+	if len(targets) == 0 {
 		// Single-node network: store locally and call it a day.
 		n.store.Put(key, value, DefaultStoreTTL)
 		return nil
 	}
+
 	var wg sync.WaitGroup
-	errs := make([]error, len(closest))
-	for i, c := range closest {
+	errs := make([]error, len(targets))
+	for i, c := range targets {
 		wg.Go(func() {
 			storeCtx, cancel := context.WithTimeout(ctx, n.cfg.RequestTimeout)
 			defer cancel()
@@ -448,6 +481,44 @@ func (n *Node) PutValue(ctx context.Context, key NodeID, value []byte) error {
 	return errors.Join(errs...)
 }
 
+// mergeContacts returns the deduplicated union of two contact slices.
+// Order is preserved from `a` first, then any new entries from `b`.
+func mergeContacts(a, b []Contact) []Contact {
+	if len(b) == 0 {
+		return a
+	}
+	if len(a) == 0 {
+		return b
+	}
+	seen := make(map[NodeID]bool, len(a)+len(b))
+	out := make([]Contact, 0, len(a)+len(b))
+	for _, c := range a {
+		if seen[c.ID] {
+			continue
+		}
+		seen[c.ID] = true
+		out = append(out, c)
+	}
+	for _, c := range b {
+		if seen[c.ID] {
+			continue
+		}
+		seen[c.ID] = true
+		out = append(out, c)
+	}
+
+	return out
+}
+
+// iterativeFind runs a Kademlia FIND_NODE / FIND_VALUE lookup. With
+// Config.Disjoint > 1 it runs that many independent paths in parallel
+// (S-Kademlia §4.2): a single shared visited-set ensures no peer is
+// queried by more than one path, and the initial shortlist is
+// partitioned round-robin between paths so every path explores a
+// disjoint slice of the network.
+//
+// Result is the union of all paths' shortlists, sorted by XOR distance,
+// truncated to K.
 func (n *Node) iterativeFind(
 	ctx context.Context,
 	target NodeID,
@@ -457,69 +528,192 @@ func (n *Node) iterativeFind(
 	timeoutCtx, cancel := context.WithTimeout(ctx, n.cfg.LookupTimeout)
 	defer cancel()
 
-	shortlist := n.table.Closest(target, n.cfg.K)
-	if len(shortlist) == 0 {
+	initial := n.table.Closest(target, n.cfg.K)
+	if len(initial) == 0 {
 		return nil, nil
 	}
-	queried := make(map[NodeID]bool)
-	for {
-		// Pick alpha unqueried peers from shortlist.
-		var batch []Contact
-		for _, c := range shortlist {
-			if !queried[c.ID] {
-				batch = append(batch, c)
-				if len(batch) >= n.cfg.Alpha {
-					break
-				}
+
+	d := max(n.cfg.Disjoint, 1)
+	d = min(d, len(initial))
+
+	paths := make([]*pathState, d)
+	for i := range paths {
+		paths[i] = &pathState{queried: make(map[NodeID]bool)}
+	}
+
+	// Round-robin partition initial seeds across paths so each path
+	// starts from a disjoint slice of the local routing table.
+	for i, c := range initial {
+		paths[i%d].shortlist = append(paths[i%d].shortlist, c)
+	}
+
+	var visitedMu sync.Mutex
+	visited := make(map[NodeID]bool)
+
+	pathCtx, cancelPaths := context.WithCancel(timeoutCtx)
+	defer cancelPaths()
+
+	valueCh := make(chan valueHit, d)
+
+	var wg sync.WaitGroup
+	for _, p := range paths {
+		wg.Go(func() {
+			n.runPath(pathCtx, target, wantValue, p, &visitedMu, visited, valueCh)
+		})
+	}
+
+	if wantValue {
+		// First path that finds the value wins — cancel the rest.
+		select {
+		case hit := <-valueCh:
+			cancelPaths()
+			wg.Wait()
+			if maybeValue != nil {
+				*maybeValue = hit.value
 			}
+			return mergePathShortlists(paths, target, n.cfg.K), nil
+		case <-pathCtx.Done():
+			wg.Wait()
+			return mergePathShortlists(paths, target, n.cfg.K), nil
 		}
+	}
+
+	wg.Wait()
+	return mergePathShortlists(paths, target, n.cfg.K), nil
+}
+
+// pathState holds the per-disjoint-path local state: the shortlist of
+// best-known contacts (sorted by XOR distance to the target, capped at
+// K) and the set of contacts this particular path has already queried.
+type pathState struct {
+	mu        sync.Mutex
+	shortlist []Contact
+	queried   map[NodeID]bool
+}
+
+// valueHit carries a found value from a disjoint path back to the
+// lookup driver. The driver cancels remaining paths once any one of
+// them sends.
+type valueHit struct {
+	value []byte
+}
+
+// runPath drives a single disjoint lookup path until it can make no
+// further progress (no unqueried contacts in its private shortlist that
+// the global visited-set has not already claimed).
+func (n *Node) runPath(
+	ctx context.Context,
+	target NodeID,
+	wantValue bool,
+	p *pathState,
+	visitedMu *sync.Mutex,
+	visited map[NodeID]bool,
+	valueCh chan<- valueHit,
+) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		batch := n.claimBatch(p, visitedMu, visited)
 		if len(batch) == 0 {
-			break
+			return
 		}
 
 		type result struct {
 			contacts []Contact
 			value    []byte
-			from     NodeID
 		}
 		results := make(chan result, len(batch))
 		for _, c := range batch {
-			queried[c.ID] = true
 			go func() {
 				if wantValue {
-					val, contacts, err := n.FindValue(timeoutCtx, c.Addr, target)
+					val, contacts, err := n.FindValue(ctx, c.Addr, target)
 					if err != nil {
-						results <- result{from: c.ID}
+						results <- result{}
 						return
 					}
-					results <- result{contacts: contacts, value: val, from: c.ID}
+					results <- result{contacts: contacts, value: val}
 					return
 				}
-				contacts, err := n.FindNode(timeoutCtx, c.Addr, target)
+				contacts, err := n.FindNode(ctx, c.Addr, target)
 				if err != nil {
-					results <- result{from: c.ID}
+					results <- result{}
 					return
 				}
-				results <- result{contacts: contacts, from: c.ID}
+				results <- result{contacts: contacts}
 			}()
 		}
+
 		for range batch {
 			r := <-results
-			if r.value != nil && maybeValue != nil {
-				*maybeValue = r.value
-				return shortlist, nil
+			if r.value != nil {
+				select {
+				case valueCh <- valueHit{value: r.value}:
+				default:
+				}
+				return
 			}
+			p.mu.Lock()
 			for _, nc := range r.contacts {
-				shortlist = mergeShortlist(shortlist, nc, target, n.cfg.K)
+				p.shortlist = mergeShortlist(p.shortlist, nc, target, n.cfg.K)
 			}
+			p.mu.Unlock()
 		}
+	}
+}
 
-		// Stop when no new closer node was added.
-		if !hasUnqueried(shortlist, queried) {
+// claimBatch atomically picks up to alpha contacts from the path's
+// shortlist that are neither queried by this path nor visited by any
+// other path, and marks them claimed in both sets. The visited-set
+// guard is what enforces disjointness (S-Kademlia §4.2): two paths can
+// never query the same peer.
+func (n *Node) claimBatch(p *pathState, visitedMu *sync.Mutex, visited map[NodeID]bool) []Contact {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	visitedMu.Lock()
+	defer visitedMu.Unlock()
+
+	var batch []Contact
+	for _, c := range p.shortlist {
+		if p.queried[c.ID] || visited[c.ID] {
+			continue
+		}
+		batch = append(batch, c)
+		visited[c.ID] = true
+		p.queried[c.ID] = true
+		if len(batch) >= n.cfg.Alpha {
 			break
 		}
 	}
-	return shortlist, nil
+
+	return batch
+}
+
+// mergePathShortlists combines the per-path shortlists into one final
+// list of K contacts closest to the target, deduplicated by ID.
+func mergePathShortlists(paths []*pathState, target NodeID, k int) []Contact {
+	combined := make([]Contact, 0, len(paths)*k)
+	seen := make(map[NodeID]bool)
+	for _, p := range paths {
+		p.mu.Lock()
+		for _, c := range p.shortlist {
+			if seen[c.ID] {
+				continue
+			}
+			seen[c.ID] = true
+			combined = append(combined, c)
+		}
+		p.mu.Unlock()
+	}
+	slices.SortFunc(combined, func(a, b Contact) int {
+		return distanceCompare(a.ID, b.ID, target)
+	})
+	if len(combined) > k {
+		combined = combined[:k]
+	}
+
+	return combined
 }
 
 func (n *Node) iterativeFindValue(ctx context.Context, key NodeID) ([]byte, []Contact, error) {
@@ -549,15 +743,6 @@ func mergeShortlist(list []Contact, c Contact, target NodeID, k int) []Contact {
 	}
 
 	return list
-}
-
-func hasUnqueried(list []Contact, queried map[NodeID]bool) bool {
-	for _, c := range list {
-		if !queried[c.ID] {
-			return true
-		}
-	}
-	return false
 }
 
 // sourceKey returns the rate-limit bucket key for a packet origin: host

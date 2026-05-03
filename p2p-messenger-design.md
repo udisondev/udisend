@@ -222,9 +222,9 @@ TTL   = 60-120 секунд
 ### Защита от Sybil — S/Kademlia
 
 Базовая Kademlia уязвима для Sybil-атак (атакующий создаёт много фейковых узлов вокруг жертвы). Используем **S/Kademlia** с:
-- Proof-of-work на генерацию nodeID (опциональный, лёгкий).
-- Disjoint paths при lookup (несколько независимых путей).
-- Sibling lists для реплики критичных записей.
+- **Proof-of-work на генерацию nodeID** (опциональный): `pkg/identity.GenerateWithPoW` ищет seed, дающий destination_hash с N ведущих нулей. Deployer выбирает difficulty.
+- **Disjoint paths при lookup** (`d=3` по умолчанию): `pkg/dht.iterativeFind` параллельно запускает d независимых путей; общий visited-set гарантирует, что ни один peer не опрашивается двумя путями. Initial top-K shortlist round-robin распределяется между путями. Атакующему, контролирующему меньше d/k узлов в окрестности target'а, нужно компрометировать **все** d путей одновременно — стоимость атаки растёт линейно по d.
+- **Sibling lists для реплики**: `pkg/dht.RoutingTable.Siblings(s)` возвращает s ближайших к self узлов. `PutValue` реплицирует значение и на K closest к key, и на own siblings — Sybil-кластер вокруг key должен дополнительно захватить наш собственный neighborhood, чтобы подавить запись.
 
 ### Announce-оптимизация для активных контактов
 
@@ -382,7 +382,7 @@ WebRTC из коробки решает NAT traversal через ICE (Interactiv
 | **TURN-relay перехватывает медиа** | TURN видит только зашифрованные DTLS-байты; невозможен decrypt. | ✅ by design |
 | **Abuse TURN volunteer** | RFC 7635 ephemeral credentials + per-IP rate-limit + `MaxCredentialLifetime` (`pkg/turn`). | ✅ |
 | **Compromised volunteer node** | Один узел не может MITM (signaling зашифрован Noise XK end-to-end); максимум — refuse to relay. | ✅ by design |
-| **S/Kademlia disjoint paths + sibling lists** | Не реализованы; базовый Kademlia + signed presence + per-IP rate-limit. | 🌙 deferred |
+| **S/Kademlia disjoint paths + sibling lists** | Disjoint paths: `pkg/dht.iterativeFind` запускает `Config.Disjoint=3` параллельных путей с shared visited-set (никакой peer не опрашивается двумя путями). Sibling list: `RoutingTable.Siblings(s)` + `PutValue` дополнительно реплицирует на own siblings (`Config.Siblings = K` по умолчанию). | ✅ |
 
 ### Уровень WebRTC
 
@@ -574,8 +574,8 @@ UDP — одна из реализаций. Это даёт гибкость д�
 - ✅ SQLite driver — `modernc.org/sqlite` (pure Go).
 
 Открыты:
-- Конкретные параметры PoW в S/Kademlia — Phase 3 deferred, hardening pass.
-- Стратегия выбора disjoint paths — Phase 3 deferred.
+- Конкретные параметры PoW в S/Kademlia — выставляется deployer'ом через `identity.GenerateWithPoW`; default — без PoW.
+- ~~Стратегия выбора disjoint paths~~ — реализовано (round-robin на initial top-K + shared visited-set), см. §4 «Защита от Sybil».
 - Push-уведомления для mobile (если делать).
 - Onion routing для signaling traffic-analysis resistance — post-MVP.
 - Механизм синхронизации между устройствами одного пользователя — post-MVP.

@@ -47,7 +47,7 @@
 
 Остаётся:
 
-- [ ] **S/Kademlia: disjoint paths + sibling lists** — требуют расширения iterativeFind.
+- [x] **S/Kademlia: disjoint paths + sibling lists** — `pkg/dht.iterativeFind` принимает `Config.Disjoint` (default 3) и запускает d параллельных путей с общим visited-set. `RoutingTable.Siblings(s)` + `PutValue` дополнительно реплицирует на own siblings.
 - [ ] **DHT integration tests:** 100-узловая memory-сеть + 5-узловой testcontainers cluster.
 - [ ] **PGO baseline:** capture production profile, commit `default.pgo`.
 - [ ] **Eclipse simulation** (a/b test on the bootstrap-diversity mitigation).

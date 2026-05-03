@@ -38,8 +38,13 @@
 - **Test:**
   - `pkg/presence/rate_limited_store_test.go::TestRateLimitedStore_RejectsAfterLimit`
   - `pkg/identity/pow_test.go::TestGenerateWithPoW_FindsSeedForLowDifficulty`
-- **Deferred:** disjoint-paths lookup, sibling-list replication
-  (require DHT algorithm changes; tracked under "S/Kademlia hardening").
+- **Implemented (2026-05-03):** disjoint-paths lookup
+  (`pkg/dht.iterativeFind` with `Config.Disjoint=3` default; shared
+  visited-set guarantees no peer is queried by two paths) and
+  sibling-list replication (`RoutingTable.Siblings(s)` exposed,
+  `PutValue` replicates onto K closest ∪ own siblings).
+  Tests: `pkg/dht/skademlia_test.go::TestPutValue_ReplicatesToSiblings`,
+  `pkg/dht/skademlia_internal_test.go::TestClaimBatch_*`.
 
 ### MITM on signaling
 

@@ -121,6 +121,15 @@ func (rt *RoutingTable) Closest(target NodeID, n int) []Contact {
 	return all
 }
 
+// Siblings returns the s contacts with the smallest XOR distance to the
+// local node — the sibling list from S-Kademlia §4.4. Used by PutValue
+// to replicate values onto our own neighbourhood, raising the bar for a
+// Sybil cluster trying to suppress a record by capturing only the K
+// closest peers to the key. design.md §4.
+func (rt *RoutingTable) Siblings(s int) []Contact {
+	return rt.Closest(rt.self, s)
+}
+
 // distanceCompare returns -1/0/+1 by XOR distance from target — the comparator
 // shape slices.SortFunc expects, equivalent to dht.Less for sorting. It
 // computes XOR-distances inline byte-by-byte and stops at the first
