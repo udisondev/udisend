@@ -236,10 +236,13 @@ TTL   = 60-120 секунд
 ### Path discovery в signaling
 
 Маршрутизация signaling-сообщений **hop-by-hop**:
-- Клиент шлёт signaling blob с `recipient_id`, не зная пути.
-- Каждый промежуточный узел смотрит в свою таблицу, шлёт следующему хопу.
-- Если destination не в таблице → path request на соседей через DHT.
-- Если ничего не найдено → пакет дропается, клиент получает таймаут.
+- Клиент шлёт signaling envelope с `recipient_id`, не зная пути; формат — `pkg/signaling.Envelope` поверх `MsgRelay` (`pkg/dht/wire.go`).
+- Каждый промежуточный узел смотрит в свою routing table (k-buckets); если recipient — это сам узел или ближайший контакт с точным ID, frame доставляется/пересылается напрямую.
+- Если destination не в локальной таблице → fallback через **iterative `LookupNode`** (классическая Kademlia процедура поиска ближайших к target узлов, бежит до сходимости): результаты могут вернуть либо точный destination, либо ближайших соседей, через которых пакет идёт дальше. Реализация — `dhtRouter.NextHop` в `internal/network/network.go` и `internal/messenger/messenger.go`.
+- Hop-counter в envelope ограничивает forwarding: `MaxHops = 8`, превышение → drop.
+- Если ни локальная таблица, ни LookupNode не дают ни одного контакта → пакет дропается, клиент получает таймаут.
+
+В дизайне это формулировалось как «path request на соседей через DHT» — реализовано без отдельного типа сообщения, поверх стандартного Kademlia FIND_NODE, что эквивалентно по эффекту.
 
 (Этот hop-by-hop routing **только** для signaling. Чат-трафик идёт напрямую через WebRTC peer-to-peer.)
 
@@ -364,17 +367,22 @@ WebRTC из коробки решает NAT traversal через ICE (Interactiv
 
 ### Уровень сети
 
-| Атака | Защита |
-|---|---|
-| **Eclipse attack** на DHT | Подключение к разнообразным пирам (по подсетям, ASN, географии); хардкоднутые bootstrap'ы от разных операторов |
-| **Sybil на presence** | Подпись записи владельцем; лимит на записи с одного IP; PoW на регистрацию (опционально) |
-| **MITM на signaling** | SDP+ICE подписаны Ed25519; DTLS-fingerprint cross-validated при WebRTC handshake |
-| **MITM на первом контакте** | TOFU + проверка fingerprint вне канала (QR-код, safety numbers) |
-| **DoS на узел** | Rate limiting на DHT-уровне; multi-hop routing для размазывания |
-| **Подмена presence-записи** | Ed25519-подпись, валидация на всех узлах |
-| **Traffic analysis (signaling relay видит metadata)** | Onion routing для signaling — на будущее |
-| **TURN-relay перехватывает медиа** | TURN видит только зашифрованные DTLS-байты; невозможен decrypt |
-| **Compromised volunteer node** | Один узел не может MITM (signaling зашифрован Noise XK end-to-end); максимум — refuse to relay |
+| Атака | Защита | Статус |
+|---|---|---|
+| **Eclipse attack** на DHT | Subnet-diverse bootstrap (`internal/storage.SeenPeersDiverse`, /24-IPv4 / /64-IPv6); curated community list + DNS-seeds (`pkg/bootstrap`). | 🟡 partial — community list пока пуст до релиза. |
+| **Sybil на nodeID** | S/Kademlia PoW на destination_hash (`pkg/identity.GenerateWithPoW`), opt-in: deployer выбирает difficulty bits. | 🟡 opt-in, demo по умолчанию выключен. |
+| **Sybil на presence** | Подпись записи владельцем; per-IP rate-limit (`pkg/presence.RateLimitedStore`, default 16 records/IP); PoW на nodeID см. выше. | ✅ multi-layer. |
+| **MITM на signaling** | SDP+ICE подписаны Ed25519 (`pkg/webrtc.SignedSDP`), Go-сторона верифицирует ДО передачи в браузер; signaling-канал — Noise XK. | ✅ статически. |
+| **DTLS-fingerprint runtime cross-check** | Браузерный `RTCPeerConnection` отвергает DTLS handshake, чей сертификат ≠ `a=fingerprint:` в принятом SDP. Доп. cross-check через `getStats()` концептуально возможен. | 🟡 native browser API — да, явный runtime check в нашем JS — нет (см. ASSUMPTIONS.md). |
+| **MITM на первом контакте** | TOFU (`storage.UpsertContact` + `ErrFingerprintChanged`); fingerprint в Signal-style safety numbers, видим в UI. QR-обмен — TODO. | 🟡 в зависимости от пользовательской дисциплины. |
+| **Replay на signaling** | Noise XK AEAD nonce + duplicate HELLO_INIT drop (`pkg/signaling/replay_test.go`). | ✅ |
+| **DoS на узел (DHT)** | Per-IP token bucket (`pkg/ratelimit` + `pkg/dht.Node`). Signaling делит сокет с DHT и наследует rate-limit. | ✅ |
+| **Подмена presence-записи** | Ed25519-подпись, валидация на всех узлах при чтении. | ✅ |
+| **Traffic analysis (signaling relay видит metadata)** | Onion routing для signaling — post-MVP. | 🌙 deferred |
+| **TURN-relay перехватывает медиа** | TURN видит только зашифрованные DTLS-байты; невозможен decrypt. | ✅ by design |
+| **Abuse TURN volunteer** | RFC 7635 ephemeral credentials + per-IP rate-limit + `MaxCredentialLifetime` (`pkg/turn`). | ✅ |
+| **Compromised volunteer node** | Один узел не может MITM (signaling зашифрован Noise XK end-to-end); максимум — refuse to relay. | ✅ by design |
+| **S/Kademlia disjoint paths + sibling lists** | Не реализованы; базовый Kademlia + signed presence + per-IP rate-limit. | 🌙 deferred |
 
 ### Уровень WebRTC
 
@@ -402,11 +410,15 @@ WebRTC из коробки решает NAT traversal через ICE (Interactiv
 
 ### Аудио и видео: MediaStreamTrack
 
-- Стандартный WebRTC: захват с микрофона/камеры, кодирование (Opus / VP8 / VP9 / AV1 — выбирает pion).
+- Стандартный WebRTC: захват через `navigator.mediaDevices.getUserMedia` (микрофон/камера), кодирование (Opus / VP8 / VP9 / AV1 — выбирает браузер при negotiation).
 - SRTP для шифрования.
 - ICE автоматически выберет direct path или TURN-relay.
 
-### Application protocol поверх DataChannel
+### Application protocol поверх DataChannel — живёт в браузере
+
+> **v2-сдвиг (2026-05-02):** application-protocol поверх DataChannel реализован в JS (`internal/httpui/assets/app.js`), а не в Go. Go-runtime подписывает только SDP/ICE через `pkg/webrtc.SignedSDP` и пересылает их через `signaling.Channel`. Сама фрейм-логика DataChannel'а (text/file_offer/file_chunk/ack/typing/call_signal) — JS-сторона.
+
+Логическая форма сообщения, которой обмениваются два браузера:
 
 ```
 ApplicationMessage {
@@ -415,35 +427,38 @@ ApplicationMessage {
                                  // ack / typing / read / call_signal /
                                  // presence_ping
   timestamp       : int64
-  body            : bytes        // payload зависит от message_type
+  body            : bytes | json // payload зависит от message_type
 }
 ```
 
+Текстовые/control-сообщения едут JSON-объектами (`{type, req_id, ...}`), file_chunk — бинарными `ArrayBuffer`-фреймами с JSON-заголовком в первом фрейме оффера. Конкретный wire-формат — внутреннее дело JS-кода и может меняться вместе с обновлением UI без затрагивания Go-side. Persisted-форма (то, что Go хранит в SQLite через `/api/append-history`) — opaque blob от Go: storage не парсит payload, только direction/kind/timestamp.
+
 ### Доставка и ACK
 
-- **Базовый протокол** — fire and forget с end-to-end ACK на уровне приложения.
+- **Базовый протокол** — fire and forget с end-to-end ACK на уровне приложения (в JS).
 - DataChannel reliable+ordered гарантирует доставку, пока сессия жива.
-- Если сессия рвётся — сообщения, не получившие ACK, считаются неотправленными → возвращаются в outbox.
+- Если сессия рвётся — сообщения, не получившие ACK, считаются неотправленными → JS вызывает `/api/queue-outbox` и они кладутся в outbox.
 
 ### Outbox для оффлайн-получателей
 
 - **Сеть НЕ отвечает "получатель оффлайн"** — никакого хранения сообщений в сети.
-- Если попытка установить WebRTC-сессию провалилась (получатель не публикует presence или signaling timeout) → сообщение в локальный outbox.
-- Outbox **периодически проверяет** появление получателя в presence (DHT polling с экспоненциальным backoff).
-- При появлении — устанавливается сессия, outbox сливается.
+- Если попытка установить WebRTC-сессию провалилась (получатель не публикует presence или signaling timeout) → сообщение в локальный outbox (Go SQLite через REST).
+- Go-runtime **периодически проверяет** появление получателей с pending items в presence (`Messenger.outboxPump` → DHT lookup; см. `internal/messenger/messenger.go`).
+- При появлении — Go отправляет SSE-событие `peer_online`; браузер открывает signaling session и сливает outbox через DataChannel.
 - Только сообщения и file-offers хранятся в outbox (не payload файлов).
 
 ### Файлы — chunking на application level
 
-- Большой файл: file_offer с метаданными (имя, размер, хеш) + получатель ACK'ает.
-- Затем серия file_chunk сообщений (фиксированный размер, например 64 KB).
+- Большой файл: file_offer с метаданными (имя, размер, sha256-хеш) + получатель ACK'ает.
+- Затем серия file_chunk фреймов (фиксированный размер, например 64 KB) — `ArrayBuffer` через `RTCDataChannel.send`.
 - Per-chunk ACK для resume support при разрыве сессии.
-- DataChannel умеет flow control сам, но мы дополнительно следим за окном.
+- DataChannel умеет flow control сам (`bufferedAmountLowThreshold`); JS-сторона следит за окном.
 
 ### Звонки
 
 - **Установка** — call_offer через DataChannel; получатель отвечает call_answer.
-- После accept — добавляются audio/video MediaStreamTrack'и в существующую PeerConnection.
+- После accept — браузер добавляет audio/video MediaStreamTrack'и в существующую `RTCPeerConnection` и инициирует ренегоциацию (новый offer/answer через signaling).
+- Удалённый поток рендерится в `<video>.srcObject` через `pc.ontrack`.
 - При отказе/завершении — call_signal с reason; сессия может остаться открытой для текста.
 
 ### Multi-device
@@ -468,27 +483,35 @@ ApplicationMessage {
 
 ## 10. Технологический стек
 
-### Язык и основные библиотеки
+### Язык и основные библиотеки (Go-сторона)
 
 - **Go 1.26** — основной язык (per `CLAUDE.md`).
-- **`github.com/pion/webrtc/v4`** — WebRTC stack (PeerConnection, DataChannel, media tracks).
+- **`github.com/flynn/noise`** — Noise Protocol Framework (XK pattern) для signaling-канала.
 - **`github.com/pion/stun/v3`** — встроенный STUN-сервер для volunteer узлов.
-- **`github.com/pion/turn/v4`** — встроенный TURN-сервер для volunteer узлов.
-- **`github.com/flynn/noise`** — Noise Protocol Framework для signaling-канала.
+- **`github.com/pion/turn/v4`** — встроенный TURN-сервер для volunteer узлов (CGO зависимостей у самого turn нет; v4-стек — pure Go).
 - **`crypto/ed25519`, `golang.org/x/crypto/curve25519`** — стандартная библиотека Go.
 - **`golang.org/x/crypto/chacha20poly1305`** — AEAD.
 - **`golang.org/x/crypto/blake2b`** — хеши.
 - **`golang.org/x/crypto/hkdf`** — KDF.
+- **`pkg/wire`** (in-tree) — uvarint+TLV binary wire format для DHT, presence, signaling envelope, signed SDP. Источник правды для frame-формата; нулевые внешние зависимости (см. decisions log 2026-05-01).
+
+> **`pion/webrtc` НЕ используется на стороне messenger-бинаря (v2-сдвиг 2026-05-02).** Go подписывает SDP/ICE через `pkg/webrtc.SignedSDP` и пересылает их через `signaling.Channel`, но саму `RTCPeerConnection` держит браузер. См. §2 «Двухслойная модель».
+
+### Браузерная сторона (UI + WebRTC)
+
+- **Native `RTCPeerConnection`** (Chrome/Firefox/Safari) — PeerConnection lifecycle, DataChannel, MediaStreamTrack, ICE candidate gathering, DTLS handshake.
+- **`getUserMedia`** — захват микрофона/камеры.
+- **Server-Sent Events** + plain `fetch` POST — bridge к Go-runtime через `internal/httpui`. Без сторонних JS-библиотек, чистый ES2022.
 
 ### Хранение (только локальное, на клиенте)
 
-- **SQLite** через `modernc.org/sqlite` (pure Go, без CGO) — история сообщений, контакты, outbox, fingerprints.
+- **SQLite** через `modernc.org/sqlite` (pure Go, без CGO) — история сообщений, контакты, outbox, fingerprints, seen-peers cache.
 - **Никакого распределённого хранилища.**
 
 ### Тестирование
 
 - `github.com/google/go-cmp` — `cmp.Diff` для assertion'ов.
-- `github.com/testcontainers/testcontainers-go` — multi-node integration tests.
+- `github.com/testcontainers/testcontainers-go` — multi-node integration tests (планируется; пока 🌙 deferred).
 - `testing/synctest` (stdlib, 1.25+) — детерминистические concurrency-тесты.
 - `testify/suite` — только для e2e (см. `go-testing` skill).
 
@@ -505,7 +528,7 @@ type Transport interface {
 
 UDP — одна из реализаций. Это даёт гибкость для добавления Bluetooth/Tor/etc позже.
 
-WebRTC использует свой UDP внутри pion — мы не управляем им напрямую.
+Браузерный WebRTC использует свой UDP-стек внутри `RTCPeerConnection` — мы не управляем им напрямую; signaling-плоскость пересылает только SDP и ICE candidates.
 
 ---
 
@@ -523,7 +546,7 @@ WebRTC использует свой UDP внутри pion — мы не упр�
 | 4 | Signaling channel (`pkg/noise`, `pkg/signaling`) | ~2 нед |
 | 5 | STUN/TURN volunteers (`pkg/stun`, `pkg/turn`) | ~1 нед |
 | 6 | WebRTC session (`pkg/webrtc`) | ~2 нед |
-| 7 | Chat application (`internal/chat`, `internal/storage`, `internal/messenger`, `internal/network`, `internal/httpui`) — v2: drop fyne, browser owns WebRTC | ~3-4 нед |
+| 7 | Chat application (`internal/storage`, `internal/messenger`, `internal/network`, `internal/httpui`) — v2: drop fyne, browser owns WebRTC + chat-protocol | ~3-4 нед |
 | 8 | Hardening & MVP release | ~2 нед |
 
 ---

@@ -241,6 +241,7 @@ func (s *Store) AddOutboxItem(ctx context.Context, peer identity.Hash, payload [
 	if err != nil {
 		return 0, err
 	}
+
 	return res.LastInsertId()
 }
 

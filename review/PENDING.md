@@ -43,6 +43,7 @@
 - [x] **Outbox flush pump** — `Messenger.outboxPump` + SSE peer_online event.
 - [x] **TOFU verification UI flow** — modal showing both safety numbers.
 - [x] **Bootstrap persistence cache** — `internal/storage` seen_peers.
+- [x] **Bootstrap infrastructure (community list + DNS-seeds)** — `pkg/bootstrap` с пустым default'ом и ldflag-override, подключён в `cmd/messenger` и `cmd/network`. Реальные адреса нужно добавить пред-релизом.
 
 Остаётся:
 
@@ -55,5 +56,5 @@
 - [ ] **WebRTC NAT integration:** 2 узла за разными NAT через TURN volunteer.
 - [ ] **E2E-тест полного сценария:** TOFU → message → file → call → offline → outbox flush.
 - [ ] **godoc:** все exported идентификаторы в `pkg/*` имеют godoc-комментарии.
-- [ ] **Hardcoded community bootstrap list + DNS-seeds** — нужны реальные адреса операторов.
+- [ ] **Реальные адреса в `pkg/bootstrap.CommunityList` и `DNSSeeds`** — нужны операторы публичных узлов; infrastructure (см. выше) уже на месте.
 - [ ] **CONTRIBUTING.md / security.md / public protocol spec.**

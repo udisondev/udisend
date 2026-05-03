@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/udisondev/udisend/internal/storage"
+	"github.com/udisondev/udisend/pkg/bootstrap"
 	"github.com/udisondev/udisend/pkg/dht"
 	"github.com/udisondev/udisend/pkg/identity"
 	"github.com/udisondev/udisend/pkg/presence"
@@ -122,10 +123,18 @@ func Open(ctx context.Context, cfg Config) (*Messenger, error) {
 	// design.md §7-8: if no CLI --bootstrap, seed from previously-seen
 	// peers — preferring subnet-diverse entries so a Sybil cluster
 	// colocated in one /24 cannot eclipse our routing-table from cache.
+	// If the cache is also empty (cold start), fall back to the
+	// curated community list + DNS seeds (pkg/bootstrap, design.md §7).
 	if len(cfg.Bootstrap) == 0 {
 		if cached, err := store.SeenPeersDiverse(ctx, 50); err == nil && len(cached) > 0 {
 			cfg.Bootstrap = cached
 			cfg.Logger.Info("messenger: bootstrap from cache", "n", len(cached))
+		}
+	}
+	if len(cfg.Bootstrap) == 0 {
+		if defaults := bootstrap.Defaults(ctx, bootstrap.Config{}); len(defaults) > 0 {
+			cfg.Bootstrap = defaults
+			cfg.Logger.Info("messenger: bootstrap from community defaults", "n", len(defaults))
 		}
 	}
 

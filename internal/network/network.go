@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/udisondev/udisend/pkg/bootstrap"
 	"github.com/udisondev/udisend/pkg/dht"
 	"github.com/udisondev/udisend/pkg/identity"
 	"github.com/udisondev/udisend/pkg/presence"
@@ -60,6 +61,16 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 	}
 	if cfg.PresenceTTL == 0 {
 		cfg.PresenceTTL = presence.DefaultRecordTTL
+	}
+
+	// design.md §7: cold-start fallback to the curated community list
+	// + DNS seeds. The network binary has no seen-peers cache, so this
+	// is the only on-disk-free way to bootstrap into a public network.
+	if len(cfg.Bootstrap) == 0 {
+		if defaults := bootstrap.Defaults(ctx, bootstrap.Config{}); len(defaults) > 0 {
+			cfg.Bootstrap = defaults
+			cfg.Logger.Info("network: bootstrap from community defaults", "n", len(defaults))
+		}
 	}
 
 	tr, err := transport.ListenUDP(cfg.Listen)

@@ -266,7 +266,7 @@
 **Deliverable:** `cmd/messenger` запускает CLI клиент. Два пользователя на разных машинах могут общаться полным набором фич.
 
 ### Packages (v2-актуально)
-- `internal/chat` — application-protocol типы и kinds (фактически используется только в браузере, в Go — рудимент v1).
+- ~~`internal/chat`~~ — **удалён 2026-05-03** (см. decisions log). Был v1-рудиментом; chat-protocol живёт в `internal/httpui/assets/app.js` (JSON over DataChannel + binary file chunks).
 - `internal/storage` — SQLite layer (контакты + TOFU + история + outbox); contacts-логика живёт здесь, отдельного `internal/contacts` нет.
 - `internal/httpui` — HTTP+SSE bridge между Go-runtime и браузером (REST API + EventSource); появился в v2 вместо `internal/ui` (fyne).
 - `internal/messenger` — Go-runtime: identity, DHT, presence, signaling.Service, storage; **chat/file/call логика теперь в браузере**, не в Go.
@@ -279,15 +279,15 @@
 - [x] ~~**SQLite driver**~~ — `modernc.org/sqlite` (pure Go).
 - [❌] ~~**UI library = fyne.io/fyne/v2**~~ — отменено в v2 (decisions log 2026-05-02). Заменено браузерным UI поверх HTTP+SSE.
 - [x] `internal/storage/schema.sql` + `internal/storage/store.go` — contacts (TOFU detect ErrFingerprintChanged), messages history, outbox CRUD.
-- [x] `internal/chat/protocol.go` — Message + Kind* (text/file/ack/call/typing/presence) + FileOffer/Chunk/End/Ack codecs + FuzzDecodeMessage.
+- [❌] ~~`internal/chat/protocol.go` — Message + Kind* + FileOffer/Chunk/End/Ack codecs + FuzzDecodeMessage~~ — **удалён 2026-05-03** как dead code. Chat-protocol живёт в `app.js`. Wire-format Go-стороны больше не определяется (см. decisions log 2026-05-03).
 - [⚠️] `internal/messenger/messenger.go|session.go|api.go` — Open/Run/Close, AddContact, VerifyContact, signaling.Channel-обёртка через `Session`, lookup peer pubkey. **Чего НЕТ в Go (по дизайну v2):** SendText, SendFile (chunked), StartCall/Accept/Reject/End, ensureSession, incoming-file assembly + sha256 verify, outbox flush loop — всё это в браузерной стороне. См. ASSUMPTIONS.md «Что теперь делает Go».
-- [x] `internal/network/network.go` — Open/Run, DHT + presence publisher, опциональные STUN/TURN при `--public-ip`. **Hop-by-hop signaling relay не реализован** (envelope с recipient ≠ self отбрасывается); заявленная роль relay-узла пока не выполняется. См. план доработки.
+- [x] `internal/network/network.go` — Open/Run, DHT + presence publisher, опциональные STUN/TURN при `--public-ip`. Hop-by-hop signaling relay реализован: `signaling.Service` с `Router` и `dhtRouter.NextHop` пересылает envelope-ы, чьи recipients ≠ self, через iterative LookupNode (см. design.md §4 «Path discovery»).
 - [x] `internal/config/identity.go` — LoadOrCreateIdentity (seed file, mode 0600).
 - [x] `internal/httpui` — HTTP+SSE bridge: REST API (`/api/snapshot`, `/api/contacts/*`, `/api/history`, `/api/session/*`, `/api/signal/send`) + EventSource для server→browser push, bearer-token auth. Заменяет ушедший `internal/ui`.
 - [x] `cmd/network/main.go` — флаги + `internal/network.Open/Run`.
 - [x] `cmd/messenger/main.go` — флаги + `internal/messenger.Open/Run` + `internal/httpui.Server.Run` (не `internal/ui.Run` как в v1).
 - [⚠️] **Tests:**
-  - [x] Unit: chat framing roundtrip + tampered + fuzz; storage CRUD + ErrFingerprintChanged.
+  - [❌] ~~Unit: chat framing roundtrip + tampered + fuzz~~ — снято с удалением `internal/chat`. Storage CRUD + ErrFingerprintChanged по-прежнему покрыт.
   - [⚠️] Integration: один integration test в `internal/httpui/server_test.go` (без build-tag) — два messenger'а через signaling pipe + AddContact + signal send. **`//go:build integration` build-tag не используется**, integration-тесты идут наравне с unit-тестами через `go test ./...`.
   - [ ] 🌙 E2E полный сценарий (file + call + offline + outbox flush) — `[OVERNIGHT-DEFERRED]` (текст-флоу прошёл в integration-тесте httpui; остальное — следующая итерация).
   - [ ] ⏳ Smoke/unit тесты для `internal/messenger`, `internal/network`, `internal/config` — отсутствуют; см. план доработки.
@@ -295,7 +295,7 @@
 ### Acceptance criteria
 - [x] Два messenger'а через signaling pipe устанавливают сессию (`internal/httpui/server_test.go`).
 - [⚠️] Обмен текстом end-to-end — текст идёт через браузерный DataChannel; Go-сторона тестирует только подъём signaling-канала. Полноценный e2e теста с двумя браузерами и DataChannel — отсутствует.
-- [⚠️] File transfer — реализован в JS-стороне над DataChannel (offer + chunks + sha256 verify); Go хранит только storage-метаданные. `internal/chat/protocol.go` определяет Go-формат, но в реальном data path не используется.
+- [⚠️] File transfer — реализован в JS-стороне над DataChannel (offer + chunks + sha256 verify); Go хранит только storage-метаданные.
 - [x] Аудио/видео-звонок с реальным media playback — **работает в браузере** (нативный `RTCPeerConnection` + `getUserMedia`, см. ASSUMPTIONS.md «Видео-звонки — теперь работают из коробки»). v1-acceptance, помеченный 🌙, в v2 закрыт.
 - [x] TOFU: storage.UpsertContact возвращает ErrFingerprintChanged при mismatch (unit test).
 - [x] Outbox: storage CRUD + `Messenger.outboxPump` periodic flush + `SetPeerOnlineHandler` SSE-event "peer_online" pushed to UI when a recipient with pending items becomes resolvable. Tests in `internal/messenger/outbox_test.go`.
@@ -363,6 +363,9 @@
 - `[2026-05-02] [PHASE 7] DECISION: HTTP-bridge — SSE + REST вместо WebSocket.` — RATIONALE: runtime-permission-system заблокировал внешний WS-модуль (`nhooyr.io/websocket`). SSE (server→browser) + plain POST (browser→server) — чистый stdlib (`net/http`), ноль новых deps. Для use-case "одна вкладка на messenger" SSE достаточен и проще для дебага (DevTools Network → EventStream).
 - `[2026-05-02] [PHASE 7] DECISION: chat application protocol живёт в браузере, Go только подписывает SDP.` — RATIONALE: всё, что раньше планировалось в `internal/messenger.SendText/SendFile/StartCall`, теперь реализовано на JS поверх браузерного `RTCDataChannel`. Go-сторона выставляет тонкий API (`POST /api/signal/send`, `EventSource /api/events`), оборачивает SDP в `pkg/webrtc.SignedSDP` (Ed25519) и пересылает через `signaling.Channel`. `internal/chat/protocol.go` сохранён как формат, но фактически dead code — браузер использует свой JSON envelope (`internal/httpui/sse.go: envelope`).
 - `[2026-05-02] [PHASES 4–7] RETROSPECTIVE.` — все фазы формально закрыты ✅ в overall-progress, но **post-phase 3-iteration ревью пропущено** (известный overnight cut, см. `review/PENDING.md`). Acceptance criteria Phase 6 ("WebRTC PeerConnection устанавливается через memory signaling", "DataChannel ready") инвалидированы v2-сдвигом — соответствующие тесты удалены вместе с `pkg/webrtc/session.go`. Phase 7 acceptance частично переинтерпретированы под браузерный UI; Go-сторона покрыта только одним integration test'ом в `internal/httpui/server_test.go`.
+- `[2026-05-03] [PHASE 7] DECISION: удалить рудимент internal/chat.` — RATIONALE: chat application protocol окончательно живёт в браузере (`internal/httpui/assets/app.js`); Go-формат `internal/chat/protocol.go` не использовался в data path и сбивал с толку при чтении дизайна. Удалены `internal/chat/protocol.go` и его тесты. design.md §9 переписан, чтобы прямо говорить «application protocol живёт в браузере». ROADMAP Phase 7 packages-секция и acceptance criteria синхронизированы.
+- `[2026-05-03] [PHASE 7] DECISION: добавить pkg/bootstrap (curated community list + DNS-seeds).` — RATIONALE: design.md §7 явно требует "хардкоднутся 20-30 bootstrap-адресов" и "DNS-seeds (как в Bitcoin)" чтобы сеть могла самовоспроизводиться без участия автора. До сих пор cmd/messenger полагался только на `--bootstrap` флаг и seen-peers cache, а cmd/network — только на флаг. Теперь оба бинаря на холодном старте падают в `bootstrap.Defaults` (community list + DNS A/AAAA). Списки в апстриме намеренно пустые: публиковать адреса до релиза смысла нет, переменные `CommunityList`/`DNSSeeds` и ldflag-override `ldflagList` готовы для форков и release pipeline.
+- `[2026-05-03] [DOCS] DESIGN-DOC SYNC PASS.` — design.md §10 переписан под фактический tech stack (pion/webrtc убран из messenger-бинаря, явно перечислена браузерная сторона). §9 — application protocol больше не Go-формат. §4 «Path discovery» расшифровано как iterative LookupNode (не отдельный message type, эквивалентно по эффекту). §8 threat-model расширен статусной колонкой и добавлены строки про PoW (opt-in), per-IP rate-limit, replay protection, DTLS fingerprint runtime check (🟡 native browser API). Никакого изменения протокола или поведения — только документация.
 
 ---
 
