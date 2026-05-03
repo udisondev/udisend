@@ -30,8 +30,7 @@ const (
 	// parallel during iterativeFind. design.md §4 / S-Kademlia §4.2:
 	// d=3 is the canonical paper recommendation — it caps the cost
 	// of a Sybil cluster on any one lookup at 1/d, since paths are
-	// disjoint by a shared visited-set guard. Set to 1 in Config to
-	// recover legacy single-path behaviour.
+	// disjoint by a shared visited-set guard.
 	DefaultDisjoint = 3
 )
 
@@ -57,12 +56,11 @@ type Config struct {
 	InboundRate  float64
 	InboundBurst float64
 	// Disjoint is the number of independent paths run in parallel during
-	// an iterative lookup (S-Kademlia §4.2 disjoint-paths). Zero means
-	// DefaultDisjoint; 1 disables the feature and reverts to the
-	// single-path implementation. Initial shortlist contacts are
-	// partitioned round-robin between paths, and a shared visited-set
-	// guarantees that a peer touched by one path is never queried by
-	// another. design.md §4.
+	// an iterative lookup (S-Kademlia §4.2 disjoint-paths). Initial
+	// shortlist contacts are partitioned round-robin between paths, and
+	// a shared visited-set guarantees that a peer touched by one path
+	// is never queried by another. Zero means DefaultDisjoint.
+	// design.md §4.
 	Disjoint int
 	// Siblings is the size of the sibling list — the s contacts closest
 	// to the local node, used as additional replication targets in
@@ -101,10 +99,10 @@ func (c *Config) defaults() {
 	if c.InboundBurst == 0 {
 		c.InboundBurst = DefaultInboundBurst
 	}
-	if c.Disjoint == 0 {
+	if c.Disjoint <= 0 {
 		c.Disjoint = DefaultDisjoint
 	}
-	if c.Siblings == 0 {
+	if c.Siblings <= 0 {
 		c.Siblings = c.K
 	}
 }
@@ -510,12 +508,12 @@ func mergeContacts(a, b []Contact) []Contact {
 	return out
 }
 
-// iterativeFind runs a Kademlia FIND_NODE / FIND_VALUE lookup. With
-// Config.Disjoint > 1 it runs that many independent paths in parallel
-// (S-Kademlia §4.2): a single shared visited-set ensures no peer is
-// queried by more than one path, and the initial shortlist is
-// partitioned round-robin between paths so every path explores a
-// disjoint slice of the network.
+// iterativeFind runs a Kademlia FIND_NODE / FIND_VALUE lookup over
+// Config.Disjoint independent paths in parallel (S-Kademlia §4.2): a
+// single shared visited-set ensures no peer is queried by more than
+// one path, and the initial shortlist is partitioned round-robin
+// between paths so every path explores a disjoint slice of the
+// network.
 //
 // Result is the union of all paths' shortlists, sorted by XOR distance,
 // truncated to K.
@@ -533,8 +531,7 @@ func (n *Node) iterativeFind(
 		return nil, nil
 	}
 
-	d := max(n.cfg.Disjoint, 1)
-	d = min(d, len(initial))
+	d := min(n.cfg.Disjoint, len(initial))
 
 	paths := make([]*pathState, d)
 	for i := range paths {
