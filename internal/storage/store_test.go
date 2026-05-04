@@ -101,6 +101,133 @@ func TestStore_MessagesAndHistory(t *testing.T) {
 	}
 }
 
+func TestStore_DeleteContact(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		wipeHistory bool
+		wantHistory int
+	}{
+		{name: "keep history", wipeHistory: false, wantHistory: 2},
+		{name: "wipe history", wipeHistory: true, wantHistory: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := mkStore(t)
+			id, _ := identity.Generate(rand.Reader)
+			other, _ := identity.Generate(rand.Reader)
+			peer := id.Public().DestinationHash()
+			otherPeer := other.Public().DestinationHash()
+
+			seed := storage.Contact{
+				Hash:        peer,
+				Public:      id.Public(),
+				Alias:       "victim",
+				Fingerprint: id.Public().Fingerprint(),
+				AddedAt:     time.Now().UTC(),
+			}
+			if err := s.UpsertContact(t.Context(), seed); err != nil {
+				t.Fatal(err)
+			}
+			otherSeed := seed
+			otherSeed.Hash = otherPeer
+			otherSeed.Public = other.Public()
+			otherSeed.Alias = "bystander"
+			if err := s.UpsertContact(t.Context(), otherSeed); err != nil {
+				t.Fatal(err)
+			}
+
+			for i := range 2 {
+				if _, err := s.AppendMessage(t.Context(), storage.HistoryEntry{
+					Peer:      peer,
+					Direction: "out",
+					Kind:      1,
+					Body:      []byte{byte('a' + i)},
+					When:      time.Now(),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.AppendMessage(t.Context(), storage.HistoryEntry{
+				Peer:      otherPeer,
+				Direction: "out",
+				Kind:      1,
+				Body:      []byte("keep"),
+				When:      time.Now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddOutboxItem(t.Context(), peer, []byte("pending-1")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddOutboxItem(t.Context(), peer, []byte("pending-2")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddOutboxItem(t.Context(), otherPeer, []byte("keep")); err != nil {
+				t.Fatal(err)
+			}
+
+			err := s.DeleteContact(t.Context(), peer, storage.DeleteContactOptions{WipeHistory: tt.wipeHistory})
+			if err != nil {
+				t.Fatalf("DeleteContact: %v", err)
+			}
+
+			if _, err := s.GetContact(t.Context(), peer); err == nil {
+				t.Fatal("contact still present after delete")
+			}
+
+			pending, err := s.PendingForPeer(t.Context(), peer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(pending) != 0 {
+				t.Fatalf("outbox not cleared: %d items remain", len(pending))
+			}
+
+			hist, err := s.LoadHistory(t.Context(), peer, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(hist) != tt.wantHistory {
+				t.Fatalf("history len = %d, want %d", len(hist), tt.wantHistory)
+			}
+
+			otherContact, err := s.GetContact(t.Context(), otherPeer)
+			if err != nil || otherContact.Alias != "bystander" {
+				t.Fatalf("bystander contact disturbed: %+v err=%v", otherContact, err)
+			}
+			otherHist, err := s.LoadHistory(t.Context(), otherPeer, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(otherHist) != 1 {
+				t.Fatalf("bystander history len = %d, want 1", len(otherHist))
+			}
+			otherPending, err := s.PendingForPeer(t.Context(), otherPeer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(otherPending) != 1 {
+				t.Fatalf("bystander outbox len = %d, want 1", len(otherPending))
+			}
+		})
+	}
+}
+
+func TestStore_DeleteContact_Missing(t *testing.T) {
+	t.Parallel()
+	s := mkStore(t)
+	id, _ := identity.Generate(rand.Reader)
+	peer := id.Public().DestinationHash()
+
+	if err := s.DeleteContact(t.Context(), peer, storage.DeleteContactOptions{}); err == nil {
+		t.Fatal("expected error for missing contact")
+	}
+}
+
 func TestStore_Outbox(t *testing.T) {
 	t.Parallel()
 	s := mkStore(t)

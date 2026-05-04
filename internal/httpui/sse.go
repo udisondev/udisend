@@ -157,6 +157,15 @@ func (c *sseClient) send(env envelope) {
 
 // onIncomingSession is the messenger.SetIncomingHandler callback.
 func (s *Server) onIncomingSession(sess *messenger.Session) {
+	// Persist a placeholder contact for the initiating peer (empty alias)
+	// so the UI can render them after a reload while the user picks a
+	// local label. Already-known peers are a no-op.
+	ensureCtx, ensureCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := s.mngr.EnsureContact(ensureCtx, sess.Peer, sess.PeerPublic()); err != nil {
+		s.logger.Warn("httpui: ensure contact for incoming session", "peer", sess.Peer, "err", err)
+	}
+	ensureCancel()
+
 	s.wsMu.Lock()
 	var target *sseClient
 	for c := range s.wsConns {

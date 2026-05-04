@@ -36,12 +36,12 @@ tasks:
       - go.mod
       - go.sum
     generates:
-      - '{{.BIN_DIR}}/network'
       - '{{.BIN_DIR}}/messenger'
+      - '{{.BIN_DIR}}/network'
     cmds:
       - mkdir -p {{.BIN_DIR}}
-      - go build -o {{.BIN_DIR}}/network   ./cmd/network
       - go build -o {{.BIN_DIR}}/messenger ./cmd/messenger
+      - go build -o {{.BIN_DIR}}/network   ./cmd/network
 
   build:reproducible:
     desc: |
@@ -56,9 +56,8 @@ tasks:
       OUT: '{{.BIN_DIR}}/{{.OS}}_{{.ARCH}}'
     cmds:
       - mkdir -p {{.OUT}}
-      - GOOS={{.OS}} GOARCH={{.ARCH}} CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version={{.VERSION}}" -o {{.OUT}}/network   ./cmd/network
       - GOOS={{.OS}} GOARCH={{.ARCH}} CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version={{.VERSION}}" -o {{.OUT}}/messenger ./cmd/messenger
-      - sha256sum {{.OUT}}/network {{.OUT}}/messenger > {{.OUT}}/SHA256SUMS
+      - sha256sum {{.OUT}}/messenger > {{.OUT}}/SHA256SUMS
 
   release:sign:
     desc: |
@@ -188,6 +187,38 @@ tasks:
         {{.BOOTSTRAP_FLAG}}
         -v
 
+  run:network:
+    desc: |
+      Run a public udisend node (relay + bootstrap, optional STUN/TURN).
+      Intended for VPS deployments — no browser UI, no chat history,
+      just DHT participation and signaling relay.
+
+      Optional vars:
+        LISTEN      UDP listen address (default :9000)
+        PUBLIC_IP   advertise STUN/TURN on this IP (omit to skip)
+        TURN_SECRET shared secret for TURN long-term credentials (omit to disable TURN)
+        BOOTSTRAP   comma-separated peers to seed the routing table (host:port,…); DNS names work
+        IDENTITY    path to identity seed file (default ~/.config/udisend/network.key)
+
+      Example:
+        task run:network LISTEN=:9000 PUBLIC_IP=203.0.113.7 TURN_SECRET=$(openssl rand -hex 32)
+    deps: [build]
+    vars:
+      LISTEN: '{{.LISTEN | default ":9000"}}'
+      IDENTITY: '{{.IDENTITY | default (printf "%s/network.key" .CONFIG_DIR)}}'
+      PUBLIC_IP_FLAG: '{{ if .PUBLIC_IP }}--public-ip {{.PUBLIC_IP}}{{ end }}'
+      TURN_FLAG:      '{{ if .TURN_SECRET }}--turn-secret {{.TURN_SECRET}}{{ end }}'
+      BOOTSTRAP_FLAG: '{{ if .BOOTSTRAP }}{{ range $a := splitList "," .BOOTSTRAP }} --bootstrap {{$a}}{{ end }}{{ end }}'
+    cmds:
+      - >-
+        {{.BIN_DIR}}/network
+        --identity {{.IDENTITY}}
+        --listen {{.LISTEN}}
+        {{.PUBLIC_IP_FLAG}}
+        {{.TURN_FLAG}}
+        {{.BOOTSTRAP_FLAG}}
+        -v
+
   reset:*:
     desc: 'Wipe a peer''s identity + storage (e.g. `task reset:bob`)'
     vars:
@@ -201,13 +232,3 @@ tasks:
     prompt: 'This deletes everything under {{.CONFIG_DIR}}. Continue?'
     cmds:
       - rm -rf '{{.CONFIG_DIR}}'
-
-  # ─── Network node (long-lived rendezvous, not needed for the local demo) ──
-
-  run:network:
-    desc: 'Run a stand-alone network node (DHT + signaling relay). For VPS / always-on rendezvous use; the local 3-messenger demo does NOT need it.'
-    deps: [build]
-    vars:
-      LISTEN: '{{.LISTEN | default "127.0.0.1:9000"}}'
-    cmds:
-      - '{{.BIN_DIR}}/network --listen {{.LISTEN}} -v'

@@ -2,12 +2,10 @@ package messenger_test
 
 import (
 	"context"
-	"crypto/rand"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/udisondev/udisend/internal/messenger"
 	"github.com/udisondev/udisend/pkg/identity"
 )
 
@@ -17,16 +15,8 @@ func TestFlushOutboxOnce_OfflinePeerNotNotified(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	mngr, err := messenger.Open(ctx, messenger.Config{
-		Identity:       mustIdentity(t),
-		Listen:         "127.0.0.1:0",
-		StorageDir:     t.TempDir(),
-		OutboxInterval: -1, // pump disabled; we call FlushOutboxOnce directly
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(mngr.Close)
+
+	mngr := openMessenger(t, ctx, t.TempDir(), nil, -1)
 
 	var fired atomic.Bool
 	mngr.SetPeerOnlineHandler(func(_ identity.Hash) { fired.Store(true) })
@@ -46,38 +36,16 @@ func TestFlushOutboxOnce_OfflinePeerNotNotified(t *testing.T) {
 
 // TestFlushOutboxOnce_NotifiesOnlineRecipient — pump must fire the handler
 // once for a contact whose presence resolves and that has pending items.
-// Built as an integration test over UDP loopback because Open() pins
-// transport.UDPTransport; AddContact's retry loop is the natural sync
-// point — once it succeeds, the presence is freshly cached.
+// Built as an integration test over UDP loopback; AddContact's retry loop
+// is the natural sync point — once it succeeds, the presence is freshly
+// cached.
 func TestFlushOutboxOnce_NotifiesOnlineRecipient(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	bob, err := messenger.Open(ctx, messenger.Config{
-		Identity:       mustIdentity(t),
-		Listen:         "127.0.0.1:0",
-		StorageDir:     t.TempDir(),
-		OutboxInterval: -1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(bob.Close)
-	go bob.Run(ctx)
-
-	alice, err := messenger.Open(ctx, messenger.Config{
-		Identity:       mustIdentity(t),
-		Listen:         "127.0.0.1:0",
-		StorageDir:     t.TempDir(),
-		Bootstrap:      []string{bob.LocalAddress()},
-		OutboxInterval: -1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(alice.Close)
-	go alice.Run(ctx)
+	bob := openMessenger(t, ctx, t.TempDir(), nil, -1)
+	alice := openMessenger(t, ctx, t.TempDir(), []string{bob.LocalAddress()}, -1)
 
 	bobHash := bob.Identity().Public().DestinationHash()
 
@@ -107,9 +75,3 @@ func TestFlushOutboxOnce_NotifiesOnlineRecipient(t *testing.T) {
 		t.Fatal("peer-online handler never fired before deadline")
 	}
 }
-
-// reuse mustIdentity from messenger_test.go (same _test package).
-var _ = identity.HashSize
-
-// keep crypto/rand referenced if other tests in this file are removed.
-var _ = rand.Reader

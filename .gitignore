@@ -3,6 +3,11 @@
 /dist/
 /cmd/network/network
 /cmd/messenger/messenger
+/messenger
+/network
+
+# Task build cache
+/.task/
 
 # Test / coverage / profiling
 coverage.out

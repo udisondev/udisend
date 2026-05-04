@@ -1,12 +1,16 @@
-// Command network runs a udisend network node — a passive participant
-// that joins the DHT, relays signaling traffic for clients, and (when
-// configured) serves embedded STUN/TURN volunteers.
+// Command network runs a udisend public node — a passive participant
+// in the DHT that relays signaling traffic for other peers and, when
+// given a public IP, optionally serves embedded STUN/TURN volunteers.
+// It carries no user state (no contacts, no chat history, no browser
+// UI) and is intended for VPS / always-on hosts that act as bootstrap
+// and rendezvous infrastructure for the network.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
-	"log"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -15,31 +19,32 @@ import (
 	"syscall"
 
 	"github.com/udisondev/udisend/internal/config"
-	"github.com/udisondev/udisend/internal/network"
+	"github.com/udisondev/udisend/pkg/network"
 )
-
-func main() {
-	if err := run(); err != nil {
-		log.Fatal(err)
-	}
-}
 
 type stringList []string
 
 func (s *stringList) String() string     { return strings.Join(*s, ",") }
 func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
 func run() error {
 	defaultIdentity := filepath.Join(defaultStateDir(), "network.key")
 
-	listen := flag.String("listen", "127.0.0.1:9000", "UDP listen address")
 	identityPath := flag.String("identity", defaultIdentity, "path to identity seed file")
-	publicIP := flag.String("public-ip", "", "advertise STUN/TURN volunteer on this IP (omit to disable)")
+	listen := flag.String("listen", ":9000", "UDP listen address (host:port; \":9000\" binds all interfaces)")
+	publicIP := flag.String("public-ip", "", "advertise STUN/TURN volunteer on this IP (omit to skip STUN/TURN)")
 	stunAddr := flag.String("stun", ":3478", "STUN listen address (used only if --public-ip is set)")
-	turnAddr := flag.String("turn", ":3479", "TURN listen address (used only if --public-ip is set)")
+	turnAddr := flag.String("turn", ":3479", "TURN listen address (used only if --public-ip and --turn-secret are set)")
 	turnSecret := flag.String("turn-secret", "", "shared secret for TURN long-term credentials (omit to disable TURN)")
 	bootstrap := stringList{}
-	flag.Var(&bootstrap, "bootstrap", "peer address to bootstrap from (host:port; can be repeated)")
+	flag.Var(&bootstrap, "bootstrap", "peer to seed the routing table — IPv4/IPv6/DNS-name with port, e.g. 1.2.3.4:9000 or relay.example.com:9000 (can be repeated; omit to use community defaults)")
 	verbose := flag.Bool("v", false, "verbose logs")
 	flag.Parse()
 
@@ -63,19 +68,53 @@ func run() error {
 
 	node, err := network.Open(ctx, network.Config{
 		Identity:   id,
+		Mode:       network.ModeRelay,
 		Listen:     *listen,
+		Bootstrap:  bootstrap,
 		PublicIP:   *publicIP,
 		STUNAddr:   *stunAddr,
 		TURNAddr:   *turnAddr,
 		TURNSecret: *turnSecret,
-		Bootstrap:  bootstrap,
 		Logger:     logger,
 	})
 	if err != nil {
 		return err
 	}
-	logger.Info("listening", "udp", node.LocalAddress())
-	return node.Run(ctx)
+
+	fmt.Println()
+	fmt.Println("┌─ udisend network node ───────────────────────────────────────────")
+	fmt.Println("│  destination_hash:", id.Public().DestinationHash().String())
+	fmt.Println("│  fingerprint:     ", id.Public().Fingerprint())
+	fmt.Println("│  UDP:             ", node.LocalAddress())
+	if *publicIP != "" {
+		fmt.Println("│  public IP:       ", *publicIP)
+		fmt.Println("│  STUN:            ", *stunAddr)
+		if *turnSecret != "" {
+			fmt.Println("│  TURN:            ", *turnAddr)
+		}
+	}
+	fmt.Println("└──────────────────────────────────────────────────────────────────")
+	fmt.Println()
+
+	// A pure relay is not a session destination — drain Income so the
+	// pump never blocks. Misbehaving peers that do try to open a noise
+	// session here just have their frames Released and dropped.
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for inc := range node.Income() {
+			inc.Release()
+		}
+	}()
+
+	runErr := node.Run(ctx)
+	<-drainDone
+
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		return runErr
+	}
+
+	return nil
 }
 
 func defaultStateDir() string {
@@ -83,5 +122,6 @@ func defaultStateDir() string {
 	if err != nil {
 		dir = "."
 	}
+
 	return filepath.Join(dir, "udisend")
 }

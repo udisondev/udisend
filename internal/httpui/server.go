@@ -87,6 +87,8 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("/api/snapshot", s.requireToken(s.handleSnapshot))
 	mux.HandleFunc("/api/contacts/add", s.requireToken(s.handleContactAdd))
 	mux.HandleFunc("/api/contacts/verify", s.requireToken(s.handleContactVerify))
+	mux.HandleFunc("/api/contacts/rename", s.requireToken(s.handleContactRename))
+	mux.HandleFunc("/api/contacts/delete", s.requireToken(s.handleContactDelete))
 	mux.HandleFunc("/api/history", s.requireToken(s.handleHistory))
 	mux.HandleFunc("/api/append-history", s.requireToken(s.handleAppendHistory))
 	mux.HandleFunc("/api/session/open", s.requireToken(s.handleSessionOpen))
@@ -281,6 +283,64 @@ func (s *Server) handleContactVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mngr.VerifyContact(r.Context(), h, req.Verified); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleContactRename(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Hash  string `json:"hash"`
+		Alias string `json:"alias"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	h, err := identity.ParseHash(strings.TrimSpace(req.Hash))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.mngr.RenameContact(r.Context(), h, strings.TrimSpace(req.Alias)); err != nil {
+		if errors.Is(err, storage.ErrContactNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleContactDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Hash        string `json:"hash"`
+		WipeHistory bool   `json:"wipe_history"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	h, err := identity.ParseHash(strings.TrimSpace(req.Hash))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.mngr.RemoveContact(r.Context(), h, messenger.RemoveContactOptions{WipeHistory: req.WipeHistory}); err != nil {
+		if errors.Is(err, storage.ErrContactNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

@@ -90,6 +90,48 @@ func (s *Store) UpsertContact(ctx context.Context, c Contact) error {
 // from the supplied ones.
 var ErrFingerprintChanged = errors.New("storage: fingerprint changed for known contact")
 
+// EnsureContact inserts a contact row only if no row exists for the hash.
+// Existing rows are left untouched — alias, verified flag and any other
+// user-edited state are not overwritten. Used by the runtime when an
+// unknown peer initiates a session toward us, so the contact survives a
+// page reload while waiting for the user to assign a local alias.
+func (s *Store) EnsureContact(ctx context.Context, c Contact) error {
+	row := s.db.QueryRowContext(ctx, "SELECT 1 FROM contacts WHERE destination_hash = ?", c.Hash.String())
+	var dummy int
+	err := row.Scan(&dummy)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO contacts (destination_hash, ed_pub, x_pub, alias, fingerprint, verified, added_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, c.Hash.String(), []byte(c.Public.EdPub), c.Public.XPub[:], c.Alias, c.Fingerprint, boolInt(c.Verified), c.AddedAt.Unix())
+
+	return err
+}
+
+// SetContactAlias updates the local alias of an existing contact. The
+// alias is purely a local label — it never crosses the wire — so this
+// touches the alias column and nothing else.
+func (s *Store) SetContactAlias(ctx context.Context, h identity.Hash, alias string) error {
+	res, err := s.db.ExecContext(ctx, "UPDATE contacts SET alias = ? WHERE destination_hash = ?", alias, h.String())
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrContactNotFound
+	}
+
+	return nil
+}
+
 // GetContact loads a contact by destination hash.
 func (s *Store) GetContact(ctx context.Context, h identity.Hash) (Contact, error) {
 	row := s.db.QueryRowContext(ctx, `
@@ -149,6 +191,53 @@ func (s *Store) ListContacts(ctx context.Context) ([]Contact, error) {
 func (s *Store) SetContactVerified(ctx context.Context, h identity.Hash, verified bool) error {
 	_, err := s.db.ExecContext(ctx, "UPDATE contacts SET verified = ? WHERE destination_hash = ?", boolInt(verified), h.String())
 	return err
+}
+
+// DeleteContactOptions controls cascade behaviour for DeleteContact.
+type DeleteContactOptions struct {
+	// WipeHistory also removes every message whose peer matches the
+	// deleted contact. Outbox is always cleared regardless of this flag —
+	// see ROADMAP decisions log 2026-05-03.
+	WipeHistory bool
+}
+
+// ErrContactNotFound is returned by DeleteContact when no row matches the
+// supplied hash.
+var ErrContactNotFound = errors.New("storage: contact not found")
+
+// DeleteContact removes a contact along with its outbox items (always)
+// and, if opts.WipeHistory is set, its message history. Runs in a single
+// transaction so a partial failure leaves the store untouched.
+func (s *Store) DeleteContact(ctx context.Context, h identity.Hash, opts DeleteContactOptions) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, "DELETE FROM contacts WHERE destination_hash = ?", h.String())
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrContactNotFound
+	}
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM outbox WHERE peer_hash = ?", h.String()); err != nil {
+		return err
+	}
+
+	if opts.WipeHistory {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM messages WHERE peer_hash = ?", h.String()); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 // MessageKind mirrors chat.MessageKind to avoid an import cycle. Defined

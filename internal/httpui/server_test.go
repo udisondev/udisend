@@ -6,10 +6,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,7 +20,9 @@ import (
 
 	"github.com/udisondev/udisend/internal/httpui"
 	"github.com/udisondev/udisend/internal/messenger"
+	"github.com/udisondev/udisend/internal/storage"
 	"github.com/udisondev/udisend/pkg/identity"
+	"github.com/udisondev/udisend/pkg/network"
 )
 
 // TestSignalingBridge_TwoMessengers proves the v2 protocol critical path:
@@ -94,6 +98,74 @@ func TestSignalingBridge_TwoMessengers(t *testing.T) {
 	}
 }
 
+// TestContactDelete_HTTPRoute drives the new /api/contacts/delete route:
+// a contact that alice just added is removed via REST and disappears from
+// the snapshot. Outbox queued before deletion is also gone.
+func TestContactDelete_HTTPRoute(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	alice := startMessenger(t, ctx, "alice", dir, "127.0.0.1:0", "127.0.0.1:0", nil)
+	bob := startMessenger(t, ctx, "bob", dir, "127.0.0.1:0", "127.0.0.1:0", []string{alice.udp})
+
+	if _, err := postJSON(alice, "/api/contacts/add", map[string]any{
+		"hash": bob.hash, "alias": "bob",
+	}); err != nil {
+		t.Fatalf("add bob: %v", err)
+	}
+
+	bobHash, err := identity.ParseHash(bob.hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := alice.mngr.QueueOutbox(ctx, bobHash, []byte("queued")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := postJSON(alice, "/api/contacts/delete", map[string]any{
+		"hash":         bob.hash,
+		"wipe_history": true,
+	}); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	snap, err := getJSON(alice, "/api/snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Contacts []struct {
+			Hash string `json:"hash"`
+		} `json:"contacts"`
+	}
+	if err := json.Unmarshal(snap, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range parsed.Contacts {
+		if c.Hash == bob.hash {
+			t.Fatalf("bob still in snapshot after delete")
+		}
+	}
+
+	pending, err := alice.mngr.PendingOutbox(ctx, bobHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("outbox not cleared: %d items", len(pending))
+	}
+
+	resp, err := postJSONResp(alice, "/api/contacts/delete", map[string]any{"hash": bob.hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("second delete status = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 type peer struct {
@@ -107,19 +179,36 @@ type peer struct {
 
 func startMessenger(t *testing.T, ctx context.Context, name, root, udp, http string, bootstrap []string) *peer {
 	t.Helper()
+
 	id, err := identity.Generate(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mngr, err := messenger.Open(ctx, messenger.Config{
-		Identity:   id,
-		Listen:     udp,
-		Bootstrap:  bootstrap,
-		StorageDir: filepath.Join(root, name),
+
+	storeDir := filepath.Join(root, name)
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.Open(ctx, filepath.Join(storeDir, "messenger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	node, err := network.Open(ctx, network.Config{
+		Identity:      id,
+		Listen:        udp,
+		Bootstrap:     bootstrap,
+		SeenPeerStore: store,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	mngr := messenger.Open(messenger.Config{
+		Network: node,
+		Storage: store,
+	})
+
 	srv, err := httpui.NewServer(httpui.Config{
 		Messenger: mngr,
 		Listen:    http,
@@ -127,11 +216,38 @@ func startMessenger(t *testing.T, ctx context.Context, name, root, udp, http str
 	if err != nil {
 		t.Fatal(err)
 	}
-	go mngr.Run(ctx)
-	go func() { _ = srv.Run(ctx) }()
+
+	nodeDone := make(chan error, 1)
+	mngrDone := make(chan error, 1)
+	srvDone := make(chan error, 1)
+	go func() { nodeDone <- node.Run(ctx) }()
+	go func() { mngrDone <- mngr.Run(ctx) }()
+	go func() { srvDone <- srv.Run(ctx) }()
+
 	t.Cleanup(func() {
 		srv.Close()
 		mngr.Close()
+		if err := node.Close(); err != nil {
+			t.Errorf("close node: %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+		// Drain Run errors after Close so we surface real failures while
+		// filtering out the expected ctx-cancel exit path.
+		for _, item := range []struct {
+			name string
+			ch   chan error
+		}{{"node", nodeDone}, {"messenger", mngrDone}, {"httpui", srvDone}} {
+			select {
+			case err := <-item.ch:
+				if err != nil && !errors.Is(err, context.Canceled) {
+					t.Errorf("%s.Run: %v", item.name, err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Errorf("%s.Run did not exit after ctx cancel", item.name)
+			}
+		}
 	})
 
 	// Poll until the HTTP listener accepts connections.
@@ -141,11 +257,12 @@ func startMessenger(t *testing.T, ctx context.Context, name, root, udp, http str
 		mngr:  mngr,
 		srv:   srv,
 		hash:  id.Public().DestinationHash().String(),
-		udp:   mngr.LocalAddress(),
+		udp:   node.LocalAddress(),
 		url:   srv.URL(),
 		token: srv.AuthToken(),
 	}
 }
+
 
 func postJSON(p *peer, path string, body any) ([]byte, error) {
 	blob, _ := json.Marshal(body)
@@ -161,6 +278,33 @@ func postJSON(p *peer, path string, body any) ([]byte, error) {
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("%s -> %d: %s", path, resp.StatusCode, rb)
 	}
+	return rb, nil
+}
+
+// postJSONResp is like postJSON but returns the raw response so tests can
+// assert on non-2xx status codes (e.g. 404 for a missing contact).
+func postJSONResp(p *peer, path string, body any) (*http.Response, error) {
+	blob, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, "http://"+p.srv.LocalAddress()+path, bytes.NewReader(blob))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.token)
+
+	return http.DefaultClient.Do(req)
+}
+
+func getJSON(p *peer, path string) ([]byte, error) {
+	req, _ := http.NewRequest(http.MethodGet, "http://"+p.srv.LocalAddress()+path, nil)
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("%s -> %d: %s", path, resp.StatusCode, rb)
+	}
+
 	return rb, nil
 }
 

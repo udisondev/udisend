@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/udisondev/udisend/internal/network"
 	"github.com/udisondev/udisend/pkg/identity"
+	"github.com/udisondev/udisend/pkg/network"
 )
 
 func TestOpen_ListensOnEphemeral(t *testing.T) {
@@ -23,6 +23,11 @@ func TestOpen_ListensOnEphemeral(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := node.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
 	if node.LocalAddress() == "" {
 		t.Fatal("LocalAddress empty")
 	}

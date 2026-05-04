@@ -5,12 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/udisondev/udisend/internal/storage"
 	"github.com/udisondev/udisend/pkg/identity"
-	"github.com/udisondev/udisend/pkg/presence"
+	"github.com/udisondev/udisend/pkg/network"
 )
 
 // ICEServer is the JSON-friendly form of an ICE server entry passed to
@@ -21,125 +20,73 @@ type ICEServer struct {
 	Credential string   `json:"credential,omitempty"`
 }
 
-// ICEServers discovers volunteer STUN/TURN servers from the local routing
-// table by resolving each known contact's presence record and filtering
-// by Capability bits. Best-effort: peers that fail to resolve within
-// `lookupTTL` are skipped silently. TURN entries are emitted only if a
-// shared secret is known to this messenger (currently never — TURN auth
-// is bridged through cmd/network's --turn-secret flag).
+// ICEServers discovers volunteer STUN/TURN servers via the network
+// layer and maps them to browser-friendly ICEServer JSON.
 //
-// design.md §6: "Перед инициированием звонка/линка клиент делает DHT
-// lookup узлов с capability CanSTUN/CanTURN. Выбирает 3-5 узлов и
-// передаёт их адреса в webrtc.Configuration.ICEServers."
-// DefaultSTUNPort is the well-known STUN listen port (RFC 5389). Network
-// nodes that advertise CapCanSTUN run their STUN responder there; the
-// publish address in the presence record is the DHT/signaling socket
-// (a different port), so when constructing stun: URLs we substitute in
-// the standard port. Future work: carry an explicit STUN address as a
-// presence-record TLV so non-default deployments work too.
-const DefaultSTUNPort = "3478"
-
+// design.md §6: client picks 3-5 servers and passes them as
+// webrtc.Configuration.ICEServers.
 func (m *Messenger) ICEServers(ctx context.Context) []ICEServer {
-	const (
-		lookupTTL  = 1500 * time.Millisecond
-		maxServers = 5
-	)
+	const maxServers = 5
 
-	contacts := m.node.Table().All()
-	if len(contacts) == 0 {
+	cands := m.cfg.Network.ICEServers(ctx, maxServers)
+	if len(cands) == 0 {
 		return nil
 	}
 
-	// Cancellable child ctx so once we have enough servers, in-flight
-	// goroutines waiting on resolver.Lookup return immediately rather
-	// than burn the full lookupTTL.
-	gather, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	type result struct {
-		urls []string
-	}
-	results := make(chan result, len(contacts))
-	var wg sync.WaitGroup
-	for _, c := range contacts {
-		wg.Go(func() {
-			rctx, rcancel := context.WithTimeout(gather, lookupTTL)
-			defer rcancel()
-
-			rec, err := m.resolver.Lookup(rctx, c.ID)
-			if err != nil || rec == nil {
-				return
-			}
-			if !rec.Capabilities.Has(presence.CapCanSTUN) {
-				return
-			}
-
-			host, _, err := net.SplitHostPort(rec.Address)
-			if err != nil {
-				host = rec.Address
-			}
-
-			results <- result{urls: []string{"stun:" + net.JoinHostPort(host, DefaultSTUNPort)}}
+	out := make([]ICEServer, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, ICEServer{
+			URLs: []string{c.Kind + ":" + net.JoinHostPort(c.Host, c.Port)},
 		})
-	}
-	go func() { wg.Wait(); close(results) }()
-
-	var out []ICEServer
-	for r := range results {
-		out = append(out, ICEServer{URLs: r.urls})
-		if len(out) >= maxServers {
-			cancel() // wake up the rest so they don't burn lookupTTL
-			break
-		}
 	}
 
 	return out
 }
 
-// AddContact registers a peer in the local TOFU store. The peer's public
-// identity is fetched via presence; the contact's verified flag stays
-// false until the user does an out-of-band fingerprint check.
+// AddContact registers a peer in the local TOFU store. The peer's
+// public identity is fetched via presence; the contact's verified flag
+// stays false until the user does an out-of-band fingerprint check.
 //
 // Presence resolution retries a few times: if the peer started moments
 // ago, their first record may not have reached the closest DHT nodes
 // yet. ErrPeerOffline (wrapping presence.ErrNotFound) is returned only
 // after all attempts fail, so the UI can show a useful message.
 func (m *Messenger) AddContact(ctx context.Context, hash identity.Hash, alias string) error {
-	rec, err := m.resolveWithRetry(ctx, hash)
+	info, err := m.resolveWithRetry(ctx, hash)
 	if err != nil {
 		return err
 	}
 
 	c := storage.Contact{
 		Hash:        hash,
-		Public:      rec.Public,
+		Public:      info.Public,
 		Alias:       alias,
-		Fingerprint: rec.Public.Fingerprint(),
+		Fingerprint: info.Public.Fingerprint(),
 		AddedAt:     time.Now().UTC(),
 	}
 
-	return m.storage.UpsertContact(ctx, c)
+	return m.cfg.Storage.UpsertContact(ctx, c)
 }
 
 // ErrPeerOffline wraps presence.ErrNotFound with a more user-friendly
 // message for the UI layer.
 var ErrPeerOffline = errors.New("peer not visible on the network: their messenger may not be running yet, or they have not joined the same DHT bootstrap")
 
-func (m *Messenger) resolveWithRetry(ctx context.Context, hash identity.Hash) (*presence.Record, error) {
+func (m *Messenger) resolveWithRetry(ctx context.Context, hash identity.Hash) (network.PeerInfo, error) {
 	const attempts = 4
 	const delay = 800 * time.Millisecond
 
 	var lastErr error
 	for i := range attempts {
 		attemptCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
-		rec, err := m.resolver.Lookup(attemptCtx, hash)
+		info, err := m.cfg.Network.Lookup(attemptCtx, hash)
 		cancel()
 		if err == nil {
-			return rec, nil
+			return info, nil
 		}
 		lastErr = err
-		if !errors.Is(err, presence.ErrNotFound) {
-			return nil, fmt.Errorf("messenger: resolve contact: %w", err)
+		if !errors.Is(err, network.ErrPeerNotFound) {
+			return network.PeerInfo{}, fmt.Errorf("messenger: resolve contact: %w", err)
 		}
 		// Last attempt — surface the friendly error rather than sleep.
 		if i == attempts-1 {
@@ -147,52 +94,107 @@ func (m *Messenger) resolveWithRetry(ctx context.Context, hash identity.Hash) (*
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return network.PeerInfo{}, ctx.Err()
 		case <-time.After(delay):
 		}
 	}
-	return nil, fmt.Errorf("%w (last lookup: %v)", ErrPeerOffline, lastErr)
+
+	return network.PeerInfo{}, fmt.Errorf("%w (last lookup: %v)", ErrPeerOffline, lastErr)
 }
 
 // VerifyContact toggles the verified flag.
 func (m *Messenger) VerifyContact(ctx context.Context, hash identity.Hash, verified bool) error {
-	return m.storage.SetContactVerified(ctx, hash, verified)
+	return m.cfg.Storage.SetContactVerified(ctx, hash, verified)
+}
+
+// EnsureContact persists a placeholder contact (empty alias) when an
+// unknown peer initiates a session toward us. If a contact already
+// exists for the hash, the call is a no-op — user-set alias and
+// verification state are preserved across reconnects.
+func (m *Messenger) EnsureContact(ctx context.Context, hash identity.Hash, pub identity.PublicIdentity) error {
+	c := storage.Contact{
+		Hash:        hash,
+		Public:      pub,
+		Alias:       "",
+		Fingerprint: pub.Fingerprint(),
+		AddedAt:     time.Now().UTC(),
+	}
+
+	return m.cfg.Storage.EnsureContact(ctx, c)
+}
+
+// RenameContact updates the local alias for an existing contact. The
+// alias never traverses the network — only the local user labels peers.
+func (m *Messenger) RenameContact(ctx context.Context, hash identity.Hash, alias string) error {
+	return m.cfg.Storage.SetContactAlias(ctx, hash, alias)
+}
+
+// RemoveContactOptions controls the cascade behaviour of RemoveContact.
+// Outbox is always cleared; only history is opt-in (see ROADMAP decisions
+// log 2026-05-03).
+type RemoveContactOptions struct {
+	WipeHistory bool
+}
+
+// RemoveContact tears down any active signaling session to peer and then
+// deletes the contact (and its outbox, and optionally its history) from
+// storage. Closing the session before the storage delete avoids a window
+// where a still-running session could re-queue outbox items.
+func (m *Messenger) RemoveContact(ctx context.Context, hash identity.Hash, opts RemoveContactOptions) error {
+	m.shutdownSessionsForPeer(hash)
+
+	return m.cfg.Storage.DeleteContact(ctx, hash, storage.DeleteContactOptions{WipeHistory: opts.WipeHistory})
+}
+
+func (m *Messenger) shutdownSessionsForPeer(peer identity.Hash) {
+	m.sessionsMu.Lock()
+	victims := make([]*Session, 0)
+	for k, sess := range m.sessions {
+		if k.peer == peer {
+			victims = append(victims, sess)
+		}
+	}
+	m.sessionsMu.Unlock()
+
+	for _, sess := range victims {
+		sess.shutdown()
+	}
 }
 
 // Contacts lists known contacts.
 func (m *Messenger) Contacts(ctx context.Context) ([]storage.Contact, error) {
-	return m.storage.ListContacts(ctx)
+	return m.cfg.Storage.ListContacts(ctx)
 }
 
 // History returns the most recent `limit` messages with peer.
 func (m *Messenger) History(ctx context.Context, peer identity.Hash, limit int) ([]storage.HistoryEntry, error) {
-	return m.storage.LoadHistory(ctx, peer, limit)
+	return m.cfg.Storage.LoadHistory(ctx, peer, limit)
 }
 
 // AppendHistory persists a message the browser just sent or received.
 // The browser owns the chat-layer protocol over DataChannel; Go's only
 // job here is durable storage.
 func (m *Messenger) AppendHistory(ctx context.Context, e storage.HistoryEntry) (int64, error) {
-	return m.storage.AppendMessage(ctx, e)
+	return m.cfg.Storage.AppendMessage(ctx, e)
 }
 
 // MarkMessage updates a stored message's status (e.g. once the browser
 // confirms delivery).
 func (m *Messenger) MarkMessage(ctx context.Context, id int64, status int) error {
-	return m.storage.MarkMessageStatus(ctx, id, status)
+	return m.cfg.Storage.MarkMessageStatus(ctx, id, status)
 }
 
 // QueueOutbox stores a payload for delivery once peer comes back online.
 func (m *Messenger) QueueOutbox(ctx context.Context, peer identity.Hash, payload []byte) (int64, error) {
-	return m.storage.AddOutboxItem(ctx, peer, payload)
+	return m.cfg.Storage.AddOutboxItem(ctx, peer, payload)
 }
 
 // PendingOutbox returns queued items for peer (FIFO).
 func (m *Messenger) PendingOutbox(ctx context.Context, peer identity.Hash) ([]storage.OutboxItem, error) {
-	return m.storage.PendingForPeer(ctx, peer)
+	return m.cfg.Storage.PendingForPeer(ctx, peer)
 }
 
 // AcknowledgeOutbox removes a queued item the browser confirmed it sent.
 func (m *Messenger) AcknowledgeOutbox(ctx context.Context, id int64) error {
-	return m.storage.DeleteOutboxItem(ctx, id)
+	return m.cfg.Storage.DeleteOutboxItem(ctx, id)
 }

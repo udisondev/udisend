@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -18,9 +19,13 @@ import (
 	"strings"
 	"syscall"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/udisondev/udisend/internal/config"
 	"github.com/udisondev/udisend/internal/httpui"
 	"github.com/udisondev/udisend/internal/messenger"
+	"github.com/udisondev/udisend/internal/storage"
+	"github.com/udisondev/udisend/pkg/network"
 )
 
 type stringList []string
@@ -44,7 +49,7 @@ func run() error {
 	listenUDP := flag.String("listen", "127.0.0.1:0", "UDP listen address (DHT/signaling)")
 	listenHTTP := flag.String("http", "127.0.0.1:0", "HTTP listen address (browser UI)")
 	bootstrap := stringList{}
-	flag.Var(&bootstrap, "bootstrap", "peer address to bootstrap from (host:port; can be repeated)")
+	flag.Var(&bootstrap, "bootstrap", "peer to bootstrap from — IPv4/IPv6/DNS-name with port, e.g. 1.2.3.4:9000 or relay.example.com:9000 (can be repeated; omit to use community defaults)")
 	openBrowser := flag.Bool("open", true, "open the browser UI on start")
 	verbose := flag.Bool("v", false, "verbose logs")
 	flag.Parse()
@@ -67,18 +72,32 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	mngr, err := messenger.Open(ctx, messenger.Config{
-		Identity:   id,
-		Bootstrap:  bootstrap,
-		Listen:     *listenUDP,
-		StorageDir: *storageDir,
-		Logger:     logger,
-	})
+	if err := os.MkdirAll(*storageDir, 0o755); err != nil {
+		return fmt.Errorf("storage dir: %w", err)
+	}
+	store, err := storage.Open(ctx, filepath.Join(*storageDir, "messenger.db"))
 	if err != nil {
 		return err
 	}
-	defer mngr.Close()
-	logger.Info("listening", "udp", mngr.LocalAddress())
+
+	node, err := network.Open(ctx, network.Config{
+		Identity:      id,
+		Mode:          network.ModeClient,
+		Listen:        *listenUDP,
+		Bootstrap:     bootstrap,
+		Logger:        logger,
+		SeenPeerStore: store,
+	})
+	if err != nil {
+		return errors.Join(err, store.Close())
+	}
+	logger.Info("listening", "udp", node.LocalAddress())
+
+	mngr := messenger.Open(messenger.Config{
+		Network: node,
+		Storage: store,
+		Logger:  logger,
+	})
 
 	srv, err := httpui.NewServer(httpui.Config{
 		Messenger: mngr,
@@ -86,7 +105,9 @@ func run() error {
 		Logger:    logger,
 	})
 	if err != nil {
-		return err
+		mngr.Close()
+
+		return errors.Join(err, node.Close(), store.Close())
 	}
 	url := srv.URL()
 	logger.Info("UI ready", "url", url)
@@ -97,7 +118,7 @@ func run() error {
 	fmt.Println("│")
 	fmt.Println("│  My destination_hash:", id.Public().DestinationHash().String())
 	fmt.Println("│  My fingerprint:     ", id.Public().Fingerprint())
-	fmt.Println("│  My UDP address:     ", mngr.LocalAddress())
+	fmt.Println("│  My UDP address:     ", node.LocalAddress())
 	fmt.Println("└──────────────────────────────────────────────────────────────────")
 	fmt.Println()
 
@@ -107,8 +128,43 @@ func run() error {
 		}
 	}
 
-	go mngr.Run(ctx)
-	return srv.Run(ctx)
+	// All three loops share gctx — first non-nil error from any of them
+	// cancels the rest, then Wait surfaces it. ctx-cancel from SIGINT
+	// flows through the same path as a real failure.
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		if err := node.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("network: %w", err)
+		}
+
+		return nil
+	})
+	g.Go(func() error {
+		if err := mngr.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("messenger: %w", err)
+		}
+
+		return nil
+	})
+	g.Go(func() error {
+		// srv.Run already maps http.ErrServerClosed to nil; what we get
+		// here is either a real Serve failure or ctx-driven shutdown.
+		if err := srv.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("httpui: %w", err)
+		}
+
+		return nil
+	})
+
+	runErr := g.Wait()
+
+	// Tear-down order: messenger → node → store. Errors from each are
+	// joined so the caller sees the full failure surface, not just the
+	// first one. Run loops have already returned by the time we get here.
+	mngr.Close()
+	closeErr := errors.Join(node.Close(), store.Close())
+
+	return errors.Join(runErr, closeErr)
 }
 
 func defaultStateDir() string {
