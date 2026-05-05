@@ -64,6 +64,28 @@ func (rt *RoutingTable) Remove(id NodeID) bool {
 	return b.remove(id)
 }
 
+// GetContact returns the routing-table entry for id, if present.
+// Used by the maybeProbe path to skip probes for peers we already know.
+func (rt *RoutingTable) GetContact(id NodeID) (Contact, bool) {
+	if id == rt.self {
+		return Contact{}, false
+	}
+	idx := BucketIndex(rt.self, id)
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	b := rt.buckets[idx]
+	if b == nil {
+		return Contact{}, false
+	}
+	for _, c := range b.contacts {
+		if c.ID == id {
+			return c, true
+		}
+	}
+
+	return Contact{}, false
+}
+
 // Size returns the total number of contacts across all buckets.
 func (rt *RoutingTable) Size() int {
 	rt.mu.RLock()

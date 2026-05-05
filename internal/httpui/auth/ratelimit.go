@@ -20,10 +20,13 @@ import (
 // time can be safely forgotten.
 //
 // MaxTrackedIPs hard-caps the in-memory map. When the cap is hit, new
-// IPs are still allowed (don't lock out legitimate clients) but the
-// per-IP state is not persisted — preventing memory growth via XFF
-// spoofing through a misconfigured proxy. The hourly Cleanup catches up
-// once attack traffic stops.
+// IPs are REFUSED (fail-closed) until Cleanup drains stale rows. The
+// previous "transient state, no persistence" mode opened a bypass: an
+// attacker who saturated the map (XFF spoofing, IPv6 /64 churn) could
+// then hammer /login from any other fresh IP without ever accumulating
+// failure counters — unlimited brute force. Failing-closed is correct
+// here: an attacker keeping the table full holds open the front door
+// for nobody, themselves included, and Cleanup runs hourly.
 type RateLimiter struct {
 	PerMinute     int
 	FailsToLock   int
@@ -44,12 +47,18 @@ type ipState struct {
 // Allow records an attempt for ip and returns whether it should proceed.
 // On deny, retryAfter hints at how long until a retry might succeed (used
 // for the Retry-After response header). The function combines the
-// per-minute window check and the lockout check.
+// per-minute window check, the lockout check, and the fail-closed branch
+// for a saturated tracking map.
 func (l *RateLimiter) Allow(ip string) (bool, time.Duration) {
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	st := l.ensure(ip)
+	if st == nil {
+		// Map saturated and ip is unknown — fail closed. Retry-After
+		// nudges the caller toward the next Cleanup tick.
+		return false, time.Hour
+	}
 
 	if now.Before(st.lockUntil) {
 		return false, st.lockUntil.Sub(now)
@@ -74,11 +83,17 @@ func (l *RateLimiter) Allow(ip string) (bool, time.Duration) {
 // windows: every additional failure past the threshold extends the
 // lockout. Without this, the asymptotic brute-force budget collapses to
 // FailsToLock per LockDuration (≈1900/day at default settings).
+//
+// No-op when the map is saturated and ip is unknown — Allow already
+// refused the request, so there is nothing to attribute.
 func (l *RateLimiter) RecordFail(ip string) {
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	st := l.ensure(ip)
+	if st == nil {
+		return
+	}
 	st.fails++
 	if st.fails >= l.FailsToLock {
 		st.lockUntil = now.Add(l.LockDuration)
@@ -87,10 +102,14 @@ func (l *RateLimiter) RecordFail(ip string) {
 }
 
 // RecordSuccess resets the failure counter and any lockout for ip.
+// No-op when the map is saturated and ip is unknown.
 func (l *RateLimiter) RecordSuccess(ip string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	st := l.ensure(ip)
+	if st == nil {
+		return
+	}
 	st.fails = 0
 	st.lockUntil = time.Time{}
 }
@@ -117,22 +136,21 @@ func (l *RateLimiter) tracked() int {
 	return len(l.state)
 }
 
+// ensure returns the per-IP state, creating it if necessary. Returns nil
+// when the map is saturated AND ip is not already tracked — callers
+// must treat nil as "fail-closed: refuse without persisting state".
 func (l *RateLimiter) ensure(ip string) *ipState {
 	if l.state == nil {
 		l.state = make(map[string]*ipState)
 	}
-	st, ok := l.state[ip]
-	if !ok {
-		// Skip persistence once the cap is hit. The transient state
-		// allows the current attempt to be evaluated against zero prior
-		// activity (effectively "fresh IP") without growing the map.
-		// Cleanup() drains stale rows so this is self-healing.
-		if l.MaxTrackedIPs > 0 && len(l.state) >= l.MaxTrackedIPs {
-			return &ipState{}
-		}
-		st = &ipState{}
-		l.state[ip] = st
+	if st, ok := l.state[ip]; ok {
+		return st
 	}
+	if l.MaxTrackedIPs > 0 && len(l.state) >= l.MaxTrackedIPs {
+		return nil
+	}
+	st := &ipState{}
+	l.state[ip] = st
 
 	return st
 }

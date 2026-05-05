@@ -93,6 +93,49 @@ func TestVerifyPassphrase_MalformedInputs(t *testing.T) {
 	}
 }
 
+// TestVerifyPassphrase_RejectsAbsurdParams covers the OOM amplifier: a
+// corrupted (or attacker-controlled) PHC row with `m=4294967295` (~4 TiB)
+// fed straight into argon2.IDKey crashes the next login. decodePHC MUST
+// clamp the parameter triple to safe bounds before letting argon2 see
+// them.
+func TestVerifyPassphrase_RejectsAbsurdParams(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		encoded string
+	}{
+		{
+			name:    "memory 4 TiB",
+			encoded: "$argon2id$v=19$m=4294967295,t=3,p=4$c2FsdHNhbHRzYWx0c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		},
+		{
+			name:    "iterations 1e6",
+			encoded: "$argon2id$v=19$m=65536,t=1000000,p=4$c2FsdHNhbHRzYWx0c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		},
+		{
+			name:    "parallelism 200",
+			encoded: "$argon2id$v=19$m=65536,t=3,p=200$c2FsdHNhbHRzYWx0c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		},
+		{
+			name:    "memory zero",
+			encoded: "$argon2id$v=19$m=0,t=3,p=4$c2FsdHNhbHRzYWx0c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ok, err := VerifyPassphrase(tt.encoded, "anything")
+			if err == nil {
+				t.Errorf("absurd params accepted (ok=%v err=nil) — argon2.IDKey would have been called", ok)
+			}
+			if ok {
+				t.Errorf("ok=true with absurd params")
+			}
+		})
+	}
+}
+
 func TestDefaultParams_MeetOWASP(t *testing.T) {
 	t.Parallel()
 

@@ -64,6 +64,39 @@ func TestLimiter_IndependentKeys(t *testing.T) {
 	}
 }
 
+// TestLimiter_BoundedKeyCardinality_EvictsLRU covers the unbounded-map
+// bug: an attacker spraying 1M unique source IPs in 30s creates 1M
+// bucket entries before the GC sweep sees them. The cap MUST evict the
+// least-recently-seen bucket on insert past MaxKeys.
+func TestLimiter_BoundedKeyCardinality_EvictsLRU(t *testing.T) {
+	t.Parallel()
+
+	clock := &fakeClock{now: time.Unix(1700000000, 0)}
+	l := ratelimit.NewWithClock(100, 10, clock.tick)
+	l.MaxKeys = 4
+
+	// Insert four distinct IPs at distinct times — last-seen ordering is
+	// the insertion order.
+	for i, ip := range []string{"a", "b", "c", "d"} {
+		if !l.Allow(ip) {
+			t.Fatalf("setup: %s denied", ip)
+		}
+		clock.advance(10 * time.Millisecond)
+		_ = i
+	}
+	if got := l.Size(); got != 4 {
+		t.Fatalf("size after fill = %d, want 4", got)
+	}
+
+	// A fifth IP should evict 'a' (oldest lastSeen).
+	if !l.Allow("e") {
+		t.Fatal("new IP denied (cap evict path)")
+	}
+	if got := l.Size(); got != 4 {
+		t.Errorf("size after evict-and-insert = %d, want 4 (cap-bound)", got)
+	}
+}
+
 func TestLimiter_NilSafe(t *testing.T) {
 	t.Parallel()
 	var l *ratelimit.Limiter

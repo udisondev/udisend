@@ -41,15 +41,18 @@ const SessionIDSize = 16
 // SessionID identifies a single signaling session between two peers.
 type SessionID [SessionIDSize]byte
 
-// NewSessionID returns a fresh random session id. Panics on RNG
-// failure — a zero session id would collide across in-flight
-// signaling sessions and break per-peer demux.
-func NewSessionID() SessionID {
+// NewSessionID returns a fresh random session id. Returns an error on
+// RNG failure — a zero session id would collide across in-flight
+// signaling sessions and break per-peer demux. pkg/ MUST NOT panic on
+// operational failures (CLAUDE.md): callers receive the error and
+// decide whether to refuse the session.
+func NewSessionID() (SessionID, error) {
 	var s SessionID
 	if _, err := rand.Read(s[:]); err != nil {
-		panic("signaling: crypto/rand: " + err.Error())
+		return SessionID{}, fmt.Errorf("signaling: new session id: %w", err)
 	}
-	return s
+
+	return s, nil
 }
 
 // Inner-payload type codes.

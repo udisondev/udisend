@@ -63,6 +63,15 @@ type Channel struct {
 	// so a successful handshake doesn't leave a closure on the runtime
 	// timer wheel.
 	handshakeTimer *time.Timer
+
+	// halfOpenIP is the source-IP key used to bookkeep this responder
+	// session against MaxHalfOpenPerIP. Empty for initiator-side
+	// channels (which never count as half-open from the other side's
+	// perspective). halfOpenSettled flips exactly once when the channel
+	// either completes the handshake or is torn down — guards against
+	// double-decrementing the per-IP counter.
+	halfOpenIP      string
+	halfOpenSettled atomic.Bool
 }
 
 func (s *Service) newChannel(peer identity.Hash, sid SessionID, remote net.Addr, ns *noise.Session) *Channel {
@@ -209,6 +218,10 @@ func (c *Channel) handleFinal(env *Envelope) {
 	if c.handshakeTimer != nil {
 		c.handshakeTimer.Stop()
 	}
+	// Handshake completed — release the per-IP half-open slot. The
+	// session itself stays alive for the duration of the data phase, but
+	// it no longer counts against MaxHalfOpenPerIP.
+	c.service.settleHalfOpen(c)
 
 	go c.verifyAndAdmit()
 }

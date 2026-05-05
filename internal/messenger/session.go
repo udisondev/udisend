@@ -2,9 +2,11 @@ package messenger
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/udisondev/udisend/pkg/identity"
 	"github.com/udisondev/udisend/pkg/network"
@@ -44,15 +46,44 @@ type Session struct {
 // fingerprint, etc.).
 func (s *Session) PeerPublic() identity.PublicIdentity { return s.peerPub }
 
+// sessionIDBytes decodes the hex SessionID string into the [16]byte form
+// SignedSDP needs for channel binding. The result is computed once at
+// session install time, not per-Send, but the helper is small enough to
+// inline at every call site instead of caching on the Session struct.
+func (s *Session) sessionIDBytes() [webrtc.SessionIDSize]byte {
+	var out [webrtc.SessionIDSize]byte
+	raw, err := hex.DecodeString(s.SessionID)
+	if err != nil {
+		// Should never happen — SessionID was constructed by hex-encoding
+		// the canonical [16]byte SessionID; treat as a programming bug
+		// and surface as zero (Verify will then reject).
+		return out
+	}
+	copy(out[:], raw)
+
+	return out
+}
+
 // Send signs the event and ships it through the encrypted signaling
 // pipe. Returns immediately after handing off to the transport.
+//
+// Channel binding: Recipient and SessionID are filled from the session's
+// own state so a replay of these bytes elsewhere will fail Verify on the
+// far side. IssuedAt comes from the messenger's clock so a stale capture
+// fails the skew check.
 func (s *Session) Send(ctx context.Context, ev SignalEvent) error {
 	kind, ok := webrtc.KindFromString(ev.Kind)
 	if !ok {
 		return fmt.Errorf("messenger: unknown signal kind %q", ev.Kind)
 	}
 
-	signed := webrtc.SignedSDP{Kind: kind, SDP: ev.Payload}
+	signed := webrtc.SignedSDP{
+		Kind:      kind,
+		Recipient: s.Peer,
+		SessionID: s.sessionIDBytes(),
+		IssuedAt:  time.Now().UTC().Unix(),
+		SDP:       ev.Payload,
+	}
 	signed.Sign(s.messenger.Identity())
 
 	blob, err := signed.MarshalBinary()
@@ -107,7 +138,9 @@ func (s *Session) handleIncomingPayload(blob []byte) {
 		return
 	}
 
-	if err := signed.Verify(s.peerPub); err != nil {
+	expectedRecipient := s.messenger.Identity().Public().DestinationHash()
+	expectedSession := s.sessionIDBytes()
+	if err := signed.Verify(s.peerPub, expectedRecipient, expectedSession, time.Now().UTC()); err != nil {
 		s.messenger.logger.Warn("messenger: signed envelope verify", "peer", s.Peer, "err", err)
 		return
 	}

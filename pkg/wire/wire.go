@@ -41,6 +41,15 @@ var (
 	ErrFrameTooLarge  = errors.New("wire: frame exceeds MaxFrameSize")
 	ErrUnknownVersion = errors.New("wire: unknown version")
 	ErrTrailingBytes  = errors.New("wire: trailing bytes after payload")
+	// ErrUvarintOverflow signals a uvarint that would not fit in uint64
+	// (binary.Uvarint returns n<0). Distinct from ErrShortBuffer so attack
+	// telemetry can separate "real malicious oversized varints" from honest
+	// "client truncated mid-message".
+	ErrUvarintOverflow = errors.New("wire: uvarint overflow")
+	// ErrInvalidLength signals a negative maxLen passed to ReadBytes /
+	// ReadString. Caller bug, not a wire-format issue, but rejecting it
+	// at the boundary keeps the contract uniform.
+	ErrInvalidLength = errors.New("wire: invalid length argument")
 )
 
 // EncodeFrame returns version || type || uvarint(len(payload)) || payload.
@@ -220,11 +229,22 @@ func (b *Buffer) ReadUint64() (uint64, error) {
 	return v, nil
 }
 
-// ReadUvarint decodes the next uvarint.
+// ReadUvarint decodes the next uvarint. Distinguishes the two failure
+// modes binary.Uvarint signals via the same return value (n<=0):
+//
+//   - n == 0 → buffer is empty / truncated mid-varint: ErrShortBuffer.
+//   - n < 0  → varint encodes a value that does not fit in uint64
+//     (≥10 bytes, all with continuation bit set): ErrUvarintOverflow.
+//
+// Telling them apart matters for attack-telemetry: an overflow signals
+// crafted input, a short buffer signals an honest truncation.
 func (b *Buffer) ReadUvarint() (uint64, error) {
 	v, n := binary.Uvarint(b.buf[b.off:])
-	if n <= 0 {
+	if n == 0 {
 		return 0, ErrShortBuffer
+	}
+	if n < 0 {
+		return 0, ErrUvarintOverflow
 	}
 	b.off += n
 	return v, nil
@@ -232,7 +252,14 @@ func (b *Buffer) ReadUvarint() (uint64, error) {
 
 // ReadBytes reads a uvarint-prefixed byte slice. The returned slice is a
 // copy so callers can hold onto it past the buffer's lifetime.
+//
+// Negative maxLen is rejected up-front. The naive `length > uint64(maxLen)`
+// check would convert a negative cap to MaxUint64 and let an attacker
+// specify any length, allocating up to the buffer's remaining bytes.
 func (b *Buffer) ReadBytes(maxLen int) ([]byte, error) {
+	if maxLen < 0 {
+		return nil, ErrInvalidLength
+	}
 	length, err := b.ReadUvarint()
 	if err != nil {
 		return nil, err
@@ -290,8 +317,12 @@ func (b *Buffer) ReadFixedShared(n int) ([]byte, error) {
 
 // ReadString reads a uvarint-prefixed UTF-8 string in a single allocation
 // — the previous implementation went through ReadBytes which paid for the
-// byte slice and then again for the string conversion.
+// byte slice and then again for the string conversion. See ReadBytes for
+// the negative-maxLen rationale.
 func (b *Buffer) ReadString(maxLen int) (string, error) {
+	if maxLen < 0 {
+		return "", ErrInvalidLength
+	}
 	length, err := b.ReadUvarint()
 	if err != nil {
 		return "", err

@@ -12,8 +12,12 @@ import (
 // benchHeader builds a representative Header without hitting the RNG inside
 // the timed loop.
 func benchHeader() dht.Header {
+	tx, err := dht.NewTxID()
+	if err != nil {
+		panic(err)
+	}
 	return dht.Header{
-		TxID:    dht.NewTxID(),
+		TxID:    tx,
 		SrcID:   id("aabbccddaabbccddaabbccddaabbccdd"),
 		SrcAddr: "127.0.0.1:9001",
 	}

@@ -25,6 +25,13 @@ type SourcedStore interface {
 	PutFromSource(key NodeID, value []byte, ttl time.Duration, source net.Addr)
 }
 
+// DefaultMemoryStoreEntries caps the number of distinct keys a
+// MemoryStore retains. Sized so an attacker spraying STORE RPCs at the
+// 4 KiB MaxStoreValue limit cannot force more than ~64 MiB of resident
+// state — large enough for a real-world presence-store population, small
+// enough to bound DoS amplification on any volunteer node.
+const DefaultMemoryStoreEntries = 16384
+
 // MemoryStore is an in-memory Store with TTL eviction. It performs NO
 // validation on Put — every write is accepted. For production use the
 // caller MUST wrap this (or any other plain Store) in a validator
@@ -32,10 +39,18 @@ type SourcedStore interface {
 // records and rate-limits per source. The Phase 9 audit flagged that
 // a bare MemoryStore on the network was indistinguishable from a
 // public bulletin-board.
+//
+// MaxEntries hard-caps the number of stored keys. When the cap is hit
+// and a new key arrives, the entry with the soonest expiry is evicted
+// (an attacker spraying low-TTL records gets their own records dropped
+// first; long-lived legitimate records survive). Zero means
+// DefaultMemoryStoreEntries; a negative value disables capping (testing
+// only).
 type MemoryStore struct {
-	mu      sync.RWMutex
-	entries map[NodeID]storeEntry
-	now     func() time.Time
+	mu         sync.RWMutex
+	entries    map[NodeID]storeEntry
+	now        func() time.Time
+	MaxEntries int
 }
 
 type storeEntry struct {
@@ -53,14 +68,51 @@ func NewMemoryStore(now func() time.Time) *MemoryStore {
 }
 
 // Put stores value under key with the given TTL. Subsequent Puts on the
-// same key replace the prior value.
+// same key replace the prior value (no eviction triggered). When
+// inserting a fresh key past MaxEntries, the entry with the soonest
+// expiry is evicted to make room.
 func (s *MemoryStore) Put(key NodeID, value []byte, ttl time.Duration) {
 	cp := make([]byte, len(value))
 	copy(cp, value)
 	exp := s.now().Add(ttl)
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.entries[key]; !exists {
+		s.evictIfFullLocked()
+	}
 	s.entries[key] = storeEntry{value: cp, expires: exp}
-	s.mu.Unlock()
+}
+
+// evictIfFullLocked drops the entry with the soonest expiry when the
+// map size has reached the configured cap. Caller MUST hold s.mu.
+// Linear-scan is O(n); MaxEntries is bounded (16K default) so this
+// remains under microseconds even at the cap. A more elaborate priority
+// queue would be premature.
+func (s *MemoryStore) evictIfFullLocked() {
+	limit := s.MaxEntries
+	if limit == 0 {
+		limit = DefaultMemoryStoreEntries
+	}
+	if limit < 0 || len(s.entries) < limit {
+		return
+	}
+
+	var (
+		victim  NodeID
+		earliest time.Time
+		set      bool
+	)
+	for k, e := range s.entries {
+		if !set || e.expires.Before(earliest) {
+			victim = k
+			earliest = e.expires
+			set = true
+		}
+	}
+	if set {
+		delete(s.entries, victim)
+	}
 }
 
 // Get returns the stored value if present and not expired.

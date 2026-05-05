@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"slices"
 	"time"
 
@@ -66,6 +67,18 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("storage: schema: %w", err)
+	}
+	// Tighten file mode to owner-only. SQLite (modernc) creates the file
+	// with the umask-default mode (typically 0o644), exposing identity
+	// keys, TOTP secrets, Argon2 hashes and chat history to every local
+	// user on a multi-tenant box. Best-effort: a Chmod failure is logged
+	// at the call site (db is already opened) — refuse to continue would
+	// be more destructive than the leak we're closing.
+	if path != "" && path != ":memory:" {
+		if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			_ = db.Close()
+			return nil, fmt.Errorf("storage: chmod: %w", err)
+		}
 	}
 	return &Store{db: db}, nil
 }

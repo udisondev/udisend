@@ -30,18 +30,18 @@ const TxIDSize = 16
 // TxID is a random transaction identifier matching requests to responses.
 type TxID [TxIDSize]byte
 
-// NewTxID returns a fresh random TxID. Panics if the OS RNG fails — a
-// zero TxID would cause request/response collision (multiple in-flight
-// requests sharing a key) and crypto-randomness failure is the only
-// thing that could produce one. crypto/rand is documented as panic-on-
-// failure-equivalent (process should crash), so propagating that
-// outcome here is correct.
-func NewTxID() TxID {
+// NewTxID returns a fresh random TxID. Returns an error if the OS RNG
+// fails — a zero TxID would cause request/response collision (multiple
+// in-flight requests sharing a key). pkg/ MUST NOT panic on operational
+// failures (CLAUDE.md), so callers receive the error and decide whether
+// to abort the request, fall back to a different transport, etc.
+func NewTxID() (TxID, error) {
 	var t TxID
 	if _, err := rand.Read(t[:]); err != nil {
-		panic("dht: crypto/rand: " + err.Error())
+		return TxID{}, fmt.Errorf("dht: new txid: %w", err)
 	}
-	return t
+
+	return t, nil
 }
 
 // Header is the common prefix of every DHT message.

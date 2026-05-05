@@ -17,11 +17,33 @@ import (
 	"sync"
 
 	"github.com/pion/stun/v3"
+
+	"github.com/udisondev/udisend/pkg/ratelimit"
 )
+
+// DefaultBindingRatePerIP caps how many STUN binding-success responses
+// a single source IP receives per second. STUN responses run ~80 bytes
+// against ~20-byte requests — a 4× amplification factor that public
+// reflectors are routinely abused for DDoS (NETSCOUT 2024 reports 75K
+// servers in active abuse). Each Binding request consumes one token;
+// a sustained spray from one IP gets clipped to this rate. Legitimate
+// WebRTC clients fire one or two binding requests per session, so the
+// cap is far above any honest workload.
+const DefaultBindingRatePerIP = 30
+
+// DefaultBindingBurstPerIP allows short bursts when a multi-NAT client
+// re-fires several requests to discover its public mapping. Two seconds
+// of burst keeps real workloads working under sub-second jitter.
+const DefaultBindingBurstPerIP = 60
 
 // Server is a STUN binding-request responder bound to a UDP socket.
 type Server struct {
 	conn *net.UDPConn
+	// limiter throttles binding-success responses per source IP. Refills
+	// at DefaultBindingRatePerIP tokens/sec with a DefaultBindingBurstPerIP
+	// burst; over-budget requests are silently dropped (we don't even
+	// emit an error response — that would itself be amplification).
+	limiter *ratelimit.Limiter
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -38,7 +60,11 @@ func Listen(addr string) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stun: listen %q: %w", addr, err)
 	}
-	return &Server{conn: conn, closed: make(chan struct{})}, nil
+	return &Server{
+		conn:    conn,
+		limiter: ratelimit.New(DefaultBindingRatePerIP, DefaultBindingBurstPerIP),
+		closed:  make(chan struct{}),
+	}, nil
 }
 
 // LocalAddr returns the bound address.
@@ -80,6 +106,13 @@ func (s *Server) Run(ctx context.Context) error {
 			continue
 		}
 		if req.Type.Method != stun.MethodBinding || req.Type.Class != stun.ClassRequest {
+			continue
+		}
+		// Per-IP rate-limit BEFORE building the response — rejecting
+		// over-quota requests with silence prevents the server from
+		// participating in reflective DDoS amplification regardless of
+		// how many spoofed binding requests an attacker emits.
+		if src.IP != nil && !s.limiter.Allow(src.IP.String()) {
 			continue
 		}
 		resp, err := stun.Build(

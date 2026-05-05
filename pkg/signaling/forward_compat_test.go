@@ -14,10 +14,14 @@ import (
 // must accept the message and ignore them.
 func TestEnvelope_TolerantOfTrailingTLVs(t *testing.T) {
 	t.Parallel()
+	sid, err := signaling.NewSessionID()
+	if err != nil {
+		t.Fatal(err)
+	}
 	env := &signaling.Envelope{
 		Recipient: identity.Hash{1, 2, 3},
 		Sender:    identity.Hash{4, 5, 6},
-		SessionID: signaling.NewSessionID(),
+		SessionID: sid,
 		InnerType: signaling.InnerData,
 		Payload:   []byte("hello"),
 	}

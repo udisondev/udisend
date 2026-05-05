@@ -87,7 +87,7 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := os.MkdirAll(*storageDir, 0o755); err != nil {
+	if err := os.MkdirAll(*storageDir, 0o700); err != nil {
 		return fmt.Errorf("storage dir: %w", err)
 	}
 	dbPath := filepath.Join(*storageDir, "messenger.db")
@@ -163,7 +163,11 @@ func run() error {
 		return errors.Join(err, node.Close(), store.Close())
 	}
 	url := srv.URL()
-	logger.Info("UI ready", "url", url, "public", publicMode)
+	// Never log the auth-token URL — slog handlers feed systemd journal,
+	// docker logs, log shippers etc., where the bearer in `?token=…` would
+	// be a credential leak. The full URL is printed to stdout below for
+	// the operator's eyes; the structured log only carries non-secrets.
+	logger.Info("UI ready", "address", srv.LocalAddress(), "public", publicMode)
 	fmt.Println()
 	fmt.Println("┌─ udisend messenger ──────────────────────────────────────────────")
 	if publicMode {

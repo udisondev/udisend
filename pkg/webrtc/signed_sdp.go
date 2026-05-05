@@ -15,8 +15,10 @@
 package webrtc
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/udisondev/udisend/pkg/identity"
 	"github.com/udisondev/udisend/pkg/wire"
@@ -70,9 +72,34 @@ const (
 	SDPTypeICE
 )
 
-// SignedSDP is a SDP description authenticated by the publisher.
+// SessionIDSize is the byte length of the SignedSDP SessionID field.
+// Matches signaling.SessionIDSize but pkg/webrtc cannot import signaling
+// (would create a dependency cycle), so the size is duplicated as a
+// constant — wire-compatible by construction.
+const SessionIDSize = 16
+
+// MaxClockSkew bounds how far in the past or future a SignedSDP's
+// IssuedAt may be relative to the verifier's clock. Five minutes covers
+// realistic NTP drift between peers without giving an attacker a long
+// window to replay captured offers. Tighter would be safer; looser
+// would tolerate noisier infra. Five minutes mirrors what most TOTP
+// stacks treat as "concerning skew".
+const MaxClockSkew = 5 * time.Minute
+
+// SignedSDP is a SDP description authenticated by the publisher and
+// bound to the (peer, session, time) tuple it was produced for.
+//
+// The binding fields close cross-session and cross-recipient replay:
+// without them, an offer captured on the wire to peer A could later be
+// replayed to peer B by a relay, who would set up an RTCPeerConnection
+// thinking it is negotiating with the original signer (the signature
+// alone is satisfied by the signer's pubkey regardless of who receives
+// it). See review/threat-model.md "MITM на signaling".
 type SignedSDP struct {
-	Kind      byte // SDPTypeOffer / Answer / Bye
+	Kind      byte                // SDPTypeOffer / Answer / Bye / ICE
+	Recipient identity.Hash       // who this SDP is meant for
+	SessionID [SessionIDSize]byte // signaling session this binds to
+	IssuedAt  int64               // unix-seconds when produced
 	SDP       string
 	Signature identity.Signature
 }
@@ -82,16 +109,38 @@ var (
 	ErrSDPDecode    = errors.New("webrtc: bad SDP envelope")
 	ErrSDPSignature = errors.New("webrtc: bad SDP signature")
 	ErrUnknownKind  = errors.New("webrtc: unknown SDP kind")
+	// ErrSDPRecipient signals a SignedSDP whose Recipient is not the
+	// expected peer hash. Cross-recipient replay defence.
+	ErrSDPRecipient = errors.New("webrtc: signed SDP for unexpected recipient")
+	// ErrSDPSession signals a SignedSDP whose SessionID does not match
+	// the expected signaling session. Cross-session replay defence.
+	ErrSDPSession = errors.New("webrtc: signed SDP for unexpected session")
+	// ErrSDPClockSkew signals a SignedSDP whose IssuedAt is outside
+	// [now-MaxClockSkew, now+MaxClockSkew]. Stale-replay defence.
+	ErrSDPClockSkew = errors.New("webrtc: signed SDP outside clock skew")
 )
 
-const sdpEnvelopeVersion byte = 0x01
+// sdpEnvelopeVersion is bumped to 0x02 when SignedSDP gained the
+// (Recipient, SessionID, IssuedAt) binding fields. v1 envelopes (without
+// these fields) decode as decode-error: pre-MVP wire-incompatibility is
+// acceptable because there are no other implementations in the wild.
+const sdpEnvelopeVersion byte = 0x02
+
+// sdpDomainSeparator scopes the signed bytes so a future protocol
+// extension can never produce a signature that cross-collides with a
+// SignedSDP signature. The value is fixed forever — never re-purpose.
+const sdpDomainSeparator = "udisend-signed-sdp-v2\x00"
 
 // signingBytes returns the bytes covered by the Ed25519 signature.
 func (s *SignedSDP) signingBytes() []byte {
 	w := wire.NewWriter()
 
+	w.WriteFixed([]byte(sdpDomainSeparator))
 	w.WriteUint8(sdpEnvelopeVersion)
 	w.WriteUint8(s.Kind)
+	w.WriteFixed(s.Recipient[:])
+	w.WriteFixed(s.SessionID[:])
+	w.WriteUint64(uint64(s.IssuedAt))
 	w.WriteString(s.SDP)
 
 	return w.Bytes()
@@ -102,17 +151,54 @@ func (s *SignedSDP) Sign(id *identity.Identity) {
 	s.Signature = id.Sign(s.signingBytes())
 }
 
-// Verify checks the signature against the supplied public identity.
-func (s *SignedSDP) Verify(pub identity.PublicIdentity) error {
+// Verify checks the signature AND the channel-binding fields:
+//
+//   - signature against pub
+//   - Recipient == expectedRecipient
+//   - SessionID == expectedSessionID
+//   - IssuedAt within MaxClockSkew of now
+//
+// All comparisons run regardless of order so callers can't "early-out"
+// expensive checks via crafted input. SessionID and Recipient compare
+// constant-time defensively — they are not secrets, but cheap to keep
+// uniform across the codebase.
+func (s *SignedSDP) Verify(pub identity.PublicIdentity, expectedRecipient identity.Hash, expectedSessionID [SessionIDSize]byte, now time.Time) error {
 	if !pub.Verify(s.signingBytes(), s.Signature) {
 		return ErrSDPSignature
 	}
+	if subtle.ConstantTimeCompare(s.Recipient[:], expectedRecipient[:]) != 1 {
+		return ErrSDPRecipient
+	}
+	if subtle.ConstantTimeCompare(s.SessionID[:], expectedSessionID[:]) != 1 {
+		return ErrSDPSession
+	}
+	delta := now.Unix() - s.IssuedAt
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > int64(MaxClockSkew/time.Second) {
+		return ErrSDPClockSkew
+	}
+
+	return nil
+}
+
+// VerifySignatureOnly checks only the cryptographic signature, skipping
+// the channel-binding fields. Provided for callers that legitimately
+// need to inspect a signed envelope before they know the expected
+// binding (e.g. parsers in tests, off-line forensics). Production
+// signaling MUST use Verify.
+func (s *SignedSDP) VerifySignatureOnly(pub identity.PublicIdentity) error {
+	if !pub.Verify(s.signingBytes(), s.Signature) {
+		return ErrSDPSignature
+	}
+
 	return nil
 }
 
 // MarshalBinary encodes the envelope:
 //
-//	version(1) | kind(1) | sdp(uvarint+utf8) | signature(64)
+//	version(1) | kind(1) | recipient(16) | session_id(16) | issued_at(uint64-be) | sdp(uvarint+utf8) | signature(64)
 func (s *SignedSDP) MarshalBinary() ([]byte, error) {
 	if len(s.SDP) > MaxSDPSize {
 		return nil, fmt.Errorf("%w: SDP too long", ErrSDPDecode)
@@ -122,6 +208,9 @@ func (s *SignedSDP) MarshalBinary() ([]byte, error) {
 
 	w.WriteUint8(sdpEnvelopeVersion)
 	w.WriteUint8(s.Kind)
+	w.WriteFixed(s.Recipient[:])
+	w.WriteFixed(s.SessionID[:])
+	w.WriteUint64(uint64(s.IssuedAt))
 	w.WriteString(s.SDP)
 	w.WriteFixed(s.Signature[:])
 
@@ -146,6 +235,17 @@ func (s *SignedSDP) UnmarshalBinary(data []byte) error {
 		return fmt.Errorf("%w: %v", ErrSDPDecode, err)
 	}
 
+	if err := b.ReadFixedInto(s.Recipient[:]); err != nil {
+		return fmt.Errorf("%w: %v", ErrSDPDecode, err)
+	}
+	if err := b.ReadFixedInto(s.SessionID[:]); err != nil {
+		return fmt.Errorf("%w: %v", ErrSDPDecode, err)
+	}
+	issuedAt, err := b.ReadUint64()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrSDPDecode, err)
+	}
+
 	sdp, err := b.ReadString(MaxSDPSize)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrSDPDecode, err)
@@ -161,6 +261,7 @@ func (s *SignedSDP) UnmarshalBinary(data []byte) error {
 	}
 
 	s.Kind = kind
+	s.IssuedAt = int64(issuedAt)
 	s.SDP = sdp
 
 	copy(s.Signature[:], sig)

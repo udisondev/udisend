@@ -84,12 +84,45 @@ func TestDefaults_DefaultPortApplied(t *testing.T) {
 		DNSSeeds:      []string{"seed.example"},
 		Resolver: fakeResolver{
 			hosts: map[string][]string{
-				"seed.example": {"10.0.0.1"},
+				"seed.example": {"8.8.8.8"},
 			},
 		},
 	})
 
-	want := []string{"10.0.0.1:9000"}
+	want := []string{"8.8.8.8:9000"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// TestDefaults_FiltersUnroutableDNSResults exercises the DNS-spoof
+// defence: a malicious resolver (or local-network attacker) must not be
+// able to redirect a fresh client at loopback / RFC1918 / link-local /
+// documentation IPs by poisoning the DNS-seed lookup.
+func TestDefaults_FiltersUnroutableDNSResults(t *testing.T) {
+	t.Parallel()
+
+	got := bootstrap.Defaults(context.Background(), bootstrap.Config{
+		CommunityList: []string{},
+		DNSSeeds:      []string{"poisoned.example"},
+		Resolver: fakeResolver{
+			hosts: map[string][]string{
+				"poisoned.example": {
+					"127.0.0.1",          // loopback
+					"10.0.0.1",           // RFC1918
+					"169.254.1.1",        // link-local
+					"192.168.1.1",        // RFC1918
+					"203.0.113.1",        // TEST-NET-3 (RFC 5737)
+					"::1",                // IPv6 loopback
+					"fe80::1",            // IPv6 link-local
+					"2001:db8::1",        // documentation (RFC 3849)
+					"8.8.8.8",            // legitimate (kept)
+				},
+			},
+		},
+	})
+
+	want := []string{"8.8.8.8:9000"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

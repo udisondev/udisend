@@ -233,7 +233,7 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	s.server = &http.Server{
-		Handler: s.secureHeaders(mux),
+		Handler: s.checkHost(s.secureHeaders(mux)),
 		// Slowloris defence + idle bound. WriteTimeout is intentionally
 		// zero because /api/events is a long-lived SSE stream — set it
 		// and the stream gets cut on the first keepalive.

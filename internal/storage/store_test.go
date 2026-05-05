@@ -3,6 +3,7 @@ package storage_test
 import (
 	"crypto/rand"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,6 +11,30 @@ import (
 	"github.com/udisondev/udisend/internal/storage"
 	"github.com/udisondev/udisend/pkg/identity"
 )
+
+// TestOpen_ChmodsDBFile_OwnerOnly enforces the at-rest defence: the SQLite
+// file holds identity material, TOTP secrets, Argon2 hashes and chat
+// history. modernc.org/sqlite creates with the umask default (typically
+// 0o644), exposing all of that to every local user. Open() MUST tighten
+// to 0o600 before returning a usable handle.
+func TestOpen_ChmodsDBFile_OwnerOnly(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "atrest.db")
+	s, err := storage.Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := st.Mode().Perm(); perm != 0o600 {
+		t.Errorf("DB file mode = %#o, want 0o600 (owner-only)", perm)
+	}
+}
 
 func TestAddOutboxItem_Cap(t *testing.T) {
 	t.Parallel()

@@ -117,6 +117,59 @@ func TestBuffer_RejectsExcessiveLength(t *testing.T) {
 	}
 }
 
+// TestBuffer_RejectsNegativeMaxLen guards the foot-gun: ReadBytes /
+// ReadString convert maxLen via uint64(maxLen). For a negative argument
+// (arithmetic underflow at the call site) that becomes ~MaxUint64 — the
+// length check passes for any attacker-controlled length, allocating up
+// to the buffer's remaining bytes. The API MUST refuse negative caps
+// outright, even if no current caller passes one.
+func TestBuffer_RejectsNegativeMaxLen(t *testing.T) {
+	t.Parallel()
+
+	// Write a payload short enough to fit so the only thing that should
+	// reject is the negative cap: encode "len=4 || four bytes".
+	w := wire.NewWriter()
+	w.WriteUvarint(4)
+	w.WriteFixed([]byte{1, 2, 3, 4})
+	r := wire.NewBuffer(w.Bytes())
+	if _, err := r.ReadBytes(-1); err == nil {
+		t.Errorf("ReadBytes accepted negative maxLen — uint64(-1) is MaxUint64")
+	}
+
+	w2 := wire.NewWriter()
+	w2.WriteUvarint(4)
+	w2.WriteFixed([]byte("abcd"))
+	r2 := wire.NewBuffer(w2.Bytes())
+	if _, err := r2.ReadString(-1); err == nil {
+		t.Errorf("ReadString accepted negative maxLen — uint64(-1) is MaxUint64")
+	}
+}
+
+// TestBuffer_RejectsUvarintOverflow distinguishes a syntactically too-large
+// uvarint (binary.Uvarint returns n<0) from an honest "short buffer". The
+// previous impl collapsed both into ErrShortBuffer, hiding malicious 10+
+// byte uvarints in attack logs.
+func TestBuffer_RejectsUvarintOverflow(t *testing.T) {
+	t.Parallel()
+
+	// A canonical >uint64 uvarint: 9 continuation bytes + a final byte
+	// 0x02 — encoder shifts a 2 by 63 = 1<<64, which doesn't fit. Per
+	// binary.Uvarint, that returns n < 0 (overflow).
+	overflow := append(bytes.Repeat([]byte{0x80}, 9), 0x02)
+	r := wire.NewBuffer(overflow)
+	_, err := r.ReadUvarint()
+	if err == nil {
+		t.Fatal("ReadUvarint accepted overflow")
+	}
+	// Must be a different error class than the empty-buffer short read.
+	if errors.Is(err, wire.ErrShortBuffer) {
+		t.Errorf("overflow returned ErrShortBuffer; want a distinct error")
+	}
+	if !errors.Is(err, wire.ErrUvarintOverflow) {
+		t.Errorf("err = %v, want ErrUvarintOverflow", err)
+	}
+}
+
 func TestBuffer_ShortBuffer(t *testing.T) {
 	t.Parallel()
 	r := wire.NewBuffer(nil)

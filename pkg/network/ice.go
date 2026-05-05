@@ -2,10 +2,14 @@ package network
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"time"
+
+	pionstun "github.com/pion/stun/v3"
 
 	"github.com/udisondev/udisend/pkg/presence"
 )
@@ -14,6 +18,14 @@ import (
 // Records advertise their DHT/signaling socket; the STUN responder runs
 // on this fixed port at the same host.
 const DefaultSTUNPort = "3478"
+
+// stunProbeTimeout caps the time spent verifying a single advertised
+// STUN responder. Real STUN servers reply in tens of milliseconds; 500
+// ms is generous against honest jitter and short against a bogus or
+// dead advertiser. Probing happens in parallel for each candidate so
+// the wall-clock cost of vetting N advertisers is bounded by this
+// constant, not by N.
+const stunProbeTimeout = 500 * time.Millisecond
 
 // ICECandidate is a domain-neutral STUN/TURN volunteer descriptor.
 // Higher layers map it to the browser-friendly RTCIceServer JSON.
@@ -86,6 +98,23 @@ func (n *Node) ICEServers(ctx context.Context, max int) []ICECandidate {
 				host = rec.Address
 			}
 
+			// Capability-spoofing defence: a peer behind NAT can publish
+			// a presence record with `CapCanSTUN` and a victim's IP,
+			// directing every client's RTCPeerConnection to probe the
+			// victim. The signature only proves *who* set the bit, not
+			// that the address is actually a working STUN responder.
+			// Probe before trusting: send a STUN binding request and
+			// require a matching response within stunProbeTimeout.
+			probeAddr := net.JoinHostPort(host, DefaultSTUNPort)
+			pctx, pcancel := context.WithTimeout(rctx, stunProbeTimeout)
+			err = probeSTUNReachable(pctx, probeAddr)
+			pcancel()
+			if err != nil {
+				n.cfg.Logger.Debug("network: ICE STUN probe failed",
+					"peer", c.ID, "addr", probeAddr, "err", err)
+				return
+			}
+
 			results <- result{cand: ICECandidate{Host: host, Port: DefaultSTUNPort, Kind: "stun"}}
 		})
 	}
@@ -101,4 +130,66 @@ func (n *Node) ICEServers(ctx context.Context, max int) []ICECandidate {
 	}
 
 	return out
+}
+
+// probeSTUNReachable sends a STUN binding request to addr and returns
+// nil iff a STUN binding-response with matching transaction ID arrives
+// before ctx expires. The probe is intentionally lightweight: one
+// 20-byte packet out, one short packet in, no retries. A non-responding
+// advertiser is treated as bogus — the goal is to bind capability
+// claims to actual reachability, not to perform an exhaustive STUN
+// conformance check.
+func probeSTUNReachable(ctx context.Context, addr string) error {
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialUDP("udp", nil, udpAddr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	if dl, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(dl); err != nil {
+			return err
+		}
+	}
+
+	var txID [pionstun.TransactionIDSize]byte
+	if _, err := io.ReadFull(rand.Reader, txID[:]); err != nil {
+		return err
+	}
+	req, err := pionstun.Build(
+		pionstun.NewTransactionIDSetter(txID),
+		pionstun.BindingRequest,
+		pionstun.Fingerprint,
+	)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Write(req.Raw); err != nil {
+		return err
+	}
+
+	buf := make([]byte, 1500)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return err
+	}
+	if !pionstun.IsMessage(buf[:n]) {
+		return errors.New("network: STUN probe got non-STUN response")
+	}
+	resp := &pionstun.Message{Raw: append([]byte{}, buf[:n]...)}
+	if err := resp.Decode(); err != nil {
+		return err
+	}
+	if resp.TransactionID != txID {
+		return errors.New("network: STUN probe transaction-ID mismatch")
+	}
+	if resp.Type.Class != pionstun.ClassSuccessResponse || resp.Type.Method != pionstun.MethodBinding {
+		return errors.New("network: STUN probe non-success response")
+	}
+
+	return nil
 }

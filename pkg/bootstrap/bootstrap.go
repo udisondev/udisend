@@ -138,11 +138,59 @@ func Defaults(ctx context.Context, cfg Config) []string {
 			continue
 		}
 		for _, ip := range ips {
+			if !isRoutableSeedIP(ip) {
+				// DNS-spoof / poison defence: refuse loopback, link-local,
+				// private, or otherwise unspecified addresses returned by
+				// a DNS-seed lookup. An attacker on the local network can
+				// otherwise force the client to probe internal services
+				// (loopback APIs, RFC1918 ranges) by poisoning the
+				// resolver. Real bootstrap nodes always live on globally
+				// routable IPs.
+				continue
+			}
 			add(net.JoinHostPort(ip, strconv.Itoa(port)))
 		}
 	}
 
 	return out
+}
+
+// isRoutableSeedIP returns true only for globally routable unicast
+// addresses suitable for a real bootstrap node. Filters out the IP
+// classes a malicious resolver could substitute to abuse the client:
+//
+//   - loopback (127.0.0.0/8, ::1) — points the client at its own ports
+//   - link-local (169.254.0.0/16, fe80::/10) — local network attacks
+//   - multicast / unspecified — never a real peer
+//   - private RFC1918 (10/8, 172.16/12, 192.168/16) and RFC4193 (fc00::/7)
+//     — internal-network probing
+//   - documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24,
+//     2001:db8::/32) — should never appear in DNS for real nodes
+func isRoutableSeedIP(s string) bool {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return false
+	}
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsInterfaceLocalMulticast() ||
+		ip.IsPrivate() {
+		return false
+	}
+	// Documentation ranges (TEST-NET, RFC 5737 / RFC 3849) — explicit
+	// allowlist of "never-real-bootstrap" IPv4 prefixes.
+	for _, cidr := range []string{
+		"192.0.2.0/24",
+		"198.51.100.0/24",
+		"203.0.113.0/24",
+		"2001:db8::/32",
+	} {
+		_, n, err := net.ParseCIDR(cidr)
+		if err == nil && n.Contains(ip) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // communityWithLDFlag returns CommunityList augmented with the

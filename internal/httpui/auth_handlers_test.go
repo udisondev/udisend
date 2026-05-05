@@ -253,6 +253,43 @@ func TestLoginPOST_WithTOTP_ValidCodeSucceeds(t *testing.T) {
 	_ = extractSessionCookie(t, resp)
 }
 
+// TestLoginPOST_TOTPCodeNotReusableSameStep covers the step-replay window:
+// without persisting the consumed step, an attacker who shoulder-surfed
+// (or bus-sniffed via a malicious USB hub) the user's TOTP code can race
+// to /login with the same code as long as the 30s step is current. The
+// step-up gate at security_handlers.requireSecondFactor already does
+// step-replay tracking; /login MUST do the same.
+func TestLoginPOST_TOTPCodeNotReusableSameStep(t *testing.T) {
+	t.Parallel()
+	f := newLoginFixture(t, loginFixtureOpts{enrollTOTP: true})
+
+	now := time.Unix(f.clock.Load(), 0).UTC()
+	code := computeTOTPForTest(t, f.totpSecret, now)
+
+	// First login succeeds.
+	resp := f.post("/login", url.Values{
+		"passphrase": {"hunter2-very-long-passphrase"},
+		"totp":       {code},
+	}, "")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("first login status = %d, want 303", resp.StatusCode)
+	}
+
+	// Same code, same step, fresh request — MUST be rejected.
+	resp2 := f.post("/login", url.Values{
+		"passphrase": {"hunter2-very-long-passphrase"},
+		"totp":       {code},
+	}, "")
+	_ = resp2.Body.Close()
+	if resp2.StatusCode == http.StatusSeeOther {
+		t.Fatalf("replayed TOTP code accepted; want 401")
+	}
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("replay status = %d, want 401", resp2.StatusCode)
+	}
+}
+
 func TestLoginPOST_RecoveryCodePath(t *testing.T) {
 	t.Parallel()
 	f := newLoginFixture(t, loginFixtureOpts{enrollTOTP: true})

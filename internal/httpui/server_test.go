@@ -196,6 +196,66 @@ func TestCSRF_BlocksMutatingPOSTWithoutHeader(t *testing.T) {
 	}
 }
 
+// TestHostHeader_RejectsForeignHost is the DNS-rebinding defence. An
+// attacker who lures the user to evil.attacker.com (resolved to 127.0.0.1
+// via DNS rebinding) reaches the local listener, but the request's Host
+// header carries the attacker's name. Without this check the X-Requested-
+// With CSRF gate is the only line of defence — and a same-origin XHR (in
+// the rebound origin) can satisfy it. The middleware MUST reject Host
+// headers that are not in the allowlist (loopback names + configured
+// public host).
+func TestHostHeader_RejectsForeignHost(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	alice := startMessenger(t, ctx, "alice", dir, "127.0.0.1:0", "127.0.0.1:0", nil)
+
+	cases := []struct {
+		name string
+		host string
+	}{
+		{"attacker hostname", "evil.attacker.com"},
+		{"attacker IP", "203.0.113.7:9000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodGet,
+				"http://"+alice.srv.LocalAddress()+"/api/snapshot", nil)
+			req.Header.Set("Authorization", "Bearer "+alice.token)
+			req.Host = tc.host
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusMisdirectedRequest {
+				t.Errorf("Host=%q status = %d, want 421", tc.host, resp.StatusCode)
+			}
+		})
+	}
+
+	// Sanity: localhost (the canonical loopback name) MUST be accepted —
+	// otherwise users hitting the printed URL via `localhost:port` see a 421.
+	t.Run("localhost accepted", func(t *testing.T) {
+		_, port, _ := net.SplitHostPort(alice.srv.LocalAddress())
+		req, _ := http.NewRequest(http.MethodGet,
+			"http://"+alice.srv.LocalAddress()+"/api/snapshot", nil)
+		req.Header.Set("Authorization", "Bearer "+alice.token)
+		req.Host = "localhost:" + port
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("localhost host status = %d, want 200", resp.StatusCode)
+		}
+	})
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 type peer struct {

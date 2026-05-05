@@ -51,6 +51,66 @@ func isLoopbackBind(addr string) bool {
 	return ip.IsLoopback()
 }
 
+// checkHost rejects requests whose Host header is not in the allowlist.
+// This is the DNS-rebinding defence: an attacker who lures the user to
+// evil.attacker.com (TTL=1, eventually resolved to 127.0.0.1) reaches the
+// loopback listener with `Host: evil.attacker.com`. Without this check
+// the only defence is the X-Requested-With CSRF gate, which a same-origin
+// XHR from the rebound page satisfies trivially.
+//
+// Allowed hosts (loopback mode):
+//   - 127.0.0.1[:port], localhost[:port], [::1][:port]
+//
+// Allowed hosts (public mode):
+//   - the same loopback set (so health-checks via `localhost` still work
+//     when bound to 0.0.0.0 behind a proxy on the same box)
+//   - publicHost[:port], either lower- or mixed-case
+//
+// 421 Misdirected Request is the spec-correct status for a request that
+// arrived at a server that is not configured to produce a response for
+// the combination of scheme + authority — RFC 9110 § 15.5.20.
+func (s *Server) checkHost(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.isAllowedHost(r.Host) {
+			http.Error(w, "bad host", http.StatusMisdirectedRequest)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isAllowedHost evaluates a Host-header value against the active allowlist.
+// Returns false for empty input — HTTP/1.1 requires Host, and HTTP/2
+// synthesizes one from :authority.
+func (s *Server) isAllowedHost(rawHost string) bool {
+	if rawHost == "" {
+		return false
+	}
+	host := rawHost
+	if h, _, err := net.SplitHostPort(rawHost); err == nil {
+		host = h
+	}
+	host = strings.ToLower(host)
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+
+	switch host {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	if s.publicMode && s.publicHost != "" {
+		ph := s.publicHost
+		if h, _, err := net.SplitHostPort(ph); err == nil {
+			ph = h
+		}
+		if strings.EqualFold(strings.TrimSuffix(strings.TrimPrefix(ph, "["), "]"), host) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // secureHeaders wraps a handler and emits the project-wide security
 // header set on every response. The values are tuned for a same-origin
 // SPA that loads only its own embedded assets and never iframes itself.

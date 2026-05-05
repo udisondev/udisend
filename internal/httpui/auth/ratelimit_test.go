@@ -148,6 +148,63 @@ func TestRateLimiter_PerIPIsolation(t *testing.T) {
 	}
 }
 
+// TestRateLimiter_FailClosedWhenSaturated covers the bypass: once
+// MaxTrackedIPs is hit, the previous behaviour returned a transient
+// &ipState{} that swallowed RecordFail mutations. An attacker who fills
+// the table with junk IPs (X-Forwarded-For spoofing, IPv6 /64 churn)
+// could then hammer /login from a fresh IP without ever accumulating
+// fails — unlimited brute force. The defence is fail-closed: refuse new
+// IPs until Cleanup drains the cap.
+func TestRateLimiter_FailClosedWhenSaturated(t *testing.T) {
+	t.Parallel()
+
+	now := atomic.Int64{}
+	now.Store(1700000000)
+	l := &RateLimiter{
+		PerMinute:     5,
+		FailsToLock:   20,
+		LockDuration:  15 * time.Minute,
+		MaxTrackedIPs: 4,
+		Now:           func() time.Time { return time.Unix(now.Load(), 0) },
+	}
+
+	// Saturate the cap with four distinct IPs.
+	for i, ip := range []string{"198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4"} {
+		if ok, _ := l.Allow(ip); !ok {
+			t.Fatalf("setup: IP #%d %q denied; map cap not yet reached", i, ip)
+		}
+	}
+	if l.tracked() != 4 {
+		t.Fatalf("tracked = %d, want 4", l.tracked())
+	}
+
+	// A fresh IP arrives. With cap saturated the limiter MUST refuse
+	// rather than evaluate the request against fresh-zero state.
+	if ok, retry := l.Allow("198.51.100.5"); ok {
+		t.Fatalf("over-cap IP allowed; want fail-closed; retry=%s", retry)
+	}
+
+	// Brute-force scenario: same fresh IP keeps being refused — the
+	// counter is irrelevant because Allow already short-circuits.
+	for range 10 {
+		if ok, _ := l.Allow("198.51.100.5"); ok {
+			t.Fatal("over-cap IP allowed on later attempt; bypass still present")
+		}
+	}
+
+	// After Cleanup empties the cap, the previously-refused IP is
+	// admitted normally — the protection is self-healing, not a permanent
+	// shutout.
+	now.Add(int64(2 * time.Hour / time.Second))
+	l.Cleanup()
+	if l.tracked() != 0 {
+		t.Fatalf("Cleanup did not drain saturated state; tracked = %d", l.tracked())
+	}
+	if ok, _ := l.Allow("198.51.100.5"); !ok {
+		t.Errorf("post-Cleanup admission denied; protection is supposed to self-heal")
+	}
+}
+
 func TestRateLimiter_Cleanup(t *testing.T) {
 	t.Parallel()
 

@@ -52,6 +52,16 @@ type Handler func(peer identity.Hash, ch *Channel)
 
 // Service wires Noise sessions to the DHT transport and exposes a small
 // connect / accept API.
+// MaxHalfOpenPerIP caps the number of in-flight (handshake-not-yet-
+// complete) responder sessions a single source IP may hold. Protects
+// against a HELLO_INIT flood where each accepted INIT pins a Noise
+// responder allocation for the full HandshakeTimeout (6s) — without
+// the cap, an attacker rotating SessionIDs from one IP can keep
+// thousands of responder allocations live concurrently. The cap
+// matches what a real client could ever need (one or two retries,
+// not eight).
+const MaxHalfOpenPerIP = 8
+
 type Service struct {
 	id        *identity.Identity
 	selfDH    identity.Hash // cached id.Public().DestinationHash() — used per packet
@@ -62,6 +72,12 @@ type Service struct {
 
 	mu       sync.Mutex
 	sessions map[sessionKey]*Channel
+	// halfOpenByIP is the per-IP counter of accepted-but-incomplete
+	// responder handshakes. Incremented in acceptInit before allocation,
+	// decremented when the channel either completes the handshake or is
+	// removed (timeout / explicit shutdown). Guarded by s.mu — same
+	// invariant as `sessions`.
+	halfOpenByIP map[string]int
 
 	handler atomic.Pointer[Handler]
 
@@ -95,13 +111,14 @@ func NewService(cfg Config) *Service {
 		cfg.Logger = slog.Default()
 	}
 	s := &Service{
-		id:        cfg.Identity,
-		selfDH:    cfg.Identity.Public().DestinationHash(),
-		transport: cfg.Transport,
-		resolver:  cfg.Resolver,
-		logger:    cfg.Logger,
-		sessions:  make(map[sessionKey]*Channel),
-		closed:    make(chan struct{}),
+		id:           cfg.Identity,
+		selfDH:       cfg.Identity.Public().DestinationHash(),
+		transport:    cfg.Transport,
+		resolver:     cfg.Resolver,
+		logger:       cfg.Logger,
+		sessions:     make(map[sessionKey]*Channel),
+		halfOpenByIP: make(map[string]int),
+		closed:       make(chan struct{}),
 	}
 	if cfg.Router != nil {
 		r := cfg.Router
@@ -360,6 +377,21 @@ func (s *Service) dispatch(ctx context.Context, from net.Addr, env *Envelope) {
 }
 
 func (s *Service) acceptInit(ctx context.Context, from net.Addr, env *Envelope) {
+	// Per-IP half-open cap: refuse the INIT outright if this source IP
+	// already has MaxHalfOpenPerIP responder slots in flight. Without
+	// this gate, an attacker rotating SessionIDs from one IP can pin
+	// HandshakeTimeout × N responder allocations live concurrently.
+	ipKey := relayHostKey(from)
+	s.mu.Lock()
+	if ipKey != "" && s.halfOpenByIP[ipKey] >= MaxHalfOpenPerIP {
+		s.mu.Unlock()
+		s.logger.Debug("signaling: HELLO_INIT drop (half-open cap)",
+			"from", from, "in_flight", MaxHalfOpenPerIP)
+
+		return
+	}
+	s.mu.Unlock()
+
 	resp, err := noise.NewResponder(s.id)
 	if err != nil {
 		s.logger.Warn("signaling: responder init", "err", err)
@@ -384,7 +416,21 @@ func (s *Service) acceptInit(ctx context.Context, from net.Addr, env *Envelope) 
 
 	key := sessionKey{peer: env.Sender, sid: env.SessionID}
 	ch := s.newChannel(env.Sender, env.SessionID, from, resp)
+	ch.halfOpenIP = ipKey
 	s.mu.Lock()
+	if ipKey != "" {
+		// Re-check the cap under the same lock that increments — between
+		// the first check and now another goroutine may have incremented
+		// it past the threshold.
+		if s.halfOpenByIP[ipKey] >= MaxHalfOpenPerIP {
+			s.mu.Unlock()
+			s.logger.Debug("signaling: HELLO_INIT drop (half-open cap, race)",
+				"from", from)
+
+			return
+		}
+		s.halfOpenByIP[ipKey]++
+	}
 	s.sessions[key] = ch
 	s.mu.Unlock()
 
@@ -473,7 +519,10 @@ func (s *Service) Connect(ctx context.Context, peer identity.Hash) (*Channel, er
 	if err != nil {
 		return nil, fmt.Errorf("signaling: noise init: %w", err)
 	}
-	sid := NewSessionID()
+	sid, err := NewSessionID()
+	if err != nil {
+		return nil, fmt.Errorf("signaling: new session id: %w", err)
+	}
 	ch := s.newChannel(peer, sid, addr, init)
 	s.mu.Lock()
 	s.sessions[sessionKey{peer: peer, sid: sid}] = ch
@@ -509,6 +558,7 @@ func (s *Service) removeSession(key sessionKey) {
 	ch, ok := s.sessions[key]
 	if ok {
 		delete(s.sessions, key)
+		s.releaseHalfOpenLocked(ch)
 	}
 	s.mu.Unlock()
 	if ok {
@@ -520,8 +570,43 @@ func (s *Service) removeSession(key sessionKey) {
 // used by Channel.Close which already owns the shutdown sequence.
 func (s *Service) unregister(key sessionKey) {
 	s.mu.Lock()
-	delete(s.sessions, key)
+	if ch, ok := s.sessions[key]; ok {
+		delete(s.sessions, key)
+		s.releaseHalfOpenLocked(ch)
+	}
 	s.mu.Unlock()
+}
+
+// releaseHalfOpenLocked decrements the per-IP half-open counter for ch
+// IFF the channel was registered as a responder slot AND has not yet
+// been settled (i.e. neither handshake-completion nor a previous
+// removal already accounted for it). Caller MUST hold s.mu.
+func (s *Service) releaseHalfOpenLocked(ch *Channel) {
+	if ch == nil || ch.halfOpenIP == "" {
+		return
+	}
+	if !ch.halfOpenSettled.CompareAndSwap(false, true) {
+		return
+	}
+	if n := s.halfOpenByIP[ch.halfOpenIP]; n > 1 {
+		s.halfOpenByIP[ch.halfOpenIP] = n - 1
+	} else {
+		delete(s.halfOpenByIP, ch.halfOpenIP)
+	}
+}
+
+// settleHalfOpen is the public counterpart to releaseHalfOpenLocked
+// invoked from Channel.handleFinal once the responder side completes
+// the handshake — at that point the slot is no longer "half-open" and
+// the counter must be decremented even though the session itself stays
+// alive.
+func (s *Service) settleHalfOpen(ch *Channel) {
+	if ch == nil || ch.halfOpenIP == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.releaseHalfOpenLocked(ch)
 }
 
 // sendEnvelope is the single outbound funnel — every signaling packet

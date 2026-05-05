@@ -42,7 +42,7 @@ func run() error {
 	publicIP := flag.String("public-ip", "", "advertise STUN/TURN volunteer on this IP (omit to skip STUN/TURN)")
 	stunAddr := flag.String("stun", ":3478", "STUN listen address (used only if --public-ip is set)")
 	turnAddr := flag.String("turn", ":3479", "TURN listen address (used only if --public-ip and --turn-secret are set)")
-	turnSecret := flag.String("turn-secret", "", "shared secret for TURN long-term credentials (omit to disable TURN)")
+	turnSecretFile := flag.String("turn-secret-file", "", "path to a file holding the TURN shared secret (preferred over env, never logged)")
 	bootstrap := stringList{}
 	flag.Var(&bootstrap, "bootstrap", "peer to seed the routing table — IPv4/IPv6/DNS-name with port, e.g. 1.2.3.4:9000 or relay.example.com:9000 (can be repeated; omit to use community defaults)")
 	verbose := flag.Bool("v", false, "verbose logs")
@@ -54,6 +54,11 @@ func run() error {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)
+
+	turnSecret, err := loadTURNSecret(*turnSecretFile)
+	if err != nil {
+		return err
+	}
 
 	id, err := config.LoadOrCreateIdentity(*identityPath)
 	if err != nil {
@@ -74,7 +79,7 @@ func run() error {
 		PublicIP:   *publicIP,
 		STUNAddr:   *stunAddr,
 		TURNAddr:   *turnAddr,
-		TURNSecret: *turnSecret,
+		TURNSecret: turnSecret,
 		Logger:     logger,
 	})
 	if err != nil {
@@ -89,7 +94,7 @@ func run() error {
 	if *publicIP != "" {
 		fmt.Println("│  public IP:       ", *publicIP)
 		fmt.Println("│  STUN:            ", *stunAddr)
-		if *turnSecret != "" {
+		if turnSecret != "" {
 			fmt.Println("│  TURN:            ", *turnAddr)
 		}
 	}
@@ -115,6 +120,38 @@ func run() error {
 	}
 
 	return nil
+}
+
+// turnSecretEnvVar is the environment variable consulted for the TURN
+// shared secret when --turn-secret-file is not provided. Reading from
+// the environment keeps the secret out of `ps`/`/proc/<pid>/cmdline`,
+// which any local user can read on a multi-tenant VPS.
+const turnSecretEnvVar = "UDISEND_TURN_SECRET"
+
+// loadTURNSecret resolves the TURN shared secret from secure sources
+// only:
+//
+//   - --turn-secret-file: read from disk; whitespace/newline trimmed.
+//   - $UDISEND_TURN_SECRET: env var fallback.
+//
+// Returning an empty string means "TURN disabled" — there is no CLI flag
+// for the secret because passing it on the command line exposes it via
+// `ps -ef` and `/proc/<pid>/cmdline` to every user on the host.
+func loadTURNSecret(file string) (string, error) {
+	if file != "" {
+		blob, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("read turn-secret-file: %w", err)
+		}
+		secret := strings.TrimSpace(string(blob))
+		if secret == "" {
+			return "", fmt.Errorf("turn-secret-file %q is empty", file)
+		}
+
+		return secret, nil
+	}
+
+	return os.Getenv(turnSecretEnvVar), nil
 }
 
 func defaultStateDir() string {

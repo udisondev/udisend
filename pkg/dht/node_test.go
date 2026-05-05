@@ -75,12 +75,21 @@ func TestPing_RoundTrip(t *testing.T) {
 	if err := a.node.Ping(t.Context(), b.t.LocalAddr()); err != nil {
 		t.Fatalf("ping: %v", err)
 	}
-	// Both tables should now know each other.
+	// `a` learns about `b` synchronously through the PongMsg it just
+	// received.
 	if a.node.Table().Size() == 0 {
 		t.Errorf("a.table empty")
 	}
+	// `b` learns about `a` ASYNCHRONOUSLY: receiving a PingMsg schedules
+	// a verification probe (`maybeProbe` → outbound Ping) and `b` adds
+	// `a` only after that probe's PONG comes back. Wait briefly with a
+	// poll for the routing table to fill.
+	deadline := time.Now().Add(2 * time.Second)
+	for b.node.Table().Size() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
 	if b.node.Table().Size() == 0 {
-		t.Errorf("b.table empty")
+		t.Errorf("b.table empty after maybeProbe window")
 	}
 }
 
@@ -128,6 +137,68 @@ func TestBootstrap_ConvergesSmallNetwork(t *testing.T) {
 			if !found {
 				t.Fatalf("peer %d failed to find peer %d (got %d closest)", i, j, len(closest))
 			}
+		}
+	}
+}
+
+// TestRouting_DoesNotAdmitSilentRequester covers the canonical
+// Kademlia rule made explicit by the 2026-05-05 audit: a peer that
+// only sends us request-path messages but never responds to our
+// verification probe MUST NOT appear in our routing table. The fix
+// asks "do you actually live at this address?" via maybeProbe; a
+// silent address never gets added.
+//
+// We craft the request using a fake transport that drops everything
+// inbound to itself, so the legitimate node's PING-back goes
+// unanswered. Without the fix, the routing table would have a fake
+// entry for `attacker.ID` chosen close to the victim's hash.
+func TestRouting_DoesNotAdmitSilentRequester(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	victim := h.spawn(t, rand.Reader)
+	defer h.wait()
+
+	// Attacker-controlled transport — listens but drops every packet.
+	att := h.hub.NewMemoryTransport()
+	t.Cleanup(func() { _ = att.Close() })
+	go func() {
+		for range att.Inbox() {
+			// Drop every packet — silently absorb the victim's PING.
+		}
+	}()
+
+	// Forge a FindNodeMsg with a chosen SrcID. Use the same wire
+	// helpers the real attacker would.
+	tx, err := dht.NewTxID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spoofedID dht.NodeID
+	spoofedID[0] = 0xAA
+	msg := &dht.FindNodeMsg{
+		Header: dht.Header{
+			TxID:    tx,
+			SrcID:   spoofedID,
+			SrcAddr: att.LocalAddr().String(),
+		},
+		Target: victim.node.ID(),
+	}
+	blob, err := dht.EncodeMsg(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := att.Send(t.Context(), victim.t.LocalAddr(), blob); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for the victim's probe to time out (RequestTimeout=500 ms in
+	// the test harness). Anything well past that is enough.
+	time.Sleep(900 * time.Millisecond)
+
+	for _, c := range victim.node.Table().All() {
+		if c.ID == spoofedID {
+			t.Fatalf("victim admitted unverified SrcID %x — request-path bypass", spoofedID)
 		}
 	}
 }

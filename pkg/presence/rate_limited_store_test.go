@@ -39,6 +39,33 @@ func srcAddr(ip string) net.Addr {
 	return &net.UDPAddr{IP: net.ParseIP(ip), Port: 9000}
 }
 
+// TestRateLimitedStore_TrackedIPsBounded covers the cardinality cap: an
+// attacker spraying 1M distinct source IPs (residential IPv6 /64
+// rotation, XFF spoofing through a misconfigured proxy) MUST NOT grow
+// the bookkeeping maps without bound. Records past the cap pass through
+// to the inner store (with its own size cap) but no per-IP quota slot
+// is allocated.
+func TestRateLimitedStore_TrackedIPsBounded(t *testing.T) {
+	t.Parallel()
+
+	inner := dht.NewMemoryStore(nil)
+	store := presence.NewRateLimitedStore(inner)
+	store.MaxPerIP = 16
+	store.MaxTrackedIPs = 4
+
+	// Push records from five distinct IPs. Only the first four are
+	// admitted to the per-IP map; the fifth still lands in the inner
+	// store (tracking is a soft layer above the store) but doesn't grow
+	// the map.
+	for i := byte(0); i < 5; i++ {
+		blob, key := signedRecordBlob(t, "203.0.113.10:9000")
+		store.PutFromSource(key, blob, 60*time.Second, srcAddr("198.18.0."+string(rune('1'+i))))
+	}
+	if tracked := store.TrackedIPCount(); tracked != 4 {
+		t.Errorf("tracked IPs = %d, want 4 (cap-bound)", tracked)
+	}
+}
+
 func TestRateLimitedStore_RejectsAfterLimitFromSameSource(t *testing.T) {
 	t.Parallel()
 	inner := dht.NewMemoryStore(nil)

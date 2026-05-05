@@ -14,6 +14,14 @@ import (
 // RateLimitedStore.MaxPerIP.
 const DefaultMaxRecordsPerIP = 16
 
+// DefaultMaxTrackedIPs caps the cardinality of the per-IP bookkeeping
+// maps. Even with MaxPerIP=16, an attacker spraying 1M source IPs (XFF
+// spoofing through misconfigured proxy, IPv6 /64 churn, real botnet)
+// can grow `keyByIP`/`ipByKey` without bound between Sweep calls — the
+// limit only applies per-IP. 100K distinct IPs × ~64 B/entry ≈ 6 MB,
+// large enough for legitimate fanout, small enough to bound DoS.
+const DefaultMaxTrackedIPs = 100_000
+
 // RateLimitedStore wraps a dht.Store and enforces a per-source-IP cap on
 // stored presence records. It implements dht.SourcedStore so the DHT
 // node hands the real packet origin (`net.Addr`) — keying the cap on
@@ -30,6 +38,13 @@ type RateLimitedStore struct {
 	// MaxPerIP is the per-IP record cap. Zero means DefaultMaxRecordsPerIP.
 	// Negative disables limiting (useful for tests).
 	MaxPerIP int
+
+	// MaxTrackedIPs hard-caps the cardinality of the bookkeeping maps.
+	// When the cap is hit, fresh source IPs are refused (their records
+	// pass through without quota) — losing rate-limiting for new IPs is
+	// strictly safer than letting the map grow unbounded under spoof
+	// floods. Zero means DefaultMaxTrackedIPs; negative disables.
+	MaxTrackedIPs int
 
 	// VerifyTTL bounds record IssuedAt freshness during signature
 	// validation. Zero means "do not enforce expiry" — verify the
@@ -96,11 +111,26 @@ func (s *RateLimitedStore) PutFromSource(key dht.NodeID, value []byte, ttl time.
 		return
 	}
 
+	tracked := s.MaxTrackedIPs
+	if tracked == 0 {
+		tracked = DefaultMaxTrackedIPs
+	}
+
 	s.mu.Lock()
 	prev, isUpdate := s.ipByKey[key]
-	keys := s.keyByIP[ip]
+	keys, ipKnown := s.keyByIP[ip]
 	if !isUpdate && len(keys) >= limit {
 		s.mu.Unlock()
+		return
+	}
+	// Cardinality cap: refuse to allocate a fresh IP slot once the
+	// tracking map is full. The record itself still goes to the inner
+	// store (so legitimate one-off publishers under heavy churn aren't
+	// silently dropped), it just bypasses the rate-limit. Sweep drains
+	// this back down once stale records expire.
+	if !ipKnown && !isUpdate && tracked > 0 && len(s.keyByIP) >= tracked {
+		s.mu.Unlock()
+		s.inner.Put(key, value, ttl)
 		return
 	}
 	if isUpdate && prev != ip {
@@ -125,6 +155,16 @@ func (s *RateLimitedStore) PutFromSource(key dht.NodeID, value []byte, ttl time.
 // Get is a pass-through.
 func (s *RateLimitedStore) Get(key dht.NodeID) ([]byte, bool) {
 	return s.inner.Get(key)
+}
+
+// TrackedIPCount reports how many distinct source IPs the limiter is
+// currently bookkeeping. Test-facing — exposed for the cardinality-cap
+// regression suite.
+func (s *RateLimitedStore) TrackedIPCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.keyByIP)
 }
 
 // Sweep delegates to the inner store and prunes per-IP bookkeeping for

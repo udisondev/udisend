@@ -136,10 +136,14 @@ func TestRelay_HopLimit(t *testing.T) {
 	t.Cleanup(func() { _ = src.Close() })
 
 	send := func(hops byte, tag string) {
+		sid, err := signaling.NewSessionID()
+		if err != nil {
+			t.Fatal(err)
+		}
 		env := &signaling.Envelope{
 			Recipient: targetHash,
 			Sender:    targetHash,
-			SessionID: signaling.NewSessionID(),
+			SessionID: sid,
 			Hops:      hops,
 			InnerType: signaling.InnerData,
 			Payload:   []byte(tag),

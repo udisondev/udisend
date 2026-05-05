@@ -11,6 +11,13 @@ import (
 	"time"
 )
 
+// DefaultMaxKeys hard-caps the number of distinct buckets a Limiter
+// holds. Without a cap, the map grows unbounded between GC sweeps under
+// IP-spoofing floods (1M unique sources/30s = ~96 MB of bucket structs
+// alone). 100K is high enough for realistic legitimate traffic (one
+// public-IP message-relay) and low enough to keep DoS bounded.
+const DefaultMaxKeys = 100_000
+
 // Limiter is a token-bucket per key with periodic GC of idle entries.
 // Safe for concurrent use.
 type Limiter struct {
@@ -23,6 +30,12 @@ type Limiter struct {
 	clock   func() time.Time
 	lastGC  time.Time // amortise gc — see Allow
 	gcEvery time.Duration
+
+	// MaxKeys caps the bucket map. Zero means DefaultMaxKeys; negative
+	// disables capping (testing only). When the cap is hit and a fresh
+	// key arrives, the bucket with the oldest lastSeen is evicted —
+	// attackers spraying churn lose their own buckets first.
+	MaxKeys int
 }
 
 type bucket struct {
@@ -72,6 +85,7 @@ func (l *Limiter) Allow(key string) bool {
 
 	b, ok := l.buckets[key]
 	if !ok {
+		l.evictIfFullLocked()
 		b = &bucket{tokens: l.burst, lastSeen: now}
 		l.buckets[key] = b
 	}
@@ -93,6 +107,35 @@ func (l *Limiter) Allow(key string) bool {
 	b.tokens--
 
 	return true
+}
+
+// evictIfFullLocked drops the least-recently-seen bucket when the map
+// has reached MaxKeys. Caller MUST hold l.mu. Linear scan is O(MaxKeys);
+// the cap is bounded so the cost is microseconds even when fully loaded.
+func (l *Limiter) evictIfFullLocked() {
+	limit := l.MaxKeys
+	if limit == 0 {
+		limit = DefaultMaxKeys
+	}
+	if limit < 0 || len(l.buckets) < limit {
+		return
+	}
+
+	var (
+		victim string
+		oldest time.Time
+		set    bool
+	)
+	for k, b := range l.buckets {
+		if !set || b.lastSeen.Before(oldest) {
+			victim = k
+			oldest = b.lastSeen
+			set = true
+		}
+	}
+	if set {
+		delete(l.buckets, victim)
+	}
 }
 
 // maybeGC runs the idle-bucket sweep at most once per l.gcEvery. Caller

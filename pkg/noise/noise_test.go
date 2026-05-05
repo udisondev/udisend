@@ -127,6 +127,36 @@ func TestXK_WrongResponderStatic(t *testing.T) {
 	}
 }
 
+// TestEncrypt_RefusesPastMessageBudget is the nonce-exhaustion guard:
+// a session that has issued MaxMessagesPerKey AEAD operations MUST
+// refuse further use rather than approach the AEAD nonce-collision
+// boundary. Real signaling never reaches this — the test pre-loads the
+// counter via the public Encrypt path with low budget injection through
+// the test-only API.
+func TestEncrypt_RefusesPastMessageBudget(t *testing.T) {
+	t.Parallel()
+	alice, _ := identity.Generate(rand.Reader)
+	bob, _ := identity.Generate(rand.Reader)
+	initiator, _ := noise.NewInitiator(alice, bob.Public())
+	responder, _ := noise.NewResponder(bob)
+
+	// Drive the handshake so cipher states exist.
+	m1, _ := initiator.WriteMessage(nil)
+	_, _ = responder.ReadMessage(m1)
+	m2, _ := responder.WriteMessage(nil)
+	_, _ = initiator.ReadMessage(m2)
+	m3, _ := initiator.WriteMessage(nil)
+	_, _ = responder.ReadMessage(m3)
+
+	// Saturate the budget directly — we exposed it as a constant, so
+	// the test is bound to the public API surface.
+	initiator.SetSendCountForTest(noise.MaxMessagesPerKey)
+
+	if _, err := initiator.Encrypt([]byte("over"), nil); !errors.Is(err, noise.ErrSessionExhausted) {
+		t.Fatalf("Encrypt at budget = %v, want ErrSessionExhausted", err)
+	}
+}
+
 func TestEncrypt_BeforeHandshake(t *testing.T) {
 	t.Parallel()
 	alice, _ := identity.Generate(rand.Reader)

@@ -14,10 +14,14 @@ func benchEnvelope(payloadSize int) *signaling.Envelope {
 	var rec, snd identity.Hash
 	_, _ = rand.Read(rec[:])
 	_, _ = rand.Read(snd[:])
+	sid, err := signaling.NewSessionID()
+	if err != nil {
+		panic(err)
+	}
 	return &signaling.Envelope{
 		Recipient: rec,
 		Sender:    snd,
-		SessionID: signaling.NewSessionID(),
+		SessionID: sid,
 		Hops:      0,
 		InnerType: signaling.InnerData,
 		Payload:   payload,

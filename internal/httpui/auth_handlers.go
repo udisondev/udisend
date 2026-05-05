@@ -162,7 +162,7 @@ func (h *authHandlers) handleLoginPOST(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch {
-		case auth.VerifyTOTP(creds.TOTPSecret, totpInput, h.now()):
+		case h.verifyTOTPWithReplay(r.Context(), creds.TOTPSecret, totpInput):
 			// Standard TOTP path; successEvent stays "login_success".
 		case h.tryRecoveryCode(r.Context(), totpInput):
 			// Recovery-code use is a "break-glass" event the operator
@@ -224,6 +224,35 @@ func (h *authHandlers) requireSession(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// verifyTOTPWithReplay matches code against the TOTP secret AND persists
+// the matched step so the same code cannot be replayed on a fresh login
+// within the same 30s period (or its ±1-step skew window). Mirrors the
+// step-replay discipline of `requireSecondFactor` so login is not the
+// soft side of the TOTP defence.
+//
+// On any persistence error we refuse the attempt — fail-closed: a
+// transient DB outage MUST NOT erase the replay window.
+func (h *authHandlers) verifyTOTPWithReplay(ctx context.Context, secret []byte, code string) bool {
+	step, ok := auth.VerifyTOTPStep(secret, code, h.now())
+	if !ok {
+		return false
+	}
+	used, exists, err := h.store.GetSetting(ctx, settingKeyLastTOTPStep)
+	if err != nil {
+		return false
+	}
+	if exists {
+		if u, perr := strconv.ParseInt(used, 10, 64); perr == nil && u >= step {
+			return false
+		}
+	}
+	if err := h.store.SetSetting(ctx, settingKeyLastTOTPStep, strconv.FormatInt(step, 10)); err != nil {
+		return false
+	}
+
+	return true
 }
 
 // tryRecoveryCode iterates unconsumed recovery hashes and Argon2id-verifies

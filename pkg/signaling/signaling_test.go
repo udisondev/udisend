@@ -162,10 +162,14 @@ func TestService_ConnectFailsForUnknownPeer(t *testing.T) {
 
 func TestEnvelope_Roundtrip(t *testing.T) {
 	t.Parallel()
+	sid, err := signaling.NewSessionID()
+	if err != nil {
+		t.Fatal(err)
+	}
 	env := &signaling.Envelope{
 		Recipient: identity.Hash{1, 2, 3},
 		Sender:    identity.Hash{4, 5, 6},
-		SessionID: signaling.NewSessionID(),
+		SessionID: sid,
 		InnerType: signaling.InnerData,
 		Payload:   []byte("blob"),
 	}

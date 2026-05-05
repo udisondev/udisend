@@ -85,8 +85,26 @@ func encodePHC(p Params, salt, hash []byte) string {
 	)
 }
 
+// Bounds for parameters loaded from the persisted PHC string. Anything
+// outside the band is treated as DB corruption / poisoning rather than
+// honoured. The lower bounds are below DefaultParams so legitimate older
+// hashes (created with weaker defaults) still verify; the upper bounds
+// are well above any realistic OWASP recommendation but small enough to
+// keep argon2.IDKey resource use bounded (~1 GiB memory, ~16 lanes,
+// ~16 iterations) — refusing past that point prevents DoS via OOM or
+// minute-long CPU pin from a single login attempt.
+const (
+	minArgonMemoryKiB = 8 * 1024  // 8 MiB
+	maxArgonMemoryKiB = 1024 * 1024
+	minArgonTime      = 1
+	maxArgonTime      = 16
+	minArgonLanes     = 1
+	maxArgonLanes     = 16
+)
+
 // decodePHC parses the standard Argon2id PHC string. Strict: rejects unknown
-// algorithms, unknown versions, missing fields, malformed base64.
+// algorithms, unknown versions, missing fields, malformed base64, and
+// out-of-range Argon2 parameters (DB-poisoning OOM defence).
 func decodePHC(encoded string) (Params, []byte, []byte, error) {
 	if encoded == "" {
 		return Params{}, nil, nil, errors.New("auth: empty encoded value")
@@ -111,6 +129,18 @@ func decodePHC(encoded string) (Params, []byte, []byte, error) {
 	var p Params
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &p.Memory, &p.Iterations, &p.Parallelism); err != nil {
 		return Params{}, nil, nil, fmt.Errorf("auth: parse params: %w", err)
+	}
+	if p.Memory < minArgonMemoryKiB || p.Memory > maxArgonMemoryKiB {
+		return Params{}, nil, nil, fmt.Errorf("auth: argon2 memory %d KiB out of bounds [%d..%d]",
+			p.Memory, minArgonMemoryKiB, maxArgonMemoryKiB)
+	}
+	if p.Iterations < minArgonTime || p.Iterations > maxArgonTime {
+		return Params{}, nil, nil, fmt.Errorf("auth: argon2 iterations %d out of bounds [%d..%d]",
+			p.Iterations, minArgonTime, maxArgonTime)
+	}
+	if p.Parallelism < minArgonLanes || p.Parallelism > maxArgonLanes {
+		return Params{}, nil, nil, fmt.Errorf("auth: argon2 parallelism %d out of bounds [%d..%d]",
+			p.Parallelism, minArgonLanes, maxArgonLanes)
 	}
 
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])

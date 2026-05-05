@@ -121,6 +121,9 @@ type Node struct {
 	pendingMu sync.Mutex
 	pending   map[TxID]chan any
 
+	probeMu      sync.Mutex
+	probesInFlight map[NodeID]struct{}
+
 	closeOnce sync.Once
 	closed    chan struct{}
 }
@@ -141,14 +144,15 @@ func NewNode(id *identity.Identity, t transport.Transport, store Store, cfg Conf
 		store = NewMemoryStore(nil)
 	}
 	return &Node{
-		id:        id,
-		transport: t,
-		table:     NewRoutingTable(id.Public().DestinationHash(), cfg.K),
-		store:     store,
-		cfg:       cfg,
-		limiter:   ratelimit.New(cfg.InboundRate, cfg.InboundBurst),
-		pending:   make(map[TxID]chan any),
-		closed:    make(chan struct{}),
+		id:             id,
+		transport:      t,
+		table:          NewRoutingTable(id.Public().DestinationHash(), cfg.K),
+		store:          store,
+		cfg:            cfg,
+		limiter:        ratelimit.New(cfg.InboundRate, cfg.InboundBurst),
+		pending:        make(map[TxID]chan any),
+		probesInFlight: make(map[NodeID]struct{}),
+		closed:         make(chan struct{}),
 	}
 }
 
@@ -218,42 +222,45 @@ func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
 		n.cfg.Logger.Debug("dht: decode failed", "err", err)
 		return
 	}
-	// Phase 9: routing-table inserts are bounded by per-/24-prefix cap
-	// (bucket.add → subnetOver) so a single attacker IP cannot fill a
-	// bucket with arbitrary NodeIDs. We still refresh on both request
-	// and response paths because dropping requests-side adds breaks
-	// Kademlia convergence (a fresh peer otherwise never appears in
-	// the routing table of an unresponsive bootstrap node).
+	// Routing-table population follows the canonical Kademlia rule:
+	// only add a contact when we have observed it RESPONDING to one of
+	// our outbound requests (PongMsg / NodesMsg / StoreOKMsg / ValueMsg).
+	// On REQUEST paths (PingMsg / FindNodeMsg / StoreMsg / FindValueMsg)
+	// the sender chose SrcID — they could have chosen any value close
+	// to a victim's hash to bias routing. Refusing to admit them on
+	// request alone closes that poisoning vector. They will appear in
+	// our table only after they respond to a probe we initiate (or to
+	// an iterativeFind step that already covers them). The per-/24
+	// bucket cap remains as defence-in-depth for the response path.
 	switch m := msg.(type) {
 	case *PingMsg:
-		n.refreshContact(m.Header, pkt.From)
 		_ = n.sendMsg(ctx, pkt.From, &PongMsg{Header: n.replyHeader(m.Header.TxID)})
+		n.maybeProbe(m.Header.SrcID, pkt.From)
 	case *PongMsg:
 		n.refreshContact(m.Header, pkt.From)
 		n.deliver(m.Header.TxID, m)
 	case *FindNodeMsg:
-		n.refreshContact(m.Header, pkt.From)
 		closest := n.table.Closest(m.Target, n.cfg.K)
 		_ = n.sendMsg(ctx, pkt.From, &NodesMsg{
 			Header:   n.replyHeader(m.Header.TxID),
 			Contacts: encodeContacts(closest),
 		})
+		n.maybeProbe(m.Header.SrcID, pkt.From)
 	case *NodesMsg:
 		n.refreshContact(m.Header, pkt.From)
 		n.deliver(m.Header.TxID, m)
 	case *StoreMsg:
-		n.refreshContact(m.Header, pkt.From)
 		if ss, ok := n.store.(SourcedStore); ok {
 			ss.PutFromSource(m.Key, m.Value, DefaultStoreTTL, pkt.From)
 		} else {
 			n.store.Put(m.Key, m.Value, DefaultStoreTTL)
 		}
 		_ = n.sendMsg(ctx, pkt.From, &StoreOKMsg{Header: n.replyHeader(m.Header.TxID)})
+		n.maybeProbe(m.Header.SrcID, pkt.From)
 	case *StoreOKMsg:
 		n.refreshContact(m.Header, pkt.From)
 		n.deliver(m.Header.TxID, m)
 	case *FindValueMsg:
-		n.refreshContact(m.Header, pkt.From)
 		if val, ok := n.store.Get(m.Key); ok {
 			_ = n.sendMsg(ctx, pkt.From, &ValueMsg{
 				Header: n.replyHeader(m.Header.TxID),
@@ -266,10 +273,58 @@ func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
 				Contacts: encodeContacts(closest),
 			})
 		}
+		n.maybeProbe(m.Header.SrcID, pkt.From)
 	case *ValueMsg:
 		n.refreshContact(m.Header, pkt.From)
 		n.deliver(m.Header.TxID, m)
 	}
+}
+
+// maybeProbe schedules an asynchronous PING to verify a contact that
+// just hit us with a request. The contact is added to the routing
+// table only if the PONG comes back (response path of handlePacket).
+// This implements the canonical Kademlia rule that routing-table
+// inserts require liveness proof we elicited, not bytes the peer sent
+// us. The probe is rate-limited per NodeID via probesInFlight so a
+// single request flood cannot trigger a probe storm; once the probe
+// completes (success or timeout) the entry is cleared and a future
+// request from the same peer can re-probe.
+//
+// Skipped when the SrcID is the local node (loop) or when an in-flight
+// probe is already pending for that NodeID.
+func (n *Node) maybeProbe(id NodeID, from net.Addr) {
+	if id == n.ID() {
+		return
+	}
+	if from == nil {
+		return
+	}
+	// Already in routing table → no need to re-probe.
+	if known, ok := n.table.GetContact(id); ok && known.Addr != nil {
+		return
+	}
+
+	n.probeMu.Lock()
+	if _, busy := n.probesInFlight[id]; busy {
+		n.probeMu.Unlock()
+		return
+	}
+	n.probesInFlight[id] = struct{}{}
+	n.probeMu.Unlock()
+
+	go func() {
+		defer func() {
+			n.probeMu.Lock()
+			delete(n.probesInFlight, id)
+			n.probeMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), n.cfg.RequestTimeout)
+		defer cancel()
+		// Ping success path causes our PongMsg handler to refreshContact
+		// and Add to the routing table. Failure (timeout, unreachable)
+		// is a silent drop — the peer will simply not be added.
+		_ = n.Ping(ctx, from)
+	}()
 }
 
 func (n *Node) refreshContact(h Header, from net.Addr) {
@@ -299,12 +354,21 @@ func (n *Node) replyHeader(tx TxID) Header {
 	}
 }
 
-func (n *Node) newRequestHeader() Header {
+// newRequestHeader allocates a fresh request envelope header. The TxID
+// is randomly generated; on the rare RNG failure we surface the error so
+// the request is aborted — issuing two requests with TxID == 0 would
+// merge their response channels.
+func (n *Node) newRequestHeader() (Header, error) {
+	tx, err := NewTxID()
+	if err != nil {
+		return Header{}, err
+	}
+
 	return Header{
-		TxID:    NewTxID(),
+		TxID:    tx,
 		SrcID:   n.ID(),
 		SrcAddr: n.transport.LocalAddr().String(),
-	}
+	}, nil
 }
 
 func (n *Node) sendMsg(ctx context.Context, to net.Addr, m any) error {
@@ -345,7 +409,10 @@ func (n *Node) deliver(tx TxID, msg any) {
 
 // Ping sends a ping and waits for a pong.
 func (n *Node) Ping(ctx context.Context, addr net.Addr) error {
-	hdr := n.newRequestHeader()
+	hdr, err := n.newRequestHeader()
+	if err != nil {
+		return err
+	}
 	ch := n.register(hdr.TxID)
 	defer n.cancel(hdr.TxID)
 	if err := n.sendMsg(ctx, addr, &PingMsg{Header: hdr}); err != nil {
@@ -356,7 +423,10 @@ func (n *Node) Ping(ctx context.Context, addr net.Addr) error {
 
 // FindNode asks `addr` for the K closest contacts to target.
 func (n *Node) FindNode(ctx context.Context, addr net.Addr, target NodeID) ([]Contact, error) {
-	hdr := n.newRequestHeader()
+	hdr, err := n.newRequestHeader()
+	if err != nil {
+		return nil, err
+	}
 	ch := n.register(hdr.TxID)
 	defer n.cancel(hdr.TxID)
 	if err := n.sendMsg(ctx, addr, &FindNodeMsg{Header: hdr, Target: target}); err != nil {
@@ -376,7 +446,10 @@ func (n *Node) FindNode(ctx context.Context, addr net.Addr, target NodeID) ([]Co
 // FindValue queries `addr` for a stored value. If the peer doesn't have
 // it, returns (nil, contacts, nil) with the closest contacts.
 func (n *Node) FindValue(ctx context.Context, addr net.Addr, key NodeID) ([]byte, []Contact, error) {
-	hdr := n.newRequestHeader()
+	hdr, err := n.newRequestHeader()
+	if err != nil {
+		return nil, nil, err
+	}
 	ch := n.register(hdr.TxID)
 	defer n.cancel(hdr.TxID)
 	if err := n.sendMsg(ctx, addr, &FindValueMsg{Header: hdr, Key: key}); err != nil {
@@ -398,13 +471,16 @@ func (n *Node) FindValue(ctx context.Context, addr net.Addr, key NodeID) ([]byte
 
 // Store asks `addr` to store key=value.
 func (n *Node) Store(ctx context.Context, addr net.Addr, key NodeID, value []byte) error {
-	hdr := n.newRequestHeader()
+	hdr, err := n.newRequestHeader()
+	if err != nil {
+		return err
+	}
 	ch := n.register(hdr.TxID)
 	defer n.cancel(hdr.TxID)
 	if err := n.sendMsg(ctx, addr, &StoreMsg{Header: hdr, Key: key, Value: value}); err != nil {
 		return err
 	}
-	_, err := n.waitFor(ctx, ch, n.cfg.RequestTimeout)
+	_, err = n.waitFor(ctx, ch, n.cfg.RequestTimeout)
 	return err
 }
 

@@ -8,8 +8,12 @@ import (
 )
 
 func mkHeader() dht.Header {
+	tx, err := dht.NewTxID()
+	if err != nil {
+		panic(err) // tests run with a working RNG; bail loudly otherwise.
+	}
 	return dht.Header{
-		TxID:    dht.NewTxID(),
+		TxID:    tx,
 		SrcID:   id("11111111111111111111111111111111"),
 		SrcAddr: "127.0.0.1:9001",
 	}

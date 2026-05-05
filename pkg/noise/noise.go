@@ -27,7 +27,24 @@ var (
 	ErrHandshakeFailed = errors.New("noise: handshake failed")
 	ErrSessionDone     = errors.New("noise: session already completed")
 	ErrSessionNotReady = errors.New("noise: session handshake not finished")
+	// ErrSessionExhausted is returned when Encrypt/Decrypt is called past
+	// MaxMessagesPerKey. The session must be torn down and a fresh
+	// handshake established — using the same key past this point would
+	// approach the AEAD nonce-reuse boundary documented in the Noise
+	// spec § 5.1 (NIST SP 800-38D recommends ≤2^32 invocations per
+	// AES-GCM key; ChaCha20-Poly1305 is more forgiving but the same
+	// budget keeps a single bound for both).
+	ErrSessionExhausted = errors.New("noise: session message budget exhausted, rekey or reconnect")
 )
+
+// MaxMessagesPerKey caps the number of Encrypt or Decrypt operations a
+// single Session may perform before refusing further use. 2^32 (~4
+// billion) is far above realistic signaling-session traffic — a session
+// hitting it is either a long-running buggy peer or an attacker —
+// and far below 2^64 where flynn/noise's nonce counter actually wraps.
+// Sessions exceeding the budget MUST be closed; the caller establishes
+// a new Noise session for further traffic.
+const MaxMessagesPerKey uint64 = 1 << 32
 
 // cipherSuite is the project-pinned set: X25519 / ChaCha20-Poly1305 / BLAKE2b.
 var cipherSuite = noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, noise.HashBLAKE2b)
@@ -45,6 +62,13 @@ type Session struct {
 	recv      *noise.CipherState // peer → app
 	initiator bool
 	done      atomic.Bool
+
+	// sendCount and recvCount track post-handshake AEAD invocations on
+	// each direction. Encrypt/Decrypt refuse past MaxMessagesPerKey to
+	// keep each direction comfortably below the AEAD nonce-collision
+	// boundary even in the absence of a Noise-spec rekey implementation.
+	sendCount atomic.Uint64
+	recvCount atomic.Uint64
 }
 
 // staticKeyFromIdentity pulls the X25519 keypair out of an identity. flynn
@@ -133,27 +157,40 @@ func (s *Session) PeerStatic() ([]byte, error) {
 	return append([]byte(nil), pub...), nil
 }
 
-// Encrypt seals plaintext under the post-handshake send cipher.
+// Encrypt seals plaintext under the post-handshake send cipher. Refuses
+// past MaxMessagesPerKey (ErrSessionExhausted) so the AEAD nonce never
+// approaches its collision boundary.
 func (s *Session) Encrypt(plaintext, ad []byte) ([]byte, error) {
 	if s.send == nil {
 		return nil, ErrSessionNotReady
+	}
+	if s.sendCount.Load() >= MaxMessagesPerKey {
+		return nil, ErrSessionExhausted
 	}
 	out, err := s.send.Encrypt(nil, ad, plaintext)
 	if err != nil {
 		return nil, fmt.Errorf("noise: encrypt: %w", err)
 	}
+	s.sendCount.Add(1)
 	return out, nil
 }
 
 // Decrypt opens ciphertext using the post-handshake receive cipher.
+// Refuses past MaxMessagesPerKey on the receive direction; an attacker
+// cannot push the receiver past the limit without also crafting valid
+// AEAD ciphertexts (which require the session key).
 func (s *Session) Decrypt(ciphertext, ad []byte) ([]byte, error) {
 	if s.recv == nil {
 		return nil, ErrSessionNotReady
+	}
+	if s.recvCount.Load() >= MaxMessagesPerKey {
+		return nil, ErrSessionExhausted
 	}
 	out, err := s.recv.Decrypt(nil, ad, ciphertext)
 	if err != nil {
 		return nil, fmt.Errorf("noise: decrypt: %w", err)
 	}
+	s.recvCount.Add(1)
 	return out, nil
 }
 
