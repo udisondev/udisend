@@ -101,16 +101,21 @@ func TestWebRTCTransport_ImplementsInterface(t *testing.T) {
 	var _ transport.Transport = (*transport.WebRTCTransport)(nil)
 }
 
-func TestWebRTCTransport_StubMethodsReturnNotImplemented(t *testing.T) {
+func TestWebRTCTransport_DialParsesAddress(t *testing.T) {
 	t.Parallel()
 
-	// A zero-value WebRTCTransport is unusable but its method stubs must
-	// fail loudly with ErrNotImplemented until Phase 10.5 fills them in.
+	// Dial is a pure parse-only API. With Phase 10.5 the transport
+	// is functional, so a well-formed address resolves without an
+	// underlying connection.
 	var w transport.WebRTCTransport
 
-	_, err := w.Dial("rtc:" + strings.Repeat("0", 32))
-	if !errors.Is(err, transport.ErrNotImplemented) {
-		t.Errorf("Dial err = %v, want ErrNotImplemented", err)
+	addr := "rtc:" + strings.Repeat("0", 32)
+	got, err := w.Dial(addr)
+	if err != nil {
+		t.Errorf("Dial(%q): %v", addr, err)
+	}
+	if got == nil || got.String() != addr {
+		t.Errorf("Dial roundtrip = %v, want %q", got, addr)
 	}
 }
 
