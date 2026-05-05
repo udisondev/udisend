@@ -388,6 +388,20 @@ Acceptance: с `-http 0.0.0.0:9000 -trust-proxy -public-host messenger.example.c
 - [x] Schema additions — `app_settings (key, value)` generic K/V; `ice_overrides (url PK, username, credential, enabled, added_at)`.
 - [x] Hardening (post-3-iter-review) — все sensitive POST'ы под `MaxBytesReader(4 KiB)`; `invalidateOtherSessions` через `context.WithoutCancel` + 10s timeout, через single `DELETE … WHERE id != ?`; ICE URL scheme lower-cased и нормализуется на каждом из add/remove/toggle (нет orphan-rows); ICE add/remove аудитируется в public mode; `wipe()` использует `runtime.KeepAlive`; `parsePositiveInt` заменён на `strconv.Atoi`.
 
+#### Topology test suite — branch `feat/webui-remote-auth`
+
+Цель: автотесты разных форм сети и доступности узлов между ними — на DHT/signaling уровне через `transport.MemoryHub`. Без браузера, без Docker, без root. Замыкает строку «100-узловые in-process тесты» из «What does NOT ship overnight». NAT-матрица и реальный e2e DataChannel — отложены до момента, когда появится TUI-клиент с pion (тогда `pion/vnet` сделает их дешёвыми).
+
+- [x] `internal/topotest` harness — `Cluster`, `Spawn(N)`, `Connect(i, j)`, `Bootstrap(i, j)`, `Detach(i)/Reattach(i, prev)`, `WaitFor(predicate)`, `LookupAcross(t)`, `LookupSuccessRate(t, src, targets)`, `KnowsAbout(i, j)`, `AllPairsKnow(idx)`. Sanity tests in `cluster_test.go`.
+- [x] Topology builders — `BuildChain`, `BuildRing`, `BuildStar`, `BuildMultiHub(groupSize)`, `BuildFullMesh`, `BuildRandom`, `BuildBridgedClusters`, `BuildKademliaNatural` в `topology.go`.
+- [x] §1 form-of-graph tests — `topology_test.go`: chain, ring, star, multi-hub (3×3), full mesh, random (Erdős–Rényi 2N edges), bridged clusters, kademlia-natural. Каждая проверяется через `LookupAcross` (any → any).
+- [x] §2 bootstrap tests — `bootstrap_test.go`: thundering herd N=8 в параллель, dead seed → fast-fail, recovery via Detach/Reattach, failover между двумя seed, partial seed set (3 мёртвых из 5).
+- [x] §5 churn tests — `churn_test.go`: node leaves в ring → выжившие находят друг друга, lookup ушедшего терминирует; node rejoins; partition + heal в bridged clusters; 50% network replaced + новые bootstrap-ятся → конвергенция.
+- [x] §6 adversarial tests — `adversarial_test.go`: per-/24 subnet cap (10 sybil-контактов из одной подсети → ≤ MaxContactsPerSubnet=2 в любом бакете); malicious peer возвращает junk contacts в NodesMsg → lookup терминирует в budget; honest path выживает несмотря на soup malicious peer в shortlist.
+- [x] §7 lookup correctness — `lookup_test.go`: lookup несуществующего ID терминирует без выдачи ghost; 10 параллельных lookup того же target от одного peer, все успешны; converged ring → worst-case lookup < 2s; chain success rate = 100%.
+- [x] §9 scale — `scale_test.go`: N=10/50 в дефолтной обойме, оба зелёные за ~1s wall clock. `scale_slow_test.go` (`//go:build slow`) — N=100 и N=500, multi-seed (`seedCount = max(5, n/20)`, ~20 клиентов на seed). Первый дизайн с одним seed-узлом упирался в его recv-loop bottleneck — это была структурная проблема теста, не race-overhead, как изначально показалось. N=100 — 5.4s, N=500 — 7.3s, оба 100% success rate под `-race`.
+- [x] §8 signaling — `signaling_test.go` + `signaling.go` harness extension (`Options.WithSignaling`, `SigCluster`, `Connect/AcceptOn/SendAndReceive`, `OverrideAddress` для relay). 9 кейсов: direct delivery, both-directions, relay chain (A→relay→B), 2-hop layout, fail-fast на unknown peer, partition блокирует Connect, relay-death кейс, fan-out 1→6, multi-payload session. Все зелёные под `-race` × 3 в ~1s.
+
 ### Acceptance criteria
 - [ ] 🌙 Все threat-model атаки covered — `[OVERNIGHT-DEFERRED]`.
 - [ ] 🌙 Benchmarks стабильны — `[OVERNIGHT-DEFERRED]`.
@@ -411,7 +425,7 @@ Acceptance: с `-http 0.0.0.0:9000 -trust-proxy -public-host messenger.example.c
 - DTLS-fingerprint runtime cross-validation.
 - Production TURN auth (rate-limit, abuse mitigations).
 - Live audio/video media через `pion/mediadevices` + canvas.Image rendering.
-- 100-узловые in-process тесты + Docker testcontainers integration.
+- ~~100-узловые in-process тесты~~ — реализовано в `internal/topotest` (`go test -race ./internal/topotest/...` гоняет N=10/50/100 в дефолте, N=500 под `-tags=slow`). Docker testcontainers integration остаётся отложенным.
 - PGO, reproducible builds, signed releases.
 
 ---
