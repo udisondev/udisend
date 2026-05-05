@@ -244,13 +244,19 @@ func (s *Store) DeleteAuthSessionsExcept(ctx context.Context, keepID string) err
 	return nil
 }
 
-// ListAuthSessions returns every persisted session ordered by most-recent
-// activity first. Used by the Settings → Security panel to render the
-// "active devices" list.
+// ListAuthSessionsLimit caps how many session rows ListAuthSessions
+// returns in a single call. Hard-bounded to keep the response cheap
+// even if the table grows pathologically (forgotten devices, attacker
+// session-spam before lockout).
+const ListAuthSessionsLimit = 200
+
+// ListAuthSessions returns up to ListAuthSessionsLimit persisted sessions
+// ordered by most-recent activity first. Used by the Settings → Security
+// panel to render the "active devices" list.
 func (s *Store) ListAuthSessions(ctx context.Context) ([]AuthSession, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, created_at, last_seen, remote_ip, user_agent
-		FROM auth_sessions ORDER BY last_seen DESC`)
+		FROM auth_sessions ORDER BY last_seen DESC LIMIT ?`, ListAuthSessionsLimit)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list sessions: %w", err)
 	}

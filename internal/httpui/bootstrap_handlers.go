@@ -58,12 +58,13 @@ func (s *Server) handleBootstrapAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, generalBodyMaxBytes)
 	var req struct {
 		Address string `json:"address"`
 		Note    string `json:"note"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	addr, err := normalizeBootstrapAddress(req.Address)
@@ -123,6 +124,7 @@ func (s *Server) handleBootstrapRemove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, generalBodyMaxBytes)
 	var req struct {
 		Address string `json:"address"`
 		// Source is optional — clients pass "manual" / "cache" so we can
@@ -130,7 +132,7 @@ func (s *Server) handleBootstrapRemove(w http.ResponseWriter, r *http.Request) {
 		Source string `json:"source"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	addr := strings.TrimSpace(req.Address)
@@ -175,12 +177,13 @@ func (s *Server) handleBootstrapToggle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, generalBodyMaxBytes)
 	var req struct {
 		Address string `json:"address"`
 		Enabled bool   `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	addr := strings.TrimSpace(req.Address)

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"runtime"
+	"strconv"
 
 	"golang.org/x/crypto/argon2"
 
@@ -53,6 +54,11 @@ func (s *Server) handleIdentityExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	if retry, err := s.stepUpAllow(r); err != nil {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, sensitiveBodyMaxBytes)
 	var req struct {
 		Passphrase string `json:"passphrase"`
@@ -60,7 +66,7 @@ func (s *Server) handleIdentityExport(w http.ResponseWriter, r *http.Request) {
 		Recovery   string `json:"recovery"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	if req.Passphrase == "" {
@@ -70,7 +76,8 @@ func (s *Server) handleIdentityExport(w http.ResponseWriter, r *http.Request) {
 
 	creds, err := s.mngr.Storage().GetAuthCredentials(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logger.Warn("identity export: load creds", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	if creds == nil {
@@ -79,15 +86,18 @@ func (s *Server) handleIdentityExport(w http.ResponseWriter, r *http.Request) {
 	}
 	ok, err := auth.VerifyPassphrase(creds.PassphraseHash, req.Passphrase)
 	if err != nil || !ok {
+		s.recordStepUpResult(r, false)
 		s.auditIfPublic(r, "identity_export_fail", "passphrase")
-		http.Error(w, "passphrase incorrect", http.StatusUnauthorized)
+		http.Error(w, "authentication rejected", http.StatusUnauthorized)
 		return
 	}
 	if err := s.requireSecondFactor(r.Context(), creds, req.Code, req.Recovery); err != nil {
+		s.recordStepUpResult(r, false)
 		s.auditIfPublic(r, "identity_export_fail", "step-up")
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		http.Error(w, "authentication rejected", http.StatusUnauthorized)
 		return
 	}
+	s.recordStepUpResult(r, true)
 
 	id := s.mngr.Identity()
 	seedBytes, err := id.MarshalBinary()

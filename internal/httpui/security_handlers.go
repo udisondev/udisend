@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -48,6 +49,7 @@ func (s *Server) handleAuthState(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
+	noStoreHeaders(w)
 	store := s.mngr.Storage()
 	creds, err := store.GetAuthCredentials(r.Context())
 	if err != nil {
@@ -81,6 +83,11 @@ func (s *Server) handleAuthChangePassphrase(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	if retry, err := s.stepUpAllow(r); err != nil {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, sensitiveBodyMaxBytes)
 	var req struct {
 		Old        string `json:"old"`
@@ -105,8 +112,9 @@ func (s *Server) handleAuthChangePassphrase(w http.ResponseWriter, r *http.Reque
 	}
 	ok, err := auth.VerifyPassphrase(creds.PassphraseHash, req.Old)
 	if err != nil || !ok {
+		s.recordStepUpResult(r, false)
 		s.auditIfPublic(r, "change_passphrase_fail", "")
-		http.Error(w, "current passphrase incorrect", http.StatusUnauthorized)
+		http.Error(w, "authentication rejected", http.StatusUnauthorized)
 		return
 	}
 	if len(req.New) < auth.MinPassphraseLen {
@@ -114,10 +122,12 @@ func (s *Server) handleAuthChangePassphrase(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := s.requireSecondFactor(r.Context(), creds, req.Code, req.Recovery); err != nil {
+		s.recordStepUpResult(r, false)
 		s.auditIfPublic(r, "change_passphrase_fail", "step-up")
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		http.Error(w, "authentication rejected", http.StatusUnauthorized)
 		return
 	}
+	s.recordStepUpResult(r, true)
 
 	hash, err := auth.HashPassphrase(req.New)
 	if err != nil {
@@ -149,6 +159,11 @@ var (
 	pendingTOTPStore = map[string]pendingTOTP{}
 )
 
+// pendingTOTPMax bounds the in-memory enrollment-secret table. Single
+// user system + step-up gate => an attacker with a stolen session can
+// at most fill this many slots before being told to wait.
+const pendingTOTPMax = 16
+
 func savePendingTOTP(secret []byte, ttl time.Duration) (string, error) {
 	var b [16]byte
 	if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
@@ -162,6 +177,9 @@ func savePendingTOTP(secret []byte, ttl time.Duration) (string, error) {
 		if time.Now().After(v.expiry) {
 			delete(pendingTOTPStore, k)
 		}
+	}
+	if len(pendingTOTPStore) >= pendingTOTPMax {
+		return "", errors.New("too many pending enrollments — wait or finish one")
 	}
 	dup := make([]byte, len(secret))
 	copy(dup, secret)
@@ -192,27 +210,34 @@ func (s *Server) handleTOTPStart(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, sensitiveBodyMaxBytes)
 	var req struct {
-		Code     string `json:"code"`
-		Recovery string `json:"recovery"`
+		Passphrase string `json:"passphrase"`
+		Code       string `json:"code"`
+		Recovery   string `json:"recovery"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
 
 	store := s.mngr.Storage()
 	creds, err := store.GetAuthCredentials(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logger.Warn("totp start: load creds", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	if creds == nil {
 		http.Error(w, "set a passphrase before enabling TOTP", http.StatusBadRequest)
 		return
 	}
-	if len(creds.TOTPSecret) > 0 {
-		if err := s.requireSecondFactor(r.Context(), creds, req.Code, req.Recovery); err != nil {
-			s.auditIfPublic(r, "totp_reenroll_fail", "")
-			http.Error(w, "TOTP already enrolled — confirm with the existing code or a recovery code to replace it", http.StatusUnauthorized)
-			return
-		}
+	// Always require fresh passphrase reverification — a session cookie
+	// alone must not allow a fresh enrollment that would lock out the
+	// legitimate user. When TOTP is already enrolled, the second factor
+	// is also required (re-enroll).
+	if err := s.confirmStepUp(r, req.Code, req.Recovery, req.Passphrase); err != nil {
+		s.auditIfPublic(r, "totp_enroll_step_up_fail", "")
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
 	}
 
 	secret, b32, err := auth.GenerateTOTPSecret()
@@ -278,6 +303,8 @@ func (s *Server) handleTOTPFinish(w http.ResponseWriter, r *http.Request) {
 //
 // TOTP code replay protection: the consumed step is persisted; reusing
 // the same code (even within the legitimate ±1-step window) is rejected.
+// Persistence errors fail closed — a transient DB outage MUST NOT erase
+// the replay window or the gate becomes a no-op for the next request.
 func (s *Server) requireSecondFactor(ctx context.Context, creds *storage.AuthCredentials, code, recovery string) error {
 	if creds == nil {
 		return errors.New("no credentials")
@@ -293,12 +320,17 @@ func (s *Server) requireSecondFactor(ctx context.Context, creds *storage.AuthCre
 			return errors.New("TOTP code rejected")
 		}
 		used, ok, err := s.mngr.Storage().GetSetting(ctxOrBackground(ctx), settingKeyLastTOTPStep)
-		if err == nil && ok {
+		if err != nil {
+			return fmt.Errorf("step-up: replay store unavailable: %w", err)
+		}
+		if ok {
 			if u, _ := strconv.ParseInt(used, 10, 64); u >= step {
 				return errors.New("TOTP code already used")
 			}
 		}
-		_ = s.mngr.Storage().SetSetting(ctxOrBackground(ctx), settingKeyLastTOTPStep, strconv.FormatInt(step, 10))
+		if err := s.mngr.Storage().SetSetting(ctxOrBackground(ctx), settingKeyLastTOTPStep, strconv.FormatInt(step, 10)); err != nil {
+			return fmt.Errorf("step-up: replay store unavailable: %w", err)
+		}
 
 		return nil
 	}
@@ -340,9 +372,41 @@ func ctxOrBackground(ctx context.Context) context.Context {
 	return context.Background()
 }
 
-// confirmStepUp does (1) passphrase verify (when provided) and (2)
+// stepUpAllow is the per-IP gate consulted before confirmStepUp runs
+// any Argon2id work. Reuses the /login limiter so a stolen session that
+// drives the step-up endpoints inherits the same lockout policy.
+// Returns nil if the request should proceed; non-nil = caller must
+// reject with 429 (Retry-After hint included in the message).
+func (s *Server) stepUpAllow(r *http.Request) (time.Duration, error) {
+	if s.authH == nil {
+		return 0, nil
+	}
+	ip := s.authH.clientIP(r)
+	ok, retry := s.authH.limiter.Allow(ip)
+	if !ok {
+		return retry, errors.New("too many attempts, try later")
+	}
+
+	return 0, nil
+}
+
+func (s *Server) recordStepUpResult(r *http.Request, ok bool) {
+	if s.authH == nil {
+		return
+	}
+	ip := s.authH.clientIP(r)
+	if ok {
+		s.authH.limiter.RecordSuccess(ip)
+		return
+	}
+	s.authH.limiter.RecordFail(ip)
+}
+
+// confirmStepUp does (1) passphrase verify (REQUIRED) and (2)
 // requireSecondFactor. Used by destructive operations that, alongside
-// the caller's session cookie, demand fresh proof of identity.
+// the caller's session cookie, demand fresh proof of BOTH factors.
+// A session cookie + passphrase alone is no longer enough for these
+// operations — the second factor (when enrolled) is also required.
 func (s *Server) confirmStepUp(r *http.Request, code, recovery, passphrase string) error {
 	creds, err := s.mngr.Storage().GetAuthCredentials(r.Context())
 	if err != nil {
@@ -351,14 +415,15 @@ func (s *Server) confirmStepUp(r *http.Request, code, recovery, passphrase strin
 	if creds == nil {
 		return errors.New("no credentials configured")
 	}
-	if passphrase != "" {
-		ok, err := auth.VerifyPassphrase(creds.PassphraseHash, passphrase)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return errors.New("passphrase rejected")
-		}
+	if passphrase == "" {
+		return errors.New("passphrase required")
+	}
+	ok, err := auth.VerifyPassphrase(creds.PassphraseHash, passphrase)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("authentication rejected")
 	}
 
 	return s.requireSecondFactor(r.Context(), creds, code, recovery)
@@ -369,6 +434,11 @@ func (s *Server) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	if retry, err := s.stepUpAllow(r); err != nil {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, sensitiveBodyMaxBytes)
 	var req struct {
 		Code       string `json:"code"`
@@ -376,14 +446,16 @@ func (s *Server) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 		Passphrase string `json:"passphrase"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	if err := s.confirmStepUp(r, req.Code, req.Recovery, req.Passphrase); err != nil {
+		s.recordStepUpResult(r, false)
 		s.auditIfPublic(r, "totp_disable_fail", "")
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		http.Error(w, "authentication rejected", http.StatusUnauthorized)
 		return
 	}
+	s.recordStepUpResult(r, true)
 	if err := auth.ResetTOTP(r.Context(), s.mngr.Storage()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -397,6 +469,11 @@ func (s *Server) handleRecoveryRegenerate(w http.ResponseWriter, r *http.Request
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	if retry, err := s.stepUpAllow(r); err != nil {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, sensitiveBodyMaxBytes)
 	var req struct {
 		Code       string `json:"code"`
@@ -404,14 +481,16 @@ func (s *Server) handleRecoveryRegenerate(w http.ResponseWriter, r *http.Request
 		Passphrase string `json:"passphrase"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	if err := s.confirmStepUp(r, req.Code, req.Recovery, req.Passphrase); err != nil {
+		s.recordStepUpResult(r, false)
 		s.auditIfPublic(r, "recovery_regen_fail", "")
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		http.Error(w, "authentication rejected", http.StatusUnauthorized)
 		return
 	}
+	s.recordStepUpResult(r, true)
 	creds, err := s.mngr.Storage().GetAuthCredentials(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -475,6 +554,7 @@ func (s *Server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
+	noStoreHeaders(w)
 	if !s.publicMode {
 		writeJSON(w, http.StatusOK, map[string]any{"sessions": []sessionView{}})
 		return
@@ -510,10 +590,13 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, sensitiveBodyMaxBytes)
 	var req struct {
-		PublicID string `json:"public_id"`
+		PublicID   string `json:"public_id"`
+		Passphrase string `json:"passphrase"`
+		Code       string `json:"code"`
+		Recovery   string `json:"recovery"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	pubID := strings.TrimSpace(req.PublicID)
@@ -525,9 +608,15 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session revocation is a public-mode feature", http.StatusBadRequest)
 		return
 	}
+	if err := s.confirmStepUp(r, req.Code, req.Recovery, req.Passphrase); err != nil {
+		s.auditIfPublic(r, "session_revoke_step_up_fail", "")
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
 	sessions, err := s.mngr.Storage().ListAuthSessions(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logger.Warn("session revoke: list", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	current := s.currentSessionID(r)
@@ -560,6 +649,7 @@ func (s *Server) handleAuthLog(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
+	noStoreHeaders(w)
 	limit := 50
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {

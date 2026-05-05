@@ -127,6 +127,12 @@ func (r *Resolver) Cache() *Cache { return r.cache }
 // Lookup fetches the presence record for `peer` from the DHT, validating
 // the signature and freshness. The result is cached for the configured
 // TTL.
+//
+// Replay defence: if the DHT returns a record whose IssuedAt is older
+// than (or equal to) the one we already cached, we KEEP the cached
+// version and return it. Otherwise an attacker who replays an old
+// (still signature-valid) record can pin a victim at a stale address
+// indefinitely.
 func (r *Resolver) Lookup(ctx context.Context, peer identity.Hash) (*Record, error) {
 	if rec, ok := r.cache.Get(r.now(), peer); ok {
 		return rec, nil
@@ -145,9 +151,18 @@ func (r *Resolver) Lookup(ctx context.Context, peer identity.Hash) (*Record, err
 	if rec.DestinationHash() != peer {
 		return nil, ErrIdentityMismatch
 	}
-	if _, err := r.cache.Put(r.now(), &rec); err != nil {
+	accepted, err := r.cache.Put(r.now(), &rec)
+	if err != nil {
 		return nil, err
 	}
+	if !accepted {
+		if cached, ok := r.cache.Get(r.now(), peer); ok {
+			return cached, nil
+		}
+
+		return nil, ErrNotFound
+	}
+
 	return &rec, nil
 }
 

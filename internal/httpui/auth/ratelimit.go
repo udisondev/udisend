@@ -18,11 +18,18 @@ import (
 // All state is in-memory. Cleanup is the caller's responsibility (call
 // Cleanup periodically); state for an IP that hasn't attempted in a long
 // time can be safely forgotten.
+//
+// MaxTrackedIPs hard-caps the in-memory map. When the cap is hit, new
+// IPs are still allowed (don't lock out legitimate clients) but the
+// per-IP state is not persisted — preventing memory growth via XFF
+// spoofing through a misconfigured proxy. The hourly Cleanup catches up
+// once attack traffic stops.
 type RateLimiter struct {
-	PerMinute    int
-	FailsToLock  int
-	LockDuration time.Duration
-	Now          func() time.Time
+	PerMinute     int
+	FailsToLock   int
+	LockDuration  time.Duration
+	MaxTrackedIPs int
+	Now           func() time.Time
 
 	mu    sync.Mutex
 	state map[string]*ipState
@@ -116,6 +123,13 @@ func (l *RateLimiter) ensure(ip string) *ipState {
 	}
 	st, ok := l.state[ip]
 	if !ok {
+		// Skip persistence once the cap is hit. The transient state
+		// allows the current attempt to be evaluated against zero prior
+		// activity (effectively "fresh IP") without growing the map.
+		// Cleanup() drains stale rows so this is self-healing.
+		if l.MaxTrackedIPs > 0 && len(l.state) >= l.MaxTrackedIPs {
+			return &ipState{}
+		}
 		st = &ipState{}
 		l.state[ip] = st
 	}

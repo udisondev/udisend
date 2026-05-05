@@ -18,7 +18,9 @@ func enrollTOTP(t *testing.T, p *peer, ctx context.Context, passphrase string) {
 	if err := auth.SetPassphrase(ctx, p.mngr.Storage(), passphrase); err != nil {
 		t.Fatal(err)
 	}
-	body, err := postJSON(p, "/api/auth/totp/start", map[string]any{})
+	body, err := postJSON(p, "/api/auth/totp/start", map[string]any{
+		"passphrase": passphrase,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -29,6 +29,10 @@ type Store struct {
 }
 
 // Open opens (or creates) the database at path and ensures the schema.
+// PRAGMA hardening: WAL journal mode for concurrent readers + crash-safe
+// writers; synchronous=NORMAL for crash-durable writes without the FULL
+// fsync cost; foreign_keys=ON; busy_timeout=5000ms so concurrent writers
+// (Vacuum, history-prune, message append) wait rather than fail loud.
 func Open(ctx context.Context, path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -37,6 +41,18 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("storage: ping: %w", err)
+	}
+	pragmas := []string{
+		`PRAGMA journal_mode=WAL`,
+		`PRAGMA synchronous=NORMAL`,
+		`PRAGMA foreign_keys=ON`,
+		`PRAGMA busy_timeout=5000`,
+	}
+	for _, p := range pragmas {
+		if _, err := db.ExecContext(ctx, p); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("storage: %s: %w", p, err)
+		}
 	}
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		_ = db.Close()

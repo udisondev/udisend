@@ -9,6 +9,7 @@ func (s *Server) handleNetworkStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
+	noStoreHeaders(w)
 	stats := s.mngr.NetworkStats()
 	cached, err := s.mngr.Storage().SeenPeers(r.Context(), 0)
 	if err != nil {

@@ -130,7 +130,8 @@ func TestTOTPEnrollFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body, err := postJSON(alice, "/api/auth/totp/start", map[string]any{})
+	pass := "pass-1234567890!"
+	body, err := postJSON(alice, "/api/auth/totp/start", map[string]any{"passphrase": pass})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,9 +151,19 @@ func TestTOTPEnrollFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Without passphrase → 401 (step-up).
+	resp, err := postJSONResp(alice, "/api/auth/totp/start", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("/totp/start without passphrase: status %d, want 401", resp.StatusCode)
+	}
+
 	// Bad code → 400; enroll_id is consumed on the failed attempt, so
 	// /finish requires a fresh /start to retry.
-	resp, err := postJSONResp(alice, "/api/auth/totp/finish", map[string]any{
+	resp, err = postJSONResp(alice, "/api/auth/totp/finish", map[string]any{
 		"enroll_id": start.EnrollID, "code": "000000",
 	})
 	if err != nil {
@@ -164,7 +175,7 @@ func TestTOTPEnrollFlow(t *testing.T) {
 	}
 
 	// Real code → success + recovery codes returned (fresh enroll cycle).
-	body, err = postJSON(alice, "/api/auth/totp/start", map[string]any{})
+	body, err = postJSON(alice, "/api/auth/totp/start", map[string]any{"passphrase": pass})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,8 +243,19 @@ func TestTOTPDisable_RequiresStepUp(t *testing.T) {
 		t.Fatalf("passphrase-only must reject; got status %d", resp.StatusCode)
 	}
 
-	// Current TOTP code + passphrase succeeds.
+	// TOTP code without passphrase ALSO must not disable.
 	good := auth.CurrentTOTP(creds.TOTPSecret, time.Now().Add(2*time.Second))
+	resp, err = postJSONResp(alice, "/api/auth/totp/disable", map[string]any{"code": good})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("code-only must reject; got %d", resp.StatusCode)
+	}
+
+	// passphrase + TOTP code: succeeds.
+	good = auth.CurrentTOTP(creds.TOTPSecret, time.Now().Add(35*time.Second))
 	if _, err := postJSON(alice, "/api/auth/totp/disable", map[string]any{
 		"passphrase": "pass-1234567890!", "code": good,
 	}); err != nil {
@@ -265,7 +287,7 @@ func TestRecoveryRegen_ReplacesCodes(t *testing.T) {
 		t.Fatalf("passphrase-only must reject; got %d", resp.StatusCode)
 	}
 
-	good := auth.CurrentTOTP(creds.TOTPSecret, time.Now().Add(2*time.Second))
+	good := auth.CurrentTOTP(creds.TOTPSecret, time.Now().Add(35*time.Second))
 	body, err := postJSON(alice, "/api/auth/recovery/regenerate", map[string]any{
 		"passphrase": "pass-1234567890!", "code": good,
 	})

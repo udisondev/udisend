@@ -124,6 +124,9 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.AuthToken == "" {
 		cfg.AuthToken = randomToken()
 	}
+	if err := validatePublicModeConfig(cfg); err != nil {
+		return nil, err
+	}
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return nil, fmt.Errorf("httpui: listen: %w", err)
@@ -151,9 +154,14 @@ func NewServer(cfg Config) (*Server, error) {
 			return nil, errors.New("httpui: public mode requires messenger with storage")
 		}
 		s.authH = &authHandlers{
-			store:        store,
-			sessions:     auth.NewSessions(store, auth.SessionsConfig{}),
-			limiter:      &auth.RateLimiter{PerMinute: 5, FailsToLock: 20, LockDuration: 15 * time.Minute},
+			store:    store,
+			sessions: auth.NewSessions(store, auth.SessionsConfig{}),
+			limiter: &auth.RateLimiter{
+				PerMinute:     5,
+				FailsToLock:   20,
+				LockDuration:  15 * time.Minute,
+				MaxTrackedIPs: 50000,
+			},
 			secureCookie: true,
 			trustProxy:   cfg.TrustProxy,
 			now:          time.Now,
@@ -225,8 +233,16 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	s.server = &http.Server{
-		Handler:           mux,
+		Handler: s.secureHeaders(mux),
+		// Slowloris defence + idle bound. WriteTimeout is intentionally
+		// zero because /api/events is a long-lived SSE stream — set it
+		// and the stream gets cut on the first keepalive.
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+	if cfg.TLSCert != "" && cfg.TLSKey != "" {
+		s.server.TLSConfig = hardenedTLSConfig()
 	}
 	cfg.Messenger.SetIncomingHandler(s.onIncomingSession)
 	cfg.Messenger.SetPeerOnlineHandler(s.onPeerOnline)
@@ -447,8 +463,26 @@ func tokenEqual(got, want string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
+// generalBodyMaxBytes caps every JSON-decoded POST body that does not
+// front Argon2id (which has its own tighter cap). 64 KiB is generous
+// for any current handler — contact aliases, bootstrap addresses, ICE
+// URLs etc. all live in tens of bytes.
+const generalBodyMaxBytes = 64 * 1024
+
+// signalBodyMaxBytes caps WebRTC SDP/ICE relay payloads. SDP offers run
+// to a few KiB even with many candidates; 256 KiB is the upper bound
+// above which the payload is almost certainly malicious.
+const signalBodyMaxBytes = 256 * 1024
+
+// historyBodyMaxBytes bounds /api/append-history. The browser owns chat
+// framing; legitimate text + base64 metadata fits comfortably below
+// this cap. Larger payloads should arrive via DataChannel file flows,
+// not the persistence endpoint.
+const historyBodyMaxBytes = 1 * 1024 * 1024
+
 // handleSnapshot returns identity + contacts + recent history per peer.
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
+	noStoreHeaders(w)
 	type contactView struct {
 		Hash        string `json:"hash"`
 		Alias       string `json:"alias"`
@@ -504,12 +538,13 @@ func (s *Server) handleContactAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, generalBodyMaxBytes)
 	var req struct {
 		Hash  string `json:"hash"`
 		Alias string `json:"alias"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	h, err := identity.ParseHash(strings.TrimSpace(req.Hash))
@@ -531,6 +566,7 @@ func (s *Server) handleContactVerify(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, generalBodyMaxBytes)
 	var req struct {
 		Hash     string `json:"hash"`
 		Verified bool   `json:"verified"`
@@ -556,6 +592,7 @@ func (s *Server) handleContactRename(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, generalBodyMaxBytes)
 	var req struct {
 		Hash  string `json:"hash"`
 		Alias string `json:"alias"`
@@ -585,6 +622,7 @@ func (s *Server) handleContactDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, generalBodyMaxBytes)
 	var req struct {
 		Hash        string `json:"hash"`
 		WipeHistory bool   `json:"wipe_history"`
@@ -610,6 +648,7 @@ func (s *Server) handleContactDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	noStoreHeaders(w)
 	hashStr := r.URL.Query().Get("peer")
 	h, err := identity.ParseHash(hashStr)
 	if err != nil {
@@ -649,6 +688,7 @@ func (s *Server) handleAppendHistory(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, historyBodyMaxBytes)
 	var req struct {
 		Peer      string `json:"peer"`
 		Direction string `json:"direction"`

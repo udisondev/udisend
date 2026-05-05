@@ -13,7 +13,26 @@
 //     fullscreen / minimized layouts.
 
 const TOKEN = new URLSearchParams(location.search).get('token') || sessionStorage.getItem('udisend_token');
-if (TOKEN) sessionStorage.setItem('udisend_token', TOKEN);
+if (TOKEN) {
+  sessionStorage.setItem('udisend_token', TOKEN);
+  // Strip the token from the visible URL so it doesn't leak into shell
+  // history, browser history shares, screenshots, or Referer headers
+  // on outbound link clicks. The value is kept in sessionStorage and
+  // sent via Authorization: Bearer on each fetch.
+  if (location.search.includes('token=')) {
+    try {
+      const url = new URL(location.href);
+      url.searchParams.delete('token');
+      history.replaceState(null, '', url.pathname + url.search + url.hash);
+    } catch (e) { /* old browser, accept the leak */ }
+  }
+}
+
+// Hard caps on peer-controlled buffers — a malicious or buggy peer
+// must NOT be able to OOM the tab by streaming chunks or candidates.
+const MAX_INCOMING_FILE_BYTES = 100 * 1024 * 1024;   // 100 MiB per transfer
+const MAX_INCOMING_FILES_PER_PEER = 8;
+const MAX_PENDING_ICE_CANDIDATES = 64;
 
 const STATE = {
   identity: null,
@@ -689,8 +708,13 @@ async function handleSignalRecv(peerHash, sessionId, kind, payload) {
       flushPending(peer);
     } else if (kind === 'ice') {
       const cand = JSON.parse(payload);
-      if (peer.haveRemoteDesc) await peer.pc.addIceCandidate(cand);
-      else peer.pendingCandidates.push(cand);
+      if (peer.haveRemoteDesc) {
+        await peer.pc.addIceCandidate(cand);
+      } else if (peer.pendingCandidates.length < MAX_PENDING_ICE_CANDIDATES) {
+        peer.pendingCandidates.push(cand);
+      } else {
+        console.warn('dropping ICE candidate: pending queue full', peerHash);
+      }
     } else if (kind === 'bye') {
       onSessionClosed(peerHash, sessionId);
     }
@@ -747,13 +771,28 @@ function onDataChannelMessage(peer, data) {
         break;
       }
       case 'file_offer': {
-        peer.incomingFiles.set(msg.id, { name: msg.name, size: msg.size, mime: msg.mime, parts: [] });
+        if (peer.incomingFiles.size >= MAX_INCOMING_FILES_PER_PEER) {
+          systemMsg(`Refused incoming file: too many concurrent transfers from ${aliasOf(peer.hash)}.`);
+          return;
+        }
+        const advertisedSize = Number(msg.size) || 0;
+        if (advertisedSize > MAX_INCOMING_FILE_BYTES) {
+          systemMsg(`Refused incoming file: ${humanSize(advertisedSize)} exceeds the ${humanSize(MAX_INCOMING_FILE_BYTES)} limit.`);
+          return;
+        }
+        peer.incomingFiles.set(msg.id, {
+          name: String(msg.name || 'file').slice(0, 200),
+          size: advertisedSize,
+          mime: msg.mime,
+          parts: [],
+          received: 0,
+        });
         if (peer.hash === STATE.selectedHash) {
-          appendIncomingMessage(`incoming file: ${msg.name} (${humanSize(msg.size)})`, new Date(), 100);
+          appendIncomingMessage(`incoming file: ${msg.name} (${humanSize(advertisedSize)})`, new Date(), 100);
         }
         updatePreview(peer.hash, '📎 ' + msg.name, 'in', Date.now(), peer.hash !== STATE.selectedHash);
         if (peer.hash !== STATE.selectedHash) {
-          maybeNotify(`${aliasOf(peer.hash)} sent a file`, `${msg.name} · ${humanSize(msg.size)}`, peer.hash);
+          maybeNotify(`${aliasOf(peer.hash)} sent a file`, `${msg.name} · ${humanSize(advertisedSize)}`, peer.hash);
         }
         break;
       }
@@ -799,7 +838,17 @@ function onDataChannelMessage(peer, data) {
   const id = new TextDecoder().decode(view.slice(0, 16));
   const f = peer.incomingFiles.get(id);
   if (!f) return;
-  f.parts.push(view.slice(16));
+  const chunk = view.slice(16);
+  // Drop the file if cumulative bytes exceed the cap (advertised size or
+  // hard 100 MiB). Refusing the rest prevents OOM via runaway senders.
+  const cap = Math.min(f.size > 0 ? f.size : MAX_INCOMING_FILE_BYTES, MAX_INCOMING_FILE_BYTES);
+  if (f.received + chunk.byteLength > cap) {
+    peer.incomingFiles.delete(id);
+    systemMsg(`Aborted incoming file from ${aliasOf(peer.hash)}: exceeded ${humanSize(cap)}.`);
+    return;
+  }
+  f.parts.push(chunk);
+  f.received += chunk.byteLength;
 }
 
 function dcSend(peer, obj) {

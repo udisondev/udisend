@@ -267,13 +267,17 @@ func (h *authHandlers) sessionCookie(value string, maxAge int) *http.Cookie {
 }
 
 // clientIP returns the request's apparent source IP. Trusts the rightmost
-// value in X-Forwarded-For only when h.trustProxy is set; otherwise falls
-// back to the TCP peer address. Strips the port.
+// clientIP returns the originating client's IP. The leftmost entry in
+// X-Forwarded-For is the originating client per RFC 7239 conventions
+// (each proxy appends, so the head is the public-facing client). We
+// only honour X-Forwarded-For when h.trustProxy is set — otherwise an
+// attacker could lie about their IP and bypass the rate-limiter, or
+// poison the audit log.
 func (h *authHandlers) clientIP(r *http.Request) string {
 	if h.trustProxy {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
-			ip := strings.TrimSpace(parts[len(parts)-1])
+			ip := strings.TrimSpace(parts[0])
 			if ip != "" {
 				return ip
 			}
