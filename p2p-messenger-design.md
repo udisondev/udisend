@@ -495,7 +495,9 @@ ApplicationMessage {
 - **`golang.org/x/crypto/hkdf`** — KDF.
 - **`pkg/wire`** (in-tree) — uvarint+TLV binary wire format для DHT, presence, signaling envelope, signed SDP. Источник правды для frame-формата; нулевые внешние зависимости (см. decisions log 2026-05-01).
 
-> **`pion/webrtc` НЕ используется на стороне messenger-бинаря (v2-сдвиг 2026-05-02).** Go подписывает SDP/ICE через `pkg/webrtc.SignedSDP` и пересылает их через `signaling.Channel`, но саму `RTCPeerConnection` держит браузер. См. §2 «Двухслойная модель».
+> **`pion/webrtc` на messenger-бинаре vs network-узле (Phase 10 sync 2026-05-05):**
+> - **Messenger-бинарь** — pion/webrtc НЕ используется (v2-сдвиг 2026-05-02). Go подписывает chat-SDP/ICE через `pkg/webrtc.SignedSDP` и пересылает через `signaling.Channel`, но саму `RTCPeerConnection` для chat-трафика держит браузер. См. §2 «Двухслойная модель».
+> - **Network-узел** — `pion/webrtc/v4` ИСПОЛЬЗУЕТСЯ для inter-node mesh (Phase 10). Каждый узел держит K=8 persistent DataChannel'ов к выбранным пирам поверх UDP-транспорта, обеспечивая отказоустойчивость графа связности при выпадении значительной части публичных узлов. См. ROADMAP.md § Phase 10. Mesh handshake (offer/answer/ICE между узлами) идёт через тот же `signaling.Channel` (Noise XK end-to-end) что и chat-сигналинг — отдельного протокола нет, добавлены только новые `InnerType` коды (`InnerMeshOffer/Answer/ICE`).
 
 ### Браузерная сторона (UI + WebRTC)
 
