@@ -68,6 +68,20 @@ func (r dhtRouter) NextHop(ctx context.Context, target identity.Hash) (net.Addr,
 	return nil, false
 }
 
+// LocalNextHop is the cache-only path used for forwarding envelopes
+// originated by remote peers (relay path). A miss must drop rather
+// than trigger iterative DHT search — the iterative path can spawn
+// up to alpha × disjoint outbound FIND_NODEs per request, turning
+// any stranger into a bandwidth-amplification source.
+func (r dhtRouter) LocalNextHop(target identity.Hash) (net.Addr, bool) {
+	closest := r.backend.Closest(target, 1)
+	if len(closest) > 0 && closest[0].ID == target {
+		return closest[0].Addr, true
+	}
+
+	return nil, false
+}
+
 // nodeRouting wraps *dht.Node into routingBackend.
 type nodeRouting struct{ n *dht.Node }
 

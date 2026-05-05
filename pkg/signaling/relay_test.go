@@ -36,6 +36,14 @@ func (f *fakeRouter) put(target identity.Hash, addr net.Addr) {
 }
 
 func (f *fakeRouter) NextHop(_ context.Context, target identity.Hash) (net.Addr, bool) {
+	return f.lookup(target)
+}
+
+func (f *fakeRouter) LocalNextHop(target identity.Hash) (net.Addr, bool) {
+	return f.lookup(target)
+}
+
+func (f *fakeRouter) lookup(target identity.Hash) (net.Addr, bool) {
 	f.mu.Lock()
 	addr, ok := f.table[target]
 	f.mu.Unlock()

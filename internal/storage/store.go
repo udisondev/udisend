@@ -338,8 +338,28 @@ type OutboxItem struct {
 	CreatedAt   time.Time
 }
 
-// AddOutboxItem queues a payload for `peer`.
+// MaxOutboxItemsPerPeer bounds how many pending items we will queue for
+// a single recipient. An offline contact accumulates messages here
+// while waiting for FlushOutboxOnce to find them online; without a cap
+// a chatty UI could grow the table without bound.
+const MaxOutboxItemsPerPeer = 1000
+
+// ErrOutboxFull is returned by AddOutboxItem when the cap is reached.
+var ErrOutboxFull = errors.New("storage: outbox full for peer")
+
+// AddOutboxItem queues a payload for `peer`. Refuses when the per-peer
+// cap is reached — the caller should surface the error so the sender
+// knows the message was not persisted.
 func (s *Store) AddOutboxItem(ctx context.Context, peer identity.Hash, payload []byte) (int64, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM outbox WHERE peer_hash = ?`, peer.String()).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("storage: count outbox: %w", err)
+	}
+	if n >= MaxOutboxItemsPerPeer {
+		return 0, ErrOutboxFull
+	}
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO outbox (peer_hash, payload, created_at) VALUES (?, ?, ?)
 	`, peer.String(), payload, time.Now().Unix())
@@ -348,6 +368,20 @@ func (s *Store) AddOutboxItem(ctx context.Context, peer identity.Hash, payload [
 	}
 
 	return res.LastInsertId()
+}
+
+// PruneOutboxOlderThan deletes outbox rows with created_at older than
+// cutoff (unix seconds). Returns rows deleted. Used by messenger's
+// background pump to drop forever-pending items.
+func (s *Store) PruneOutboxOlderThan(ctx context.Context, cutoffUnix int64) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM outbox WHERE created_at < ?`, cutoffUnix)
+	if err != nil {
+		return 0, fmt.Errorf("storage: prune outbox: %w", err)
+	}
+	n, _ := res.RowsAffected()
+
+	return int(n), nil
 }
 
 // PendingForPeer lists outbox items for a single peer in FIFO order.

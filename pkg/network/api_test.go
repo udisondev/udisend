@@ -71,13 +71,26 @@ func twoNodes(t *testing.T) (*network.Node, *network.Node) {
 	goRun(t, "B", b.Run, ctx)
 
 	// Give the DHT a moment to exchange PING/NODES so each side can
-	// resolve the other's presence record.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	// resolve the other's presence record. Both directions must
+	// converge — Phase 9 closed the cold-cache window in
+	// verifySenderIdentity, so the responder side now refuses
+	// channel install if it cannot resolve the initiator's hash.
+	deadline := time.Now().Add(8 * time.Second)
+	bothResolved := func() bool {
 		lctx, lcancel := context.WithTimeout(ctx, 250*time.Millisecond)
 		_, err := a.Lookup(lctx, b.Identity().Public().DestinationHash())
 		lcancel()
-		if err == nil {
+		if err != nil {
+			return false
+		}
+		lctx, lcancel = context.WithTimeout(ctx, 250*time.Millisecond)
+		_, err = b.Lookup(lctx, a.Identity().Public().DestinationHash())
+		lcancel()
+
+		return err == nil
+	}
+	for time.Now().Before(deadline) {
+		if bothResolved() {
 			return a, b
 		}
 		time.Sleep(100 * time.Millisecond)

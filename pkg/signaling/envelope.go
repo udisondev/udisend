@@ -23,12 +23,12 @@ import (
 	"github.com/udisondev/udisend/pkg/wire"
 )
 
-// Wire format version. v2 adds the `hops` byte for hop-by-hop relay
-// loop-prevention; older v1 envelopes are still accepted (hops treated
-// as 0).
+// Wire format version. v2 carries the `hops` byte for hop-by-hop relay
+// loop-prevention. Phase 9 audit: v1 envelopes (no hops counter)
+// previously decoded ok with Hops=0, which let a v1-claiming attacker
+// have us relay indefinitely. v1 is now rejected outright.
 const (
-	envelopeVersion   byte = 0x02
-	envelopeVersionV1 byte = 0x01
+	envelopeVersion byte = 0x02
 
 	// MaxHops bounds how many relay hops an envelope may traverse before
 	// being dropped. design.md §4 (hop-by-hop signaling routing).
@@ -41,10 +41,14 @@ const SessionIDSize = 16
 // SessionID identifies a single signaling session between two peers.
 type SessionID [SessionIDSize]byte
 
-// NewSessionID returns a fresh random session id.
+// NewSessionID returns a fresh random session id. Panics on RNG
+// failure — a zero session id would collide across in-flight
+// signaling sessions and break per-peer demux.
 func NewSessionID() SessionID {
 	var s SessionID
-	_, _ = rand.Read(s[:])
+	if _, err := rand.Read(s[:]); err != nil {
+		panic("signaling: crypto/rand: " + err.Error())
+	}
 	return s
 }
 
@@ -122,7 +126,7 @@ func DecodeBody(payload []byte) (*Envelope, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}
-	if ver != envelopeVersion && ver != envelopeVersionV1 {
+	if ver != envelopeVersion {
 		return nil, fmt.Errorf("%w: version=%d", ErrEnvelope, ver)
 	}
 	env := &Envelope{}
@@ -135,13 +139,11 @@ func DecodeBody(payload []byte) (*Envelope, error) {
 	if err := b.ReadFixedInto(env.SessionID[:]); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}
-	if ver >= envelopeVersion {
-		hops, err := b.ReadUint8()
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
-		}
-		env.Hops = hops
+	hops, err := b.ReadUint8()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}
+	env.Hops = hops
 	innerType, err := b.ReadUint8()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)

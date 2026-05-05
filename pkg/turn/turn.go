@@ -151,10 +151,18 @@ func (s *Server) Close() error { return s.server.Close() }
 
 // validUsername parses an RFC 7635-style ephemeral TURN username
 // "<expiry-unix>:<user>" and rejects malformed, expired, or
-// far-future entries (cap = maxLifetime past now).
+// far-future entries (cap = maxLifetime past now). The user portion
+// must be non-empty so an attacker cannot drive the credential cache
+// with `123:` collisions.
 func validUsername(username string, maxLifetime time.Duration) bool {
 	colon := strings.IndexByte(username, ':')
 	if colon <= 0 {
+		return false
+	}
+	if colon+1 >= len(username) {
+		return false
+	}
+	if len(username) > 256 {
 		return false
 	}
 	exp, err := strconv.ParseInt(username[:colon], 10, 64)

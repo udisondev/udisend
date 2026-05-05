@@ -27,10 +27,13 @@ import (
 // reject frames with a different version.
 const CurrentVersion byte = 0x01
 
-// MaxFrameSize caps the size of any single decoded frame. Production traffic
-// should fit comfortably below this; the limit exists to stop a malicious
-// peer from forcing an OOM during decode.
-const MaxFrameSize = 1 << 20 // 1 MiB
+// MaxFrameSize caps the size of any single decoded frame. Lowered from
+// 1 MiB (Phase 9 audit) to 64 KiB which is more than enough for any
+// legitimate DHT message — NODES with K=20 contacts is ~1 KiB, STORE
+// is capped at 4 KiB by MaxStoreValue, presence records are ~600 B.
+// 64 KiB is the natural UDP payload ceiling on most systems anyway,
+// so no legitimate frame ever exceeded it.
+const MaxFrameSize = 64 * 1024
 
 // Errors returned by the package.
 var (

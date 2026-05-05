@@ -126,10 +126,18 @@ type Node struct {
 }
 
 // NewNode wires up a node but does not start the receive loop — call Run
-// for that.
+// for that. Store, when nil, falls back to a bare MemoryStore which
+// performs NO write validation — only suitable for tests / in-process
+// experiments. Production callers in pkg/network wrap the store with
+// presence.NewRateLimitedStore to reject unsigned records. The Phase 9
+// audit flagged the silent default as a foot-gun; the warning makes
+// the trade-off visible in operator logs.
 func NewNode(id *identity.Identity, t transport.Transport, store Store, cfg Config) *Node {
 	cfg.defaults()
 	if store == nil {
+		if cfg.Logger != nil {
+			cfg.Logger.Warn("dht: NewNode called with nil Store — using unvalidated MemoryStore (insecure outside tests)")
+		}
 		store = NewMemoryStore(nil)
 	}
 	return &Node{
@@ -210,6 +218,12 @@ func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
 		n.cfg.Logger.Debug("dht: decode failed", "err", err)
 		return
 	}
+	// Phase 9: routing-table inserts are bounded by per-/24-prefix cap
+	// (bucket.add → subnetOver) so a single attacker IP cannot fill a
+	// bucket with arbitrary NodeIDs. We still refresh on both request
+	// and response paths because dropping requests-side adds breaks
+	// Kademlia convergence (a fresh peer otherwise never appears in
+	// the routing table of an unresponsive bootstrap node).
 	switch m := msg.(type) {
 	case *PingMsg:
 		n.refreshContact(m.Header, pkt.From)
@@ -457,10 +471,19 @@ func (n *Node) PutValue(ctx context.Context, key NodeID, value []byte) error {
 		return nil
 	}
 
+	// Bounded fan-out: K=20 closest + Siblings=20 = up to 40 concurrent
+	// outbound STOREs without a cap. A misbehaving target cluster can
+	// keep them all blocked on RequestTimeout. PutValueParallelism
+	// caps in-flight at 8, which is plenty since any single success
+	// satisfies the "value is stored somewhere reachable" contract.
+	const putValueParallelism = 8
 	var wg sync.WaitGroup
 	errs := make([]error, len(targets))
+	sem := make(chan struct{}, putValueParallelism)
 	for i, c := range targets {
 		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			storeCtx, cancel := context.WithTimeout(ctx, n.cfg.RequestTimeout)
 			defer cancel()
 			if err := n.Store(storeCtx, c.Addr, key, value); err != nil {
@@ -773,6 +796,14 @@ func encodeContacts(cs []Contact) []EncodedContact {
 	return out
 }
 
+// decodeContacts turns wire EncodedContacts into runtime Contacts and
+// adds them to the routing table. Phase 9: bucket.add now enforces a
+// per-/24 (IPv4) or /64 (IPv6) cap, so a peer that lists 20
+// attacker-IDs all colocated on one host cannot fill a bucket — at
+// most MaxContactsPerSubnet of those land. The cap is the actual
+// sybil defence; the caller (iterativeFind) uses the returned slice
+// to drive subsequent queries regardless of whether the entries made
+// it into the bucket.
 func (n *Node) decodeContacts(cs []EncodedContact) []Contact {
 	out := make([]Contact, 0, len(cs))
 	for _, ec := range cs {

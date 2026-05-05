@@ -25,7 +25,13 @@ type SourcedStore interface {
 	PutFromSource(key NodeID, value []byte, ttl time.Duration, source net.Addr)
 }
 
-// MemoryStore is the default in-memory Store with TTL eviction.
+// MemoryStore is an in-memory Store with TTL eviction. It performs NO
+// validation on Put — every write is accepted. For production use the
+// caller MUST wrap this (or any other plain Store) in a validator
+// such as `presence.NewRateLimitedStore` which rejects unsigned
+// records and rate-limits per source. The Phase 9 audit flagged that
+// a bare MemoryStore on the network was indistinguishable from a
+// public bulletin-board.
 type MemoryStore struct {
 	mu      sync.RWMutex
 	entries map[NodeID]storeEntry

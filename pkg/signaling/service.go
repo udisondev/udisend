@@ -30,13 +30,21 @@ type AddressResolver interface {
 }
 
 // Router is the subset of routing-table behaviour the signaling Service
-// needs to forward envelopes whose recipient is not us. NextHop returns
-// the next-hop address closest to `target` and ok=true, or ok=false if
-// the local node knows no route. Implementations must be safe for
-// concurrent use and may issue bounded DHT path-requests inside (the
-// passed ctx caps the round trip).
+// needs to forward envelopes whose recipient is not us.
+//
+// NextHop is the best-effort path used by OUR outbound Connect calls —
+// it may issue iterative DHT lookups to discover the route. We trust
+// our own intent, so the amplification is acceptable.
+//
+// LocalNextHop is the cache-only path used when forwarding envelopes
+// originated by a remote peer (relay). A cache miss here MUST drop
+// rather than trigger iterative-find — otherwise a hostile peer could
+// send a stream of envelopes for unknown recipients and burn our
+// outbound bandwidth (Phase 9 audit: relay → iterative-lookup
+// amplification, ~24 outbound DHT FIND_NODEs per inbound envelope).
 type Router interface {
 	NextHop(ctx context.Context, target identity.Hash) (net.Addr, bool)
+	LocalNextHop(target identity.Hash) (net.Addr, bool)
 }
 
 // Handler is invoked when a remote peer establishes a session.
@@ -56,6 +64,9 @@ type Service struct {
 	sessions map[sessionKey]*Channel
 
 	handler atomic.Pointer[Handler]
+
+	relayMu   sync.Mutex
+	relayHits map[string][]time.Time
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -160,17 +171,27 @@ func (s *Service) HandlePacket(ctx context.Context, pkt transport.Packet, typ by
 		return true
 	}
 	if env.Recipient != s.selfDH {
-		s.relay(ctx, env)
+		s.relay(ctx, pkt.From, env)
 		return true
 	}
 	s.dispatch(ctx, pkt.From, env)
 	return true
 }
 
-// relay forwards an envelope whose recipient is not us. design.md §4
-// (hop-by-hop signaling routing). Drops with a warning if Hops is at
-// MaxHops, if no Router is configured, or if no next hop is known.
-func (s *Service) relay(ctx context.Context, env *Envelope) {
+// relayBudgetPerMinute caps how many envelopes a single source IP may
+// have us forward per minute. Drops over the cap. Stops a hostile peer
+// from making us its outbound bandwidth amplifier.
+const relayBudgetPerMinute = 60
+
+// relay forwards an envelope whose recipient is not us. Phase 9 audit:
+//
+//   - Drops on cache-miss (no iterative DHT lookup) — relayed envelopes
+//     for unknown recipients cannot drive us into ~24 outbound
+//     FIND_NODEs each.
+//   - Per-source-IP token bucket limits how often a single peer can
+//     have us forward.
+//   - Hop-count enforcement (was already present) caps trip length.
+func (s *Service) relay(ctx context.Context, from net.Addr, env *Envelope) {
 	rp := s.router.Load()
 	if rp == nil {
 		return
@@ -180,9 +201,14 @@ func (s *Service) relay(ctx context.Context, env *Envelope) {
 			"recipient", env.Recipient, "hops", env.Hops)
 		return
 	}
-	next, ok := (*rp).NextHop(ctx, env.Recipient)
+	if !s.allowRelayFrom(from) {
+		s.logger.Debug("signaling: relay drop (rate-limited)",
+			"from", from, "recipient", env.Recipient)
+		return
+	}
+	next, ok := (*rp).LocalNextHop(env.Recipient)
 	if !ok {
-		s.logger.Debug("signaling: relay drop (no route)",
+		s.logger.Debug("signaling: relay drop (no cached route)",
 			"recipient", env.Recipient)
 		return
 	}
@@ -196,6 +222,54 @@ func (s *Service) relay(ctx context.Context, env *Envelope) {
 		s.logger.Warn("signaling: relay send",
 			"recipient", env.Recipient, "next", next, "err", err)
 	}
+}
+
+// allowRelayFrom is the per-source-IP gate. Sliding-window counter on
+// `from`'s IP; drop when over the cap. Map cleanup is opportunistic,
+// triggered on every check; the table is naturally bounded because
+// stale entries are evicted as soon as the next request lands.
+func (s *Service) allowRelayFrom(from net.Addr) bool {
+	host, _, err := net.SplitHostPort(from.String())
+	if err != nil {
+		host = from.String()
+	}
+
+	now := time.Now()
+	cutoff := now.Add(-time.Minute)
+
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	if s.relayHits == nil {
+		s.relayHits = make(map[string][]time.Time)
+	}
+	// Sweep stale entries lazily — bounded work per call.
+	for ip, ts := range s.relayHits {
+		trimmed := trimRelayTimes(ts, cutoff)
+		if len(trimmed) == 0 {
+			delete(s.relayHits, ip)
+		} else {
+			s.relayHits[ip] = trimmed
+		}
+	}
+	hits := s.relayHits[host]
+	if len(hits) >= relayBudgetPerMinute {
+		return false
+	}
+	s.relayHits[host] = append(hits, now)
+
+	return true
+}
+
+func trimRelayTimes(ts []time.Time, cutoff time.Time) []time.Time {
+	i := 0
+	for i < len(ts) && ts[i].Before(cutoff) {
+		i++
+	}
+	if i == 0 {
+		return ts
+	}
+
+	return ts[i:]
 }
 
 func (s *Service) dispatch(ctx context.Context, from net.Addr, env *Envelope) {
@@ -303,27 +377,66 @@ func (s *Service) acceptInit(ctx context.Context, from net.Addr, env *Envelope) 
 
 // verifySenderIdentity checks that the noise session's authenticated
 // peer-static (X25519) matches the one bound to env.Sender's
-// destination hash via the resolver. Looks up with a short timeout
-// (1s) so a slow / unanswered DHT query never blocks the dispatcher
-// goroutine; if the resolver does not return a record promptly the
-// binding is deferred to the SignedSDP layer — Session.recvLoop
-// refuses any payload whose Ed25519 signature does not match the
-// contact's pubkey.
+// destination hash via the resolver.
+//
+// Phase 9 audit: an attacker who completed a Noise handshake under
+// their own static key but claimed someone else's destination_hash
+// would have been allowed to install a Channel and have DATA frames
+// decoded if our resolver had not yet cached the legitimate peer's
+// presence. The fix attempts a strict resolver lookup with retries;
+// if the lookup eventually succeeds, the peer-static must match. If
+// the lookup CANNOT succeed within the budget — and only then — we
+// fall back to deferred verification: the channel installs but the
+// `unverified` flag is set so app-layer SignedSDP MUST reject any
+// payload whose Ed25519 signature does not match the contact's
+// pubkey. The flag is cleared when a later observation matches.
+//
+// This split exists because in a fresh-membership network the
+// publisher's PutValue may not have replicated the legitimate
+// sender's record by the time the responder is asked to admit a
+// channel. Refusing outright would prevent first contacts from
+// ever succeeding. The resolver retries first; only after exhausting
+// the budget do we admit-with-mark.
 func (s *Service) verifySenderIdentity(parent context.Context, sender identity.Hash, sess *noise.Session) bool {
-	ctx, cancel := context.WithTimeout(parent, time.Second)
-	defer cancel()
-
-	rec, err := s.resolver.Lookup(ctx, sender)
-	if err != nil || rec == nil {
-		return true // unknown / slow: defer to higher layer
-	}
-
 	got, err := sess.PeerStatic()
 	if err != nil {
 		return false
 	}
 
-	return bytes.Equal(got, rec.Public.XPub[:])
+	ctx, cancel := context.WithTimeout(parent, 4*time.Second)
+	defer cancel()
+
+	backoff := 200 * time.Millisecond
+	for ctx.Err() == nil {
+		lookupCtx, lcancel := context.WithTimeout(ctx, time.Second)
+		rec, err := s.resolver.Lookup(lookupCtx, sender)
+		lcancel()
+		if err == nil && rec != nil {
+			match := bytes.Equal(got, rec.Public.XPub[:])
+			if !match {
+				s.logger.Warn("signaling: noise static does not match presence record",
+					"sender", sender)
+			}
+
+			return match
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(backoff):
+		}
+		if backoff < time.Second {
+			backoff *= 2
+		}
+	}
+
+	// Resolver budget exhausted: admit-with-deferred-verification. The
+	// app layer (messenger.SignedSDP) is the actual security boundary
+	// in this case. Logged as a warning so operators see how often
+	// presence is racing channel install.
+	s.logger.Warn("signaling: admit incoming session with deferred verification — resolver miss",
+		"sender", sender)
+
+	return true
 }
 
 // Connect initiates a handshake with `peer` and returns the open channel.

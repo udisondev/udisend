@@ -30,10 +30,17 @@ const TxIDSize = 16
 // TxID is a random transaction identifier matching requests to responses.
 type TxID [TxIDSize]byte
 
-// NewTxID returns a fresh random TxID.
+// NewTxID returns a fresh random TxID. Panics if the OS RNG fails — a
+// zero TxID would cause request/response collision (multiple in-flight
+// requests sharing a key) and crypto-randomness failure is the only
+// thing that could produce one. crypto/rand is documented as panic-on-
+// failure-equivalent (process should crash), so propagating that
+// outcome here is correct.
 func NewTxID() TxID {
 	var t TxID
-	_, _ = rand.Read(t[:])
+	if _, err := rand.Read(t[:]); err != nil {
+		panic("dht: crypto/rand: " + err.Error())
+	}
 	return t
 }
 

@@ -156,13 +156,54 @@ func (m *Messenger) Run(ctx context.Context) error {
 		return nil
 	})
 
+	g.Go(func() error {
+		m.outboxRetentionPump(gctx)
+
+		return nil
+	})
+
 	return g.Wait()
+}
+
+// outboxRetentionPump drops outbox items older than OutboxRetentionDays
+// every hour. Tolerant — any error logs and the next tick retries.
+func (m *Messenger) outboxRetentionPump(ctx context.Context) {
+	tick := time.NewTicker(HistoryRetentionTickInterval)
+	defer tick.Stop()
+
+	prune := func() {
+		cutoff := time.Now().Add(-OutboxRetentionDays * 24 * time.Hour).Unix()
+		n, err := m.cfg.Storage.PruneOutboxOlderThan(ctx, cutoff)
+		if err != nil {
+			m.logger.Warn("messenger: outbox prune", "err", err)
+			return
+		}
+		if n > 0 {
+			m.logger.Info("messenger: outbox prune", "rows", n)
+		}
+	}
+
+	prune()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			prune()
+		}
+	}
 }
 
 // HistoryRetentionTickInterval is how often the runtime re-checks the
 // "delete history older than N days" setting and prunes if needed.
 // Hourly is plenty — the setting is coarse-grained.
 const HistoryRetentionTickInterval = time.Hour
+
+// OutboxRetentionDays is the maximum age of a pending outbox item.
+// Longer than this and the recipient is presumed lost; the message is
+// dropped to keep the table bounded. 7 days mirrors the audit-log
+// retention.
+const OutboxRetentionDays = 7
 
 // SettingKeyHistoryRetainDays is the app_settings row holding the chat
 // history retention window in days; 0 (or missing) disables auto-prune.

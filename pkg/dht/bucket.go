@@ -1,9 +1,19 @@
 package dht
 
-import "time"
+import (
+	"net"
+	"time"
+)
 
 // DefaultK is the standard Kademlia bucket size.
 const DefaultK = 20
+
+// MaxContactsPerSubnet bounds how many contacts can live in a single
+// k-bucket from the same /24 IPv4 (or /64 IPv6) prefix. Closes the
+// trivial sybil amplifier flagged in the Phase 9 audit: a single
+// attacker-controlled host can otherwise claim arbitrarily many
+// NodeIDs all keyed on its own IP, biasing the local routing table.
+const MaxContactsPerSubnet = 2
 
 // bucket holds up to k contacts ordered most-recently-seen-last.
 //
@@ -30,11 +40,69 @@ func (b *bucket) add(c Contact, now time.Time) (added, refreshed bool) {
 			return false, true
 		}
 	}
+	if subnetOver(b.contacts, c.Addr, MaxContactsPerSubnet) {
+		return false, false
+	}
 	if len(b.contacts) < b.cap {
 		b.contacts = append(b.contacts, c)
 		return true, false
 	}
 	return false, false
+}
+
+// subnetOver reports whether `existing` already holds limit-or-more
+// contacts whose Addr shares the same /24 (IPv4) or /64 (IPv6) prefix
+// as `addr`. A nil addr (test/in-memory transport) is exempt.
+func subnetOver(existing []Contact, addr net.Addr, limit int) bool {
+	if addr == nil || limit <= 0 {
+		return false
+	}
+	prefix := addrSubnet(addr)
+	if prefix == "" {
+		return false
+	}
+	count := 0
+	for _, c := range existing {
+		if addrSubnet(c.Addr) == prefix {
+			count++
+			if count >= limit {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// addrSubnet returns a string keying the /24 IPv4 prefix or /64 IPv6
+// prefix of addr. Empty for non-IP addresses (e.g. in-memory pipe
+// transports used by tests) AND for loopback addresses (localhost
+// demos and test harnesses spin many peers on 127.0.0.x — refusing
+// them would force every test to disable the cap manually).
+func addrSubnet(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		host = addr.String()
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return ""
+	}
+	if ip.IsLoopback() {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return string(v4[:3])
+	}
+	v6 := ip.To16()
+	if v6 == nil {
+		return ""
+	}
+
+	return string(v6[:8])
 }
 
 func (b *bucket) remove(id NodeID) bool {
