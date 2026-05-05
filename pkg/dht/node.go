@@ -187,6 +187,13 @@ func (n *Node) Run(ctx context.Context) {
 				return
 			}
 			n.handlePacket(ctx, pkt)
+			// Release the recv buffer back to the transport's pool.
+			// Safe because every consumer of pkt.Payload (DecodeMsg
+			// → typed messages, signaling.DecodeBody → Envelope) copies
+			// the bytes into its own storage before handlePacket
+			// returns. Wire.ReadString/ReadBytes are the canonical
+			// allocation point and they never alias the source buffer.
+			pkt.Release()
 		}
 	}
 }

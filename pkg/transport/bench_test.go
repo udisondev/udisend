@@ -76,6 +76,40 @@ func BenchmarkMemorySend_1KB(b *testing.B) {
 	}
 }
 
+// BenchmarkUDPRecv_AllocPerPacket measures the per-delivered-packet
+// allocation count in the UDP recv loop. The hot path is the only
+// place under sustained DoS where allocator pressure becomes
+// observable: 100k pps × make([]byte, n) per packet was the audit's
+// concern. Keep the payload small (typical signaling/DHT frame) so
+// the benchmark stresses framing overhead, not byte-throughput.
+func BenchmarkUDPRecv_AllocPerPacket(b *testing.B) {
+	a, err := transport.ListenUDP("127.0.0.1:0")
+	if err != nil {
+		b.Fatal(err)
+	}
+	r, err := transport.ListenUDP("127.0.0.1:0")
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = a.Close(); _ = r.Close() })
+
+	payload := make([]byte, 256)
+	ctx := context.Background()
+	dst := r.LocalAddr()
+	inbox := r.Inbox()
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for b.Loop() {
+		if err := a.Send(ctx, dst, payload); err != nil {
+			b.Fatal(err)
+		}
+		pkt := <-inbox
+		pkt.Release()
+	}
+}
+
 func BenchmarkParseMemoryAddr(b *testing.B) {
 	addr := "mem:42"
 	b.ReportAllocs()

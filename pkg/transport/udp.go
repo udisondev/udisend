@@ -10,6 +10,24 @@ import (
 	"time"
 )
 
+// udpRecvPool reuses MaxPacketSize byte slices across recvLoop
+// iterations. The hot path (a node serving thousands of clients at
+// 100 packets/sec/source) previously allocated `make([]byte, n)` per
+// inbound datagram — measurable GC pressure under sustained DoS.
+// With the pool, alloc/op on the recv side drops to zero (modulo
+// occasional pool growth). Consumers MUST call Packet.Release to
+// return the buffer; the dispatcher in pkg/dht does this after
+// handlePacket returns.
+//
+// Buffers are stored as `*[]byte` (not `[]byte`) so the pool tracks
+// the allocation, not the slice header — see Go issue #16323.
+var udpRecvPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, MaxPacketSize)
+		return &buf
+	},
+}
+
 // UDPTransport is a Transport backed by a UDP socket. Inbound packets are
 // delivered through Inbox(); outbound via Send. Concurrency-safe.
 type UDPTransport struct {
@@ -100,10 +118,16 @@ func (t *UDPTransport) Close() error {
 func (t *UDPTransport) recvLoop() {
 	defer t.wg.Done()
 	defer close(t.in)
-	buf := make([]byte, MaxPacketSize)
 	for {
+		// Take a buffer from the pool BEFORE the read so the read fills
+		// it directly — no intermediate copy. The pool guarantees
+		// MaxPacketSize capacity, which the kernel-side UDP read
+		// silently truncates to.
+		bufp := udpRecvPool.Get().(*[]byte)
+		buf := *bufp
 		n, src, err := t.conn.ReadFromUDP(buf)
 		if err != nil {
+			udpRecvPool.Put(bufp)
 			select {
 			case <-t.closed:
 				return
@@ -113,17 +137,24 @@ func (t *UDPTransport) recvLoop() {
 				return
 			}
 			// Transient errors (e.g. ICMP "port unreachable" on Linux for a
-			// previous Send) — log at Debug and continue. Sleep briefly so a
-			// repeating fault does not pin a CPU core.
+			// previous Send) — log at Debug and continue. Use a
+			// cancellable wait so ctx-cancel does not get stuck behind a
+			// 10 ms sleep.
 			slog.Default().Debug("transport: udp read", "err", err)
-			time.Sleep(10 * time.Millisecond)
+			select {
+			case <-time.After(10 * time.Millisecond):
+			case <-t.closed:
+				return
+			}
 			continue
 		}
-		payload := make([]byte, n)
-		copy(payload, buf[:n])
 		select {
-		case t.in <- Packet{From: src, Payload: payload}:
+		case t.in <- Packet{From: src, Payload: buf[:n], pool: &udpRecvPool, bufp: bufp}:
 		case <-t.closed:
+			// Channel-closed path: return the buffer to the pool here
+			// since no consumer will see the Packet.
+			*bufp = (*bufp)[:cap(*bufp)]
+			udpRecvPool.Put(bufp)
 			return
 		}
 	}
