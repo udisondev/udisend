@@ -320,6 +320,46 @@ func (t *WebRTCTransport) Send(_ context.Context, to net.Addr, payload []byte) e
 // transport is Closed.
 func (t *WebRTCTransport) Inbox() <-chan Packet { return t.inbox }
 
+// IsConnected reports whether peer currently has an open
+// DataChannel-backed session. PeerManager (pkg/webrtc) polls this
+// to detect drops between Connect attempts.
+func (t *WebRTCTransport) IsConnected(peer identity.Hash) bool {
+	t.mu.Lock()
+	_, ok := t.peers[peer]
+	t.mu.Unlock()
+
+	return ok
+}
+
+// Peers returns a snapshot of currently-connected peer hashes.
+// Useful for diagnostics and PeerManager bookkeeping.
+func (t *WebRTCTransport) Peers() []identity.Hash {
+	t.mu.Lock()
+	out := make([]identity.Hash, 0, len(t.peers))
+	for h := range t.peers {
+		out = append(out, h)
+	}
+	t.mu.Unlock()
+
+	return out
+}
+
+// Disconnect tears down a session for peer. Used by PeerManager to
+// drop healthy-but-evicted peers when reshaping the mesh. Returns
+// false if there was no session to drop.
+func (t *WebRTCTransport) Disconnect(peer identity.Hash) bool {
+	t.mu.Lock()
+	entry, ok := t.peers[peer]
+	delete(t.peers, peer)
+	t.mu.Unlock()
+	if !ok {
+		return false
+	}
+	_ = entry.sess.Close()
+
+	return true
+}
+
 // Close releases all sessions and signals waiters. Idempotent.
 func (t *WebRTCTransport) Close() error {
 	t.closeOnce.Do(func() {
