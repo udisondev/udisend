@@ -1,11 +1,14 @@
 package network_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/udisondev/udisend/pkg/identity"
 	"github.com/udisondev/udisend/pkg/network"
 	"github.com/udisondev/udisend/pkg/transport"
 )
@@ -135,3 +138,361 @@ func TestMesh_E2E_TwoNodesEstablishLink(t *testing.T) {
 			statsA.RTCConnectAttempts+statsB.RTCConnectAttempts)
 	}
 }
+
+// waitForMeshLink blocks until both peers see each other as
+// connected on the mesh AND a probe Send succeeds in both
+// directions, or the deadline elapses. The probe is required
+// because IsConnected flips to true the moment a responder
+// installs its session (well before pion's OnDataChannel fires);
+// without a Send-probe a test that races on the responder side
+// can hit ErrNoRoute despite IsConnected returning true.
+func waitForMeshLink(t *testing.T, a, b *network.Node, deadline time.Duration) bool {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	aHash := a.Identity().Public().DestinationHash()
+	bHash := b.Identity().Public().DestinationHash()
+	addrB := transport.NewWebRTCAddr(bHash)
+	addrA := transport.NewWebRTCAddr(aHash)
+	probe := []byte("waitForMeshLink-probe")
+	for time.Now().Before(end) {
+		if !a.MeshTransport().IsConnected(bHash) || !b.MeshTransport().IsConnected(aHash) {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		// Both sides see the entry; verify DC is actually open by
+		// trying a Send. ErrNoRoute / ErrNotOpen → wait more.
+		ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+		errAB := a.MeshTransport().Send(ctx, addrB, probe)
+		errBA := b.MeshTransport().Send(ctx, addrA, probe)
+		cancel()
+		if errAB == nil && errBA == nil {
+			// Drain the two probe packets so they don't pollute the
+			// test's own inbox expectations.
+			for range 2 {
+				select {
+				case <-a.MeshTransport().Inbox():
+				case <-b.MeshTransport().Inbox():
+				case <-time.After(500 * time.Millisecond):
+				}
+			}
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	return false
+}
+
+// TestMesh_E2E_DataRoundTrip drives an actual byte payload through
+// the mesh DataChannel after the link is established. Goes beyond
+// the smoke test (which only checks IsConnected) — verifies that
+// pion + Noise XK + the WebRTCTransport.pumpInbox path actually
+// deliver data to the consumer's transport.Inbox.
+func TestMesh_E2E_DataRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	if testing.Short() {
+		t.Skip("requires pion ICE — skipped under -short")
+	}
+
+	a, b := twoMeshNodes(t)
+
+	if !waitForMeshLink(t, a, b, 20*time.Second) {
+		t.Fatal("mesh link never established")
+	}
+
+	bHash := b.Identity().Public().DestinationHash()
+
+	payload := bytes.Repeat([]byte("phase10-mesh-rtt-"), 64) // ~1 KiB
+	addr := transport.NewWebRTCAddr(bHash)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := a.MeshTransport().Send(ctx, addr, payload); err != nil {
+		t.Fatalf("a.MeshTransport.Send: %v", err)
+	}
+
+	select {
+	case pkt := <-b.MeshTransport().Inbox():
+		if !bytes.Equal(pkt.Payload, payload) {
+			t.Errorf("payload mismatch: got %d bytes, want %d", len(pkt.Payload), len(payload))
+		}
+		gotAddr, ok := pkt.From.(transport.WebRTCAddr)
+		if !ok {
+			t.Errorf("pkt.From is %T, want WebRTCAddr", pkt.From)
+		} else if gotAddr.Peer() != a.Identity().Public().DestinationHash() {
+			t.Errorf("pkt.From.Peer = %x, want %x", gotAddr.Peer(), a.Identity().Public().DestinationHash())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("B did not receive mesh payload")
+	}
+
+	// Stats should reflect at least the round-trip bytes.
+	statsA := a.Stats()
+	statsB := b.Stats()
+	if statsA.RTCBytesSent < int64(len(payload)) {
+		t.Errorf("A.RTCBytesSent = %d, want ≥ %d", statsA.RTCBytesSent, len(payload))
+	}
+	if statsB.RTCBytesRecv < int64(len(payload)) {
+		t.Errorf("B.RTCBytesRecv = %d, want ≥ %d", statsB.RTCBytesRecv, len(payload))
+	}
+}
+
+// threeMeshNodes spins up A, B, C with mesh enabled. C bootstraps
+// against B, B bootstraps against A — forming a "chain" where C
+// needs DHT-iteration to discover A. Once the routing tables
+// converge, all three pairs should mesh up.
+func threeMeshNodes(t *testing.T) (*network.Node, *network.Node, *network.Node) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	hub := transport.NewMemoryHub()
+
+	open := func(name string, bootstrap []string) *network.Node {
+		tr := hub.NewMemoryTransport()
+		n, err := network.Open(ctx, network.Config{
+			Identity:     mustIdentity(t),
+			Transport:    tr,
+			Bootstrap:    bootstrap,
+			MeshEnabled:  true,
+			MaxMeshLinks: 4,
+		})
+		if err != nil {
+			t.Fatalf("open %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = n.Close() })
+		goRun(t, name, n.Run, ctx)
+
+		return n
+	}
+
+	a := open("A", nil)
+	b := open("B", []string{a.LocalAddress()})
+	c := open("C", []string{b.LocalAddress()})
+
+	// Wait for full triangle convergence: every pair must Lookup
+	// the other two.
+	deadline := time.Now().Add(10 * time.Second)
+	pairs := []struct {
+		from, to *network.Node
+		label    string
+	}{
+		{a, b, "A→B"}, {a, c, "A→C"},
+		{b, a, "B→A"}, {b, c, "B→C"},
+		{c, a, "C→A"}, {c, b, "C→B"},
+	}
+	for time.Now().Before(deadline) {
+		ok := true
+		for _, p := range pairs {
+			lctx, lcancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			_, err := p.from.Lookup(lctx, p.to.Identity().Public().DestinationHash())
+			lcancel()
+			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					t.Fatal("ctx canceled during convergence")
+				}
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return a, b, c
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("3-node cluster never converged")
+
+	return nil, nil, nil
+}
+
+// TestMesh_E2E_ThreeNodeTriangle drives three real nodes through
+// bootstrap convergence and asserts that every pair forms a mesh
+// link. K=4 is enough to mesh with the other two regardless of
+// who initiates.
+//
+// Not t.Parallel(): three pion stacks + ICE + Noise XK handshakes
+// across six pairs is heavy enough that running alongside the rest
+// of the parallel suite occasionally pushes K-fill past the 20 s
+// deadline. Sequential execution is stable in isolation.
+func TestMesh_E2E_ThreeNodeTriangle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires pion ICE — skipped under -short")
+	}
+
+	a, b, c := threeMeshNodes(t)
+
+	pairs := []struct {
+		x, y  *network.Node
+		label string
+	}{
+		{a, b, "A↔B"},
+		{a, c, "A↔C"},
+		{b, c, "B↔C"},
+	}
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		allUp := true
+		for _, p := range pairs {
+			yHash := p.y.Identity().Public().DestinationHash()
+			xHash := p.x.Identity().Public().DestinationHash()
+			if !p.x.MeshTransport().IsConnected(yHash) || !p.y.MeshTransport().IsConnected(xHash) {
+				allUp = false
+				break
+			}
+		}
+		if allUp {
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	for _, p := range pairs {
+		yHash := p.y.Identity().Public().DestinationHash()
+		xHash := p.x.Identity().Public().DestinationHash()
+		if !p.x.MeshTransport().IsConnected(yHash) {
+			t.Errorf("%s missing: %s side has no link", p.label, p.label[:1])
+		}
+		if !p.y.MeshTransport().IsConnected(xHash) {
+			t.Errorf("%s missing: reverse side has no link", p.label)
+		}
+	}
+}
+
+// TestMesh_E2E_SurvivesRelayLoss mirrors the original Phase 10
+// resilience promise in miniature: A and C reach each other only
+// through B's bootstrap-relay. Once their direct mesh link is up,
+// killing B must not break the established A↔C DataChannel.
+//
+// This is the core property of Phase 10: persistent DataChannels
+// survive the loss of public-IP signaling-relay infrastructure
+// (in this scaled-down test, B plays the only public node both
+// other peers know about; killing it simulates a public-relay
+// outage).
+//
+// Not t.Parallel(): heavy three-node setup; see ThreeNodeTriangle
+// rationale.
+func TestMesh_E2E_SurvivesRelayLoss(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires pion ICE — skipped under -short")
+	}
+
+	a, b, c := threeMeshNodes(t)
+
+	aHash := a.Identity().Public().DestinationHash()
+	cHash := c.Identity().Public().DestinationHash()
+
+	// Wait for the A↔C link in particular.
+	end := time.Now().Add(20 * time.Second)
+	linked := false
+	for time.Now().Before(end) {
+		if a.MeshTransport().IsConnected(cHash) && c.MeshTransport().IsConnected(aHash) {
+			linked = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !linked {
+		t.Skipf("A↔C link did not establish before relay-loss test (timing)")
+	}
+
+	// Tear down the relay node B — close it explicitly, simulating
+	// a public-IP node going offline. The MemoryHub also drops B's
+	// transport from its registry.
+	if err := b.Close(); err != nil {
+		t.Errorf("close B: %v", err)
+	}
+
+	// A↔C must still be listed as connected for at least a brief
+	// window afterwards — the DataChannel itself runs end-to-end
+	// over MemoryHub and pion's loopback DTLS, independent of B.
+	// Phase 10's "established DCs survive" promise.
+	if !a.MeshTransport().IsConnected(cHash) {
+		t.Error("A lost C link immediately after B died")
+	}
+	if !c.MeshTransport().IsConnected(aHash) {
+		t.Error("C lost A link immediately after B died")
+	}
+
+	// And the DC must be usable for application traffic post-loss.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	addr := transport.NewWebRTCAddr(cHash)
+	payload := []byte("post-relay-loss")
+	if err := a.MeshTransport().Send(ctx, addr, payload); err != nil {
+		t.Fatalf("Send post-loss: %v", err)
+	}
+
+	select {
+	case pkt := <-c.MeshTransport().Inbox():
+		if !bytes.Equal(pkt.Payload, payload) {
+			t.Errorf("post-loss payload mismatch: %q vs %q", pkt.Payload, payload)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("C did not receive post-loss payload")
+	}
+}
+
+// TestMesh_E2E_StatsAccumulate ensures the transport-level counters
+// reflect actual traffic over a series of Sends — protects against
+// regressions in the observability path (silent-drop counter
+// updates would not be caught by the smoke test).
+func TestMesh_E2E_StatsAccumulate(t *testing.T) {
+	t.Parallel()
+
+	if testing.Short() {
+		t.Skip("requires pion ICE — skipped under -short")
+	}
+
+	a, b := twoMeshNodes(t)
+	if !waitForMeshLink(t, a, b, 20*time.Second) {
+		t.Fatal("mesh link never established")
+	}
+
+	bHash := b.Identity().Public().DestinationHash()
+	addr := transport.NewWebRTCAddr(bHash)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	const N = 10
+	const sz = 256
+	for i := range N {
+		payload := make([]byte, sz)
+		copy(payload, fmt.Sprintf("seq-%d-", i))
+		if err := a.MeshTransport().Send(ctx, addr, payload); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+
+	// Drain the responder's inbox.
+	got := 0
+	deadline := time.After(3 * time.Second)
+	for got < N {
+		select {
+		case <-b.MeshTransport().Inbox():
+			got++
+		case <-deadline:
+			t.Fatalf("only got %d/%d packets before timeout", got, N)
+		}
+	}
+
+	statsA := a.Stats()
+	if statsA.RTCBytesSent < N*sz {
+		t.Errorf("RTCBytesSent = %d, want ≥ %d", statsA.RTCBytesSent, N*sz)
+	}
+	statsB := b.Stats()
+	if statsB.RTCBytesRecv < N*sz {
+		t.Errorf("RTCBytesRecv = %d, want ≥ %d", statsB.RTCBytesRecv, N*sz)
+	}
+}
+
+// avoid unused import in builds where some helpers are gated
+var _ identity.Hash

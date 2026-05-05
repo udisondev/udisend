@@ -214,6 +214,15 @@ type WebRTCTransport struct {
 	closed    chan struct{}
 	wg        sync.WaitGroup
 
+	// bgCtx is the parent context inherited by every fireDispatch
+	// goroutine. bgCancel fires from Close so SendMeshSDP calls
+	// stuck on slow signaling do not gate wg.Wait on the full
+	// connectTimeout — without this the transport's Close blocks
+	// up to 30 s while pion-callback fired-and-forgot signaler
+	// sends finish their natural timeout.
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
+
 	// fireSem bounds in-flight goroutines spawned by fireSDP /
 	// fireICE. See maxFireConcurrency for rationale.
 	fireSem chan struct{}
@@ -263,10 +272,24 @@ type peerEntry struct {
 }
 
 // pendingDial coordinates a Connect-in-flight so concurrent callers
-// share one underlying handshake (singleflight).
+// share one underlying handshake (singleflight). finalize is the
+// only writer to err / done — sync.Once defends against a Close
+// running concurrently with Connect both trying to close the same
+// done channel.
 type pendingDial struct {
 	done chan struct{}
 	err  error
+	once sync.Once
+}
+
+// finalize publishes the dial outcome. Idempotent: only the first
+// call wins; subsequent calls (e.g. Close after dial finished, or
+// dial completing after Close) are no-ops.
+func (pd *pendingDial) finalize(err error) {
+	pd.once.Do(func() {
+		pd.err = err
+		close(pd.done)
+	})
 }
 
 // NewWebRTCTransport constructs a transport. The caller MUST call
@@ -286,6 +309,8 @@ func NewWebRTCTransport(cfg WebRTCTransportConfig) (*WebRTCTransport, error) {
 		timeout = connectTimeoutDefault
 	}
 
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+
 	return &WebRTCTransport{
 		self:           cfg.Self,
 		signaler:       cfg.Signaler,
@@ -296,6 +321,8 @@ func NewWebRTCTransport(cfg WebRTCTransportConfig) (*WebRTCTransport, error) {
 		peers:          make(map[identity.Hash]*peerEntry),
 		pending:        make(map[identity.Hash]*pendingDial),
 		closed:         make(chan struct{}),
+		bgCtx:          bgCtx,
+		bgCancel:       bgCancel,
 		fireSem:        make(chan struct{}, maxFireConcurrency),
 	}, nil
 }
@@ -417,6 +444,11 @@ func (t *WebRTCTransport) Disconnect(peer identity.Hash) bool {
 func (t *WebRTCTransport) Close() error {
 	t.closeOnce.Do(func() {
 		close(t.closed)
+		// Cancel bgCtx so fired-and-forgot goroutines (fireSDP /
+		// fireICE) abort their SendMeshSDP immediately rather than
+		// waiting the full connectTimeout. Without this, Close
+		// would gate wg.Wait on the slowest signaler send.
+		t.bgCancel()
 
 		t.mu.Lock()
 		for _, e := range t.peers {
@@ -424,9 +456,10 @@ func (t *WebRTCTransport) Close() error {
 		}
 		t.peers = make(map[identity.Hash]*peerEntry)
 		// Wake any pending Connect waiters with a Closed error.
+		// finalize is once-protected so a concurrent Connect
+		// completing in another goroutine cannot double-close.
 		for _, p := range t.pending {
-			p.err = ErrClosed
-			close(p.done)
+			p.finalize(ErrClosed)
 		}
 		t.pending = make(map[identity.Hash]*pendingDial)
 		t.mu.Unlock()
@@ -473,9 +506,9 @@ func (t *WebRTCTransport) Connect(ctx context.Context, peer identity.Hash) error
 		t.connectFailures.Add(1)
 	}
 
+	pd.finalize(err)
+
 	t.mu.Lock()
-	pd.err = err
-	close(pd.done)
 	delete(t.pending, peer)
 	t.mu.Unlock()
 
@@ -715,7 +748,7 @@ func (t *WebRTCTransport) fireDispatch(peer identity.Hash, kind MeshSDPKind, pay
 		defer t.wg.Done()
 		defer func() { <-t.fireSem }()
 
-		ctx, cancel := context.WithTimeout(context.Background(), t.connectTimeout)
+		ctx, cancel := context.WithTimeout(t.bgCtx, t.connectTimeout)
 		defer cancel()
 		if err := t.signaler.SendMeshSDP(ctx, peer, kind, payload); err != nil {
 			if debug {
