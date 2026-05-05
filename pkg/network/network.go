@@ -52,6 +52,18 @@ type SeenPeerStore interface {
 	ForgetSeenPeer(ctx context.Context, addr string) error
 }
 
+// BootstrapOverrideStore is an optional source of user-curated bootstrap
+// addresses managed at runtime (e.g. via the webui Settings → Bootstrap
+// panel). When Config.Bootstrap is empty, Open consults this store
+// BEFORE the seen-peers cache so user picks always win on a fresh start.
+// MarkBootstrapStatus is invoked after every dial attempt; callers free
+// to silently ignore unknown addresses (we feed it every bootstrap
+// outcome regardless of source).
+type BootstrapOverrideStore interface {
+	EnabledBootstrapOverrides(ctx context.Context) ([]string, error)
+	MarkBootstrapStatus(ctx context.Context, addr, status string, when time.Time) error
+}
+
 // Config configures Open.
 type Config struct {
 	Identity      *identity.Identity
@@ -65,6 +77,9 @@ type Config struct {
 	PresenceTTL   time.Duration
 	Logger        *slog.Logger
 	SeenPeerStore SeenPeerStore // optional bootstrap cache
+	// BootstrapOverrideStore is an optional source of user-managed
+	// bootstrap addresses. Consulted before SeenPeerStore.
+	BootstrapOverrideStore BootstrapOverrideStore
 	// IncomeBuffer caps the size of the Income channel returned by
 	// Income(). Zero uses DefaultIncomeBuffer. The pump blocks on full
 	// (no drops) — backpressure for signaling.
@@ -130,8 +145,20 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 	}
 
 	// design.md §7-8: bootstrap source priority — explicit cfg.Bootstrap,
-	// then the seen-peers cache (subnet-diverse to dilute Sybil clusters),
-	// then the curated community list + DNS seeds.
+	// then user-managed overrides (Settings → Bootstrap), then the seen-
+	// peers cache (subnet-diverse to dilute Sybil clusters), then the
+	// curated community list + DNS seeds. The first non-empty source
+	// wins; we do not currently merge across tiers.
+	if len(cfg.Bootstrap) == 0 && cfg.BootstrapOverrideStore != nil {
+		picks, err := cfg.BootstrapOverrideStore.EnabledBootstrapOverrides(ctx)
+		switch {
+		case err != nil:
+			cfg.Logger.Warn("network: bootstrap-overrides lookup failed; falling through", "err", err)
+		case len(picks) > 0:
+			cfg.Bootstrap = picks
+			cfg.Logger.Info("network: bootstrap from user overrides", "n", len(picks))
+		}
+	}
 	if len(cfg.Bootstrap) == 0 && cfg.SeenPeerStore != nil {
 		cached, err := cfg.SeenPeerStore.SeenPeersDiverse(ctx, 50)
 		switch {
@@ -335,35 +362,72 @@ func (n *Node) bootstrapAll(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, addr := range n.cfg.Bootstrap {
 		wg.Go(func() {
-			peer, err := n.transport.Dial(addr)
-			if err != nil {
-				n.cfg.Logger.Warn("network: bootstrap parse", "addr", addr, "err", err)
-				return
-			}
-
-			bctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
-
-			if err := n.dht.Bootstrap(bctx, peer); err != nil {
-				n.cfg.Logger.Warn("network: bootstrap", "addr", addr, "err", err)
-				if n.cfg.SeenPeerStore != nil {
-					if rmErr := n.cfg.SeenPeerStore.ForgetSeenPeer(ctx, addr); rmErr != nil {
-						n.cfg.Logger.Debug("network: forget seen peer", "addr", addr, "err", rmErr)
-					}
-				}
-
-				return
-			}
-
-			n.cfg.Logger.Info("network: bootstrap ok", "addr", addr)
-			if n.cfg.SeenPeerStore != nil {
-				if recErr := n.cfg.SeenPeerStore.RecordSeenPeer(ctx, addr); recErr != nil {
-					n.cfg.Logger.Debug("network: record seen peer", "addr", addr, "err", recErr)
-				}
-			}
+			_ = n.bootstrapOne(ctx, addr)
 		})
 	}
 	wg.Wait()
+}
+
+// Bootstrap dials addr and runs a DHT bootstrap against it. Hot-reload
+// entry point for the webui Settings → Bootstrap "Reconnect" / "Add"
+// flows. Errors are not fatal to the running node — the caller surfaces
+// them to the user. The seen-peers cache and bootstrap-overrides status
+// are updated as a side effect, identical to startup-time bootstrap.
+func (n *Node) Bootstrap(ctx context.Context, addr string) error {
+	return n.bootstrapOne(ctx, addr)
+}
+
+// bootstrapOne is the single-address bootstrap path shared by startup
+// (bootstrapAll) and runtime "Reconnect" (Bootstrap). On success: the
+// address is recorded in the seen-peers cache and marked "ok" in the
+// override store. On failure: the address is dropped from the seen-
+// peers cache (so we stop wasting startup time on dead entries) and
+// marked "fail" in the override store. Override-store calls are no-ops
+// for addresses the user has not added — the storage layer silently
+// ignores unknown rows.
+func (n *Node) bootstrapOne(ctx context.Context, addr string) error {
+	now := time.Now()
+	peer, err := n.transport.Dial(addr)
+	if err != nil {
+		n.cfg.Logger.Warn("network: bootstrap parse", "addr", addr, "err", err)
+		n.markBootstrapStatus(ctx, addr, "fail", now)
+
+		return fmt.Errorf("network: bootstrap parse %q: %w", addr, err)
+	}
+
+	bctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := n.dht.Bootstrap(bctx, peer); err != nil {
+		n.cfg.Logger.Warn("network: bootstrap", "addr", addr, "err", err)
+		if n.cfg.SeenPeerStore != nil {
+			if rmErr := n.cfg.SeenPeerStore.ForgetSeenPeer(ctx, addr); rmErr != nil {
+				n.cfg.Logger.Debug("network: forget seen peer", "addr", addr, "err", rmErr)
+			}
+		}
+		n.markBootstrapStatus(ctx, addr, "fail", now)
+
+		return fmt.Errorf("network: bootstrap %q: %w", addr, err)
+	}
+
+	n.cfg.Logger.Info("network: bootstrap ok", "addr", addr)
+	if n.cfg.SeenPeerStore != nil {
+		if recErr := n.cfg.SeenPeerStore.RecordSeenPeer(ctx, addr); recErr != nil {
+			n.cfg.Logger.Debug("network: record seen peer", "addr", addr, "err", recErr)
+		}
+	}
+	n.markBootstrapStatus(ctx, addr, "ok", now)
+
+	return nil
+}
+
+func (n *Node) markBootstrapStatus(ctx context.Context, addr, status string, when time.Time) {
+	if n.cfg.BootstrapOverrideStore == nil {
+		return
+	}
+	if err := n.cfg.BootstrapOverrideStore.MarkBootstrapStatus(ctx, addr, status, when); err != nil {
+		n.cfg.Logger.Debug("network: mark bootstrap status", "addr", addr, "err", err)
+	}
 }
 
 // Close releases transport/STUN/TURN/signaling sockets. Run also calls
@@ -401,6 +465,26 @@ func (n *Node) closeServers() error {
 
 // LocalAddress returns the bound UDP address — useful in tests / logs.
 func (n *Node) LocalAddress() string { return n.transport.LocalAddr().String() }
+
+// Stats is a read-only snapshot of internal counters surfaced to the
+// webui Settings → Network → Status panel. Cheap to compute — does no
+// IO and holds no locks across boundaries.
+type Stats struct {
+	RoutingTableSize int
+	ActiveSessions   int
+}
+
+// Stats returns a fresh Stats snapshot.
+func (n *Node) Stats() Stats {
+	n.sessMu.RLock()
+	active := len(n.sessions)
+	n.sessMu.RUnlock()
+
+	return Stats{
+		RoutingTableSize: n.dht.Table().Size(),
+		ActiveSessions:   active,
+	}
+}
 
 // Identity returns the node's identity. Higher layers need it to sign
 // application-level envelopes (the network signs only its own presence

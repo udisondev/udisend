@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/udisondev/udisend/internal/httpui/auth"
 	"github.com/udisondev/udisend/internal/messenger"
 	"github.com/udisondev/udisend/internal/storage"
 	"github.com/udisondev/udisend/pkg/identity"
@@ -38,6 +39,24 @@ type Server struct {
 	logger    *slog.Logger
 	authToken string
 
+	// publicMode indicates non-loopback bind with passphrase-backed
+	// authentication. Set by NewServer when Config.Public is true.
+	publicMode bool
+	publicHost string
+	tlsCert    string
+	tlsKey     string
+	authH      *authHandlers
+
+	// logLevel is a runtime-mutable level the Settings → Notifications
+	// panel can flip to enable verbose logs without restart. nil disables
+	// the toggle but the GET handler still works (returns the persisted
+	// preference).
+	logLevel *slog.LevelVar
+	// dbPath is the filesystem path of the underlying SQLite database.
+	// Surfaced by the Settings → Privacy → Storage panel for usage
+	// reporting and vacuum reclaim metrics.
+	dbPath string
+
 	wsMu    sync.Mutex
 	wsConns map[*sseClient]struct{}
 
@@ -52,8 +71,43 @@ type Config struct {
 	Logger    *slog.Logger
 	// AuthToken, if empty, is auto-generated. The token must accompany every
 	// request (in the `?token=` query param for the WS handshake, in the
-	// `Authorization: Bearer` header for REST).
+	// `Authorization: Bearer` header for REST). Only meaningful in
+	// loopback mode; ignored when Public is true.
 	AuthToken string
+
+	// Public switches the server into "hosted" mode: requires an existing
+	// passphrase in storage, mounts /login + /logout, replaces the URL-token
+	// flow with cookie-bound sessions, and serves the SPA only after auth.
+	// Caller is responsible for verifying that bind address is non-loopback
+	// AND that TLS is provided (either inline or via reverse proxy).
+	Public bool
+
+	// PublicHost is the externally-visible hostname (e.g.
+	// "messenger.example.com") used when constructing URL(). Only honored
+	// in public mode; falls back to listen address.
+	PublicHost string
+
+	// TrustProxy honors X-Forwarded-For for client-IP attribution and sets
+	// the Secure flag on session cookies. Only meaningful in public mode.
+	TrustProxy bool
+
+	// TLSCert and TLSKey, when both non-empty, switch Run() to ServeTLS.
+	// Mutually exclusive with TrustProxy in practice (you either terminate
+	// TLS in-process or behind a proxy), though both being set is harmless
+	// — TLS wins.
+	TLSCert string
+	TLSKey  string
+
+	// LogLevel, when non-nil, is the *slog.LevelVar driving the global
+	// log handler. The webui Settings → Notifications panel calls Set on
+	// it to flip verbose-logs at runtime. Leave nil if the host process
+	// uses a static level — the UI will still render, but the toggle is
+	// effectively a no-op.
+	LogLevel *slog.LevelVar
+	// DBPath is the absolute path to the SQLite file backing Storage.
+	// Used by the Storage usage panel to compute file size and
+	// vacuum-reclaimed bytes. Empty disables the size column.
+	DBPath string
 }
 
 // NewServer constructs the HTTP UI without starting it.
@@ -75,33 +129,131 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("httpui: listen: %w", err)
 	}
 	s := &Server{
-		mngr:      cfg.Messenger,
-		listener:  ln,
-		logger:    cfg.Logger,
-		authToken: cfg.AuthToken,
-		wsConns:   make(map[*sseClient]struct{}),
-		closed:    make(chan struct{}),
+		mngr:       cfg.Messenger,
+		listener:   ln,
+		logger:     cfg.Logger,
+		authToken:  cfg.AuthToken,
+		publicMode: cfg.Public,
+		publicHost: cfg.PublicHost,
+		tlsCert:    cfg.TLSCert,
+		tlsKey:     cfg.TLSKey,
+		logLevel:   cfg.LogLevel,
+		dbPath:     cfg.DBPath,
+		wsConns:    make(map[*sseClient]struct{}),
+		closed:     make(chan struct{}),
 	}
+
+	if cfg.Public {
+		store := cfg.Messenger.Storage()
+		if store == nil {
+			_ = ln.Close()
+
+			return nil, errors.New("httpui: public mode requires messenger with storage")
+		}
+		s.authH = &authHandlers{
+			store:        store,
+			sessions:     auth.NewSessions(store, auth.SessionsConfig{}),
+			limiter:      &auth.RateLimiter{PerMinute: 5, FailsToLock: 20, LockDuration: 15 * time.Minute},
+			secureCookie: true,
+			trustProxy:   cfg.TrustProxy,
+			now:          time.Now,
+		}
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/events", s.requireToken(s.handleEvents))
-	mux.HandleFunc("/api/snapshot", s.requireToken(s.handleSnapshot))
-	mux.HandleFunc("/api/contacts/add", s.requireToken(s.handleContactAdd))
-	mux.HandleFunc("/api/contacts/verify", s.requireToken(s.handleContactVerify))
-	mux.HandleFunc("/api/contacts/rename", s.requireToken(s.handleContactRename))
-	mux.HandleFunc("/api/contacts/delete", s.requireToken(s.handleContactDelete))
-	mux.HandleFunc("/api/history", s.requireToken(s.handleHistory))
-	mux.HandleFunc("/api/append-history", s.requireToken(s.handleAppendHistory))
-	mux.HandleFunc("/api/session/open", s.requireToken(s.handleSessionOpen))
-	mux.HandleFunc("/api/session/close", s.requireToken(s.handleSessionClose))
-	mux.HandleFunc("/api/signal/send", s.requireToken(s.handleSignalSend))
-	mux.HandleFunc("/", s.handleStatic)
+	// Read endpoints — auth is enough; no CSRF check (GET cannot be a CSRF
+	// vector for state-changing actions).
+	mux.HandleFunc("/api/events", s.requireAuth(s.handleEvents))
+	mux.HandleFunc("/api/snapshot", s.requireAuth(s.handleSnapshot))
+	mux.HandleFunc("/api/history", s.requireAuth(s.handleHistory))
+
+	// State-changing POST endpoints — require both auth AND the
+	// X-Requested-With: udisend custom header. Browsers cannot attach
+	// custom headers to a cross-origin form POST without a CORS preflight,
+	// and we never grant CORS — so the header's mere presence proves the
+	// request originated from same-origin JavaScript.
+	mux.HandleFunc("/api/contacts/add", s.requireAuth(s.requireCSRFHeader(s.handleContactAdd)))
+	mux.HandleFunc("/api/contacts/verify", s.requireAuth(s.requireCSRFHeader(s.handleContactVerify)))
+	mux.HandleFunc("/api/contacts/rename", s.requireAuth(s.requireCSRFHeader(s.handleContactRename)))
+	mux.HandleFunc("/api/contacts/delete", s.requireAuth(s.requireCSRFHeader(s.handleContactDelete)))
+	mux.HandleFunc("/api/bootstrap", s.requireAuth(s.handleBootstrapList))
+	mux.HandleFunc("/api/bootstrap/add", s.requireAuth(s.requireCSRFHeader(s.handleBootstrapAdd)))
+	mux.HandleFunc("/api/bootstrap/remove", s.requireAuth(s.requireCSRFHeader(s.handleBootstrapRemove)))
+	mux.HandleFunc("/api/bootstrap/toggle", s.requireAuth(s.requireCSRFHeader(s.handleBootstrapToggle)))
+	mux.HandleFunc("/api/bootstrap/reconnect", s.requireAuth(s.requireCSRFHeader(s.handleBootstrapReconnect)))
+
+	mux.HandleFunc("/api/auth/state", s.requireAuth(s.handleAuthState))
+	mux.HandleFunc("/api/auth/change-passphrase", s.requireAuth(s.requireCSRFHeader(s.handleAuthChangePassphrase)))
+	mux.HandleFunc("/api/auth/totp/start", s.requireAuth(s.requireCSRFHeader(s.handleTOTPStart)))
+	mux.HandleFunc("/api/auth/totp/finish", s.requireAuth(s.requireCSRFHeader(s.handleTOTPFinish)))
+	mux.HandleFunc("/api/auth/totp/disable", s.requireAuth(s.requireCSRFHeader(s.handleTOTPDisable)))
+	mux.HandleFunc("/api/auth/recovery/regenerate", s.requireAuth(s.requireCSRFHeader(s.handleRecoveryRegenerate)))
+	mux.HandleFunc("/api/auth/sessions", s.requireAuth(s.handleSessionsList))
+	mux.HandleFunc("/api/auth/sessions/revoke", s.requireAuth(s.requireCSRFHeader(s.handleSessionRevoke)))
+	mux.HandleFunc("/api/auth/log", s.requireAuth(s.handleAuthLog))
+
+	mux.HandleFunc("/api/ice", s.requireAuth(s.handleICEList))
+	mux.HandleFunc("/api/ice/add", s.requireAuth(s.requireCSRFHeader(s.handleICEAdd)))
+	mux.HandleFunc("/api/ice/remove", s.requireAuth(s.requireCSRFHeader(s.handleICERemove)))
+	mux.HandleFunc("/api/ice/toggle", s.requireAuth(s.requireCSRFHeader(s.handleICEToggle)))
+	mux.HandleFunc("/api/ice/fallback", s.requireAuth(s.requireCSRFHeader(s.handleICEFallback)))
+
+	mux.HandleFunc("/api/network/status", s.requireAuth(s.handleNetworkStatus))
+
+	mux.HandleFunc("/api/settings/log-level", s.requireAuth(s.requireCSRFHeader(s.handleLogLevel)))
+	mux.HandleFunc("/api/settings/history-retention", s.requireAuth(s.requireCSRFHeader(s.handleHistoryRetention)))
+
+	mux.HandleFunc("/api/identity/export", s.requireAuth(s.requireCSRFHeader(s.handleIdentityExport)))
+
+	mux.HandleFunc("/api/storage/usage", s.requireAuth(s.handleStorageUsage))
+	mux.HandleFunc("/api/storage/vacuum", s.requireAuth(s.requireCSRFHeader(s.handleStorageVacuum)))
+	mux.HandleFunc("/api/append-history", s.requireAuth(s.requireCSRFHeader(s.handleAppendHistory)))
+	mux.HandleFunc("/api/session/open", s.requireAuth(s.requireCSRFHeader(s.handleSessionOpen)))
+	mux.HandleFunc("/api/session/close", s.requireAuth(s.requireCSRFHeader(s.handleSessionClose)))
+	mux.HandleFunc("/api/signal/send", s.requireAuth(s.requireCSRFHeader(s.handleSignalSend)))
+
+	if cfg.Public {
+		mux.HandleFunc("GET /login", s.authH.handleLoginGET)
+		mux.HandleFunc("POST /login", s.authH.handleLoginPOST)
+		// Logout is a state-changing POST: same CSRF guard as the API.
+		// SameSite=Strict alone would suffice for modern browsers, but the
+		// custom-header check costs nothing and removes the assumption.
+		mux.HandleFunc("POST /logout", s.requireCSRFHeader(s.authH.handleLogout))
+		mux.HandleFunc("/", s.publicAwareStatic)
+	} else {
+		mux.HandleFunc("/", s.handleStatic)
+	}
+
 	s.server = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	cfg.Messenger.SetIncomingHandler(s.onIncomingSession)
 	cfg.Messenger.SetPeerOnlineHandler(s.onPeerOnline)
+
 	return s, nil
+}
+
+// publicAwareStatic enforces session-cookie auth for the SPA in public
+// mode. Unauthenticated visitors are redirected to /login (browser-friendly,
+// unlike the API surface which returns 401).
+func (s *Server) publicAwareStatic(w http.ResponseWriter, r *http.Request) {
+	c, err := r.Cookie(cookieNameSession)
+	if err != nil {
+		http.Redirect(w, r, loginPath, http.StatusSeeOther)
+		return
+	}
+	sess, err := s.authH.sessions.Validate(r.Context(), c.Value)
+	if err != nil {
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	if sess == nil {
+		http.Redirect(w, r, loginPath, http.StatusSeeOther)
+		return
+	}
+
+	s.handleStatic(w, r)
 }
 
 // onPeerOnline broadcasts a peer-online envelope to every connected SSE
@@ -119,12 +271,18 @@ func (s *Server) onPeerOnline(peer identity.Hash) {
 	}
 }
 
-// URL returns the user-friendly URL with the auth token baked in.
-// Open this in a browser.
+// URL returns the user-friendly URL for opening in a browser. In loopback
+// mode the URL embeds the auth token. In public mode the URL is
+// `https://<PublicHost>/login` — `PublicHost` is required (enforced by
+// resolvePublicMode), so the bind port is irrelevant: the browser hits
+// the upstream proxy or the in-process TLS bind by name.
 func (s *Server) URL() string {
+	if s.publicMode {
+		return fmt.Sprintf("https://%s/login", s.publicHost)
+	}
 	addr := s.listener.Addr().(*net.TCPAddr)
-	host := "127.0.0.1"
-	return fmt.Sprintf("http://%s:%d/?token=%s", host, addr.Port, s.authToken)
+
+	return fmt.Sprintf("http://127.0.0.1:%d/?token=%s", addr.Port, s.authToken)
 }
 
 // AuthToken returns the random token required for every API call.
@@ -134,6 +292,8 @@ func (s *Server) AuthToken() string { return s.authToken }
 func (s *Server) LocalAddress() string { return s.listener.Addr().String() }
 
 // Run starts serving and blocks until ctx is cancelled or Serve fails.
+// When TLSCert and TLSKey are set, ServeTLS is used; otherwise plain HTTP
+// (loopback flow, or public mode behind a TLS-terminating proxy).
 func (s *Server) Run(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
@@ -141,11 +301,57 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 		_ = s.server.Shutdown(shutdownCtx)
 	}()
-	err := s.server.Serve(s.listener)
+
+	if s.publicMode {
+		go s.runAuthMaintenance(ctx)
+	}
+
+	var err error
+	if s.tlsCert != "" && s.tlsKey != "" {
+		err = s.server.ServeTLS(s.listener, s.tlsCert, s.tlsKey)
+	} else {
+		err = s.server.Serve(s.listener)
+	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
+
 	return err
+}
+
+// runAuthMaintenance periodically prunes idle sessions, expired rate-limit
+// state and the audit log. Once-per-hour cadence — cheap, and the bounds
+// (idle TTL, log retention) are coarse enough that finer ticking would be
+// pointless. Exits on ctx cancel.
+func (s *Server) runAuthMaintenance(ctx context.Context) {
+	const auditRetention = 1000
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+
+	prune := func() {
+		pruneCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if n, err := s.authH.sessions.Prune(pruneCtx); err != nil {
+			s.logger.Warn("auth: prune sessions", "err", err)
+		} else if n > 0 {
+			s.logger.Debug("auth: pruned sessions", "n", n)
+		}
+		if n, err := s.authH.store.PruneAuthLog(pruneCtx, auditRetention); err != nil {
+			s.logger.Warn("auth: prune log", "err", err)
+		} else if n > 0 {
+			s.logger.Debug("auth: pruned log rows", "n", n)
+		}
+		s.authH.limiter.Cleanup()
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
+		}
+	}
 }
 
 // Close stops the server immediately.
@@ -156,23 +362,73 @@ func (s *Server) Close() {
 	})
 }
 
-func (s *Server) requireToken(next http.HandlerFunc) http.HandlerFunc {
+// requireAuth gates a handler behind the active authentication mode. In
+// loopback mode it accepts the URL/Bearer/cookie token; in public mode it
+// accepts a valid session cookie. Mismatches always yield 401 — the SPA
+// reacts by redirecting to /login.
+func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	if s.publicMode {
+		return func(w http.ResponseWriter, r *http.Request) {
+			c, err := r.Cookie(cookieNameSession)
+			if err != nil {
+				http.Error(w, "auth required", http.StatusUnauthorized)
+				return
+			}
+			sess, err := s.authH.sessions.Validate(r.Context(), c.Value)
+			if err != nil {
+				http.Error(w, "internal", http.StatusInternalServerError)
+				return
+			}
+			if sess == nil {
+				http.Error(w, "auth required", http.StatusUnauthorized)
+				return
+			}
+
+			next(w, r)
+		}
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.checkToken(r) {
+		if !s.checkLoopbackToken(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+
 		next(w, r)
 	}
 }
 
-func (s *Server) checkToken(r *http.Request) bool {
+// CSRF header constants. The header name is conventional ("X-Requested-With"
+// is what jQuery/Axios set by default); the value is project-specific so
+// generic libraries cannot accidentally satisfy it.
+const (
+	csrfHeaderName  = "X-Requested-With"
+	csrfHeaderValue = "udisend"
+)
+
+// requireCSRFHeader rejects any non-safe request that lacks the project's
+// custom header. Composes with requireAuth: stack as
+// requireAuth(requireCSRFHeader(handler)).
+func (s *Server) requireCSRFHeader(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			if r.Header.Get(csrfHeaderName) != csrfHeaderValue {
+				http.Error(w, "missing CSRF header", http.StatusForbidden)
+				return
+			}
+		}
+
+		next(w, r)
+	}
+}
+
+func (s *Server) checkLoopbackToken(r *http.Request) bool {
 	if t := r.URL.Query().Get("token"); t != "" && tokenEqual(t, s.authToken) {
 		return true
 	}
 
-	auth := r.Header.Get("Authorization")
-	if t, ok := strings.CutPrefix(auth, "Bearer "); ok && tokenEqual(t, s.authToken) {
+	authHdr := r.Header.Get("Authorization")
+	if t, ok := strings.CutPrefix(authHdr, "Bearer "); ok && tokenEqual(t, s.authToken) {
 		return true
 	}
 
@@ -220,11 +476,16 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	iceCtx, iceCancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer iceCancel()
-	ice := s.mngr.ICEServers(iceCtx)
+	ice := s.EffectiveICEServers(iceCtx)
+	authMode := "loopback"
+	if s.publicMode {
+		authMode = "public"
+	}
 	resp := struct {
 		Identity   identityView          `json:"identity"`
 		Contacts   []contactView         `json:"contacts"`
 		ICEServers []messenger.ICEServer `json:"ice_servers"`
+		AuthMode   string                `json:"auth_mode"`
 	}{
 		Identity: identityView{
 			Hash:        s.mngr.Identity().Public().DestinationHash().String(),
@@ -233,6 +494,7 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		},
 		Contacts:   cv,
 		ICEServers: ice,
+		AuthMode:   authMode,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

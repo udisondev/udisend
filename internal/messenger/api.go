@@ -20,6 +20,19 @@ type ICEServer struct {
 	Credential string   `json:"credential,omitempty"`
 }
 
+// BootstrapPeer dials addr and runs a DHT bootstrap. Surface for the
+// webui Settings → Bootstrap "Reconnect" / "Add" flows. Errors are
+// returned to the caller (the HTTP handler) and not fatal to the
+// running messenger.
+func (m *Messenger) BootstrapPeer(ctx context.Context, addr string) error {
+	return m.cfg.Network.Bootstrap(ctx, addr)
+}
+
+// NetworkStats exposes internal Network counters to the webui.
+func (m *Messenger) NetworkStats() network.Stats {
+	return m.cfg.Network.Stats()
+}
+
 // ICEServers discovers volunteer STUN/TURN servers via the network
 // layer and maps them to browser-friendly ICEServer JSON.
 //

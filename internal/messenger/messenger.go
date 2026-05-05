@@ -26,6 +26,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -149,7 +150,60 @@ func (m *Messenger) Run(ctx context.Context) error {
 		})
 	}
 
+	g.Go(func() error {
+		m.historyRetentionPump(gctx)
+
+		return nil
+	})
+
 	return g.Wait()
+}
+
+// HistoryRetentionTickInterval is how often the runtime re-checks the
+// "delete history older than N days" setting and prunes if needed.
+// Hourly is plenty — the setting is coarse-grained.
+const HistoryRetentionTickInterval = time.Hour
+
+// SettingKeyHistoryRetainDays is the app_settings row holding the chat
+// history retention window in days; 0 (or missing) disables auto-prune.
+const SettingKeyHistoryRetainDays = "history.retain_days"
+
+// historyRetentionPump deletes message rows older than the configured
+// retention window. Cheap (one DELETE) and tolerant — any error is
+// logged and the next tick retries.
+func (m *Messenger) historyRetentionPump(ctx context.Context) {
+	tick := time.NewTicker(HistoryRetentionTickInterval)
+	defer tick.Stop()
+
+	prune := func() {
+		v, ok, err := m.cfg.Storage.GetSetting(ctx, SettingKeyHistoryRetainDays)
+		if err != nil || !ok || v == "" {
+			return
+		}
+		days, err := strconv.Atoi(v)
+		if err != nil || days <= 0 {
+			return
+		}
+		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixNano()
+		n, err := m.cfg.Storage.PruneMessagesOlderThan(ctx, cutoff)
+		if err != nil {
+			m.logger.Warn("messenger: history prune", "err", err)
+			return
+		}
+		if n > 0 {
+			m.logger.Info("messenger: history prune", "rows", n, "older_than_days", days)
+		}
+	}
+
+	prune()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			prune()
+		}
+	}
 }
 
 func (m *Messenger) outboxInterval() time.Duration {

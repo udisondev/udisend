@@ -65,6 +65,8 @@ const els = {
   modalRoot:     document.getElementById('modal-root'),
   toastRoot:     document.getElementById('toast-root'),
   themeToggle:   document.getElementById('theme-toggle'),
+  logoutBtn:     document.getElementById('logout-btn'),
+  menuBtn:       document.getElementById('menu-btn'),
 
   callRoot:      document.getElementById('call-root'),
   callPeerName:  document.getElementById('call-peer-name'),
@@ -89,12 +91,20 @@ const els = {
 // HTTP helpers
 // ──────────────────────────────────────────────────────────────────
 async function api(path, opts = {}) {
-  const headers = Object.assign({}, opts.headers || {}, { 'Authorization': 'Bearer ' + TOKEN });
+  const headers = Object.assign({}, opts.headers || {}, {
+    'X-Requested-With': 'udisend',
+  });
+  // Bearer token only in loopback mode. In public mode auth is via the
+  // udisend_session cookie set by /login; sending a bogus Bearer header
+  // ("Bearer null") would mask future auth-stack regressions.
+  if (TOKEN) {
+    headers['Authorization'] = 'Bearer ' + TOKEN;
+  }
   if (opts.body && typeof opts.body === 'object' && !(opts.body instanceof FormData)) {
     headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(opts.body);
   }
-  const r = await fetch(path, { ...opts, headers });
+  const r = await fetch(path, { ...opts, headers, credentials: 'same-origin' });
   if (!r.ok) {
     const t = await r.text();
     throw new Error(`${path}: ${r.status} ${t}`);
@@ -109,12 +119,21 @@ async function api(path, opts = {}) {
 // Boot
 // ──────────────────────────────────────────────────────────────────
 async function boot() {
-  if (!TOKEN) {
-    document.body.innerHTML = '<p style="padding:32px;color:#ec5b5b">Missing auth token. Open the URL printed in the messenger logs (it contains <code>?token=…</code>).</p>';
-    return;
-  }
   applyStoredTheme();
-  await loadSnapshot();
+  // Probe the snapshot endpoint first. In loopback mode it carries the
+  // URL token via api(); in public mode it carries the session cookie.
+  // A 401 here means the user lost their session — bounce to /login;
+  // a missing token in loopback mode falls into the same handler since
+  // requireAuth there returns 401 for missing/invalid tokens.
+  try {
+    await loadSnapshot();
+  } catch (err) {
+    if (String(err && err.message).includes('401')) {
+      window.location.href = '/login';
+      return;
+    }
+    throw err;
+  }
   startEventStream();
   attachUIHandlers();
 }
@@ -147,10 +166,28 @@ function toggleTheme() {
 // ──────────────────────────────────────────────────────────────────
 // Snapshot + contact list
 // ──────────────────────────────────────────────────────────────────
+// signOut posts to /logout (cookie cleared server-side) and reloads. The
+// reload lands on /login because the cookie no longer satisfies
+// requireAuth on the SPA root.
+async function signOut() {
+  try {
+    await fetch('/logout', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'X-Requested-With': 'udisend' },
+      redirect: 'manual',
+    });
+  } catch (e) {
+    console.warn('logout fetch failed', e);
+  }
+  window.location.href = '/login';
+}
+
 async function loadSnapshot() {
   const snap = await api('/api/snapshot');
   STATE.identity = snap.identity;
   STATE.contacts = snap.contacts;
+  STATE.authMode = snap.auth_mode || 'loopback';
   STATE.iceServers = (snap.ice_servers && snap.ice_servers.length)
     ? snap.ice_servers
     : ICE_SERVERS_FALLBACK;
@@ -159,6 +196,9 @@ async function loadSnapshot() {
   els.myAddr.textContent = snap.identity.address;
   els.myAlias.textContent = 'You';
   paintAvatar(els.myAvatar, 'You', snap.identity.hash, 'sm');
+  if (els.logoutBtn) {
+    els.logoutBtn.hidden = STATE.authMode !== 'public';
+  }
   await preloadPreviews();
   renderContacts();
 }
@@ -505,7 +545,13 @@ function updatePreview(hash, body, direction, ts, isUnreadIncrement) {
 // SSE events from Go
 // ──────────────────────────────────────────────────────────────────
 function startEventStream() {
-  const es = new EventSource('/api/events?token=' + encodeURIComponent(TOKEN));
+  // Public mode authenticates via the session cookie (browsers always send
+  // cookies on EventSource); loopback mode needs ?token= because the SSE
+  // handler accepts it as the auth-token query param.
+  const eventsURL = TOKEN
+    ? '/api/events?token=' + encodeURIComponent(TOKEN)
+    : '/api/events';
+  const es = new EventSource(eventsURL, { withCredentials: true });
   es.onopen = () => {
     els.connStatus.dataset.state = 'connected';
     els.connStatus.title = 'connected';
@@ -694,7 +740,10 @@ function onDataChannelMessage(peer, data) {
         const incrementUnread = peer.hash !== STATE.selectedHash;
         updatePreview(peer.hash, msg.body, 'in', when.getTime(), incrementUnread);
         persistHistory(peer.hash, 'in', 1, msg.body, msg.ts);
-        if (incrementUnread) toast(`${aliasOf(peer.hash)}: ${truncate(msg.body, 70)}`);
+        if (incrementUnread) {
+          toast(`${aliasOf(peer.hash)}: ${truncate(msg.body, 70)}`);
+          maybeNotify(`${aliasOf(peer.hash)}`, truncate(msg.body, 200), peer.hash);
+        }
         break;
       }
       case 'file_offer': {
@@ -703,6 +752,9 @@ function onDataChannelMessage(peer, data) {
           appendIncomingMessage(`incoming file: ${msg.name} (${humanSize(msg.size)})`, new Date(), 100);
         }
         updatePreview(peer.hash, '📎 ' + msg.name, 'in', Date.now(), peer.hash !== STATE.selectedHash);
+        if (peer.hash !== STATE.selectedHash) {
+          maybeNotify(`${aliasOf(peer.hash)} sent a file`, `${msg.name} · ${humanSize(msg.size)}`, peer.hash);
+        }
         break;
       }
       case 'file_end': {
@@ -854,6 +906,7 @@ function onCallInvite(peer) {
   STATE.call = { peer: peer.hash, role: 'callee', state: 'incoming', startedAt: Date.now(), localStream: null };
   showCallModal('incoming', aliasOf(peer.hash), 'Incoming call');
   startRingtone();
+  maybeNotify('Incoming call', `from ${aliasOf(peer.hash)}`, peer.hash, { requireInteraction: true });
 }
 
 async function acceptIncomingCall() {
@@ -1096,6 +1149,12 @@ function waitFor(predicate, timeoutMs) {
 function attachUIHandlers() {
   els.addContact.addEventListener('click', showAddContactModal);
   els.themeToggle.addEventListener('click', toggleTheme);
+  if (els.logoutBtn) {
+    els.logoutBtn.addEventListener('click', signOut);
+  }
+  if (els.menuBtn) {
+    els.menuBtn.addEventListener('click', showSettingsModal);
+  }
 
   els.searchInput.addEventListener('input', () => {
     STATE.searchQuery = els.searchInput.value;
@@ -1414,6 +1473,988 @@ function showAddContactModal() {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// Settings modal — tabbed shell
+// ──────────────────────────────────────────────────────────────────
+const SETTINGS_TABS = [
+  { id: 'security',      label: 'Security',      init: initSecurityTab      },
+  { id: 'network',       label: 'Network',       init: initNetworkTab       },
+  { id: 'privacy',       label: 'Privacy',       init: initPrivacyTab       },
+  { id: 'notifications', label: 'Notifications', init: initNotificationsTab },
+];
+
+function showSettingsModal() {
+  const root = els.modalRoot;
+  const tabsHTML = SETTINGS_TABS.map(t =>
+    `<button class="settings-tab" data-tab="${t.id}" role="tab">${escapeHTML(t.label)}</button>`
+  ).join('');
+  root.innerHTML = `
+    <div class="modal-backdrop">
+      <div class="modal modal-wide">
+        <h3>Settings</h3>
+        <nav class="settings-tabs" role="tablist">${tabsHTML}</nav>
+        <div class="modal-body" id="settings-panel" role="tabpanel" aria-busy="true">
+          <p class="section-help">Loading…</p>
+        </div>
+        <div class="modal-actions">
+          <button id="modal-close" class="primary">Close</button>
+        </div>
+      </div>
+    </div>
+  `;
+  const close = () => (root.innerHTML = '');
+  document.getElementById('modal-close').onclick = close;
+  root.querySelector('.modal-backdrop').addEventListener('click', e => {
+    if (e.target === e.currentTarget) close();
+  });
+
+  const lastTab = sessionStorage.getItem('udisend_settings_tab');
+  const initialId = SETTINGS_TABS.some(t => t.id === lastTab) ? lastTab : SETTINGS_TABS[0].id;
+
+  for (const btn of root.querySelectorAll('.settings-tab')) {
+    btn.addEventListener('click', () => activateSettingsTab(btn.dataset.tab));
+  }
+  activateSettingsTab(initialId);
+}
+
+function activateSettingsTab(id) {
+  const tab = SETTINGS_TABS.find(t => t.id === id);
+  if (!tab) return;
+  sessionStorage.setItem('udisend_settings_tab', id);
+  for (const btn of document.querySelectorAll('.settings-tab')) {
+    btn.classList.toggle('active', btn.dataset.tab === id);
+    btn.setAttribute('aria-selected', btn.dataset.tab === id ? 'true' : 'false');
+  }
+  const panel = document.getElementById('settings-panel');
+  panel.setAttribute('aria-busy', 'true');
+  panel.innerHTML = `<p class="section-help">Loading…</p>`;
+  Promise.resolve(tab.init(panel)).catch(err => {
+    panel.innerHTML = `<p class="section-help">Failed to load: ${escapeHTML(err.message)}</p>`;
+  }).finally(() => panel.removeAttribute('aria-busy'));
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Network tab — bootstrap nodes (other network sections appended below)
+// ──────────────────────────────────────────────────────────────────
+async function initNetworkTab(panel) {
+  panel.innerHTML = `
+    <section class="settings-section">
+      <h4>Bootstrap nodes</h4>
+      <p class="section-help">
+        Peers tried first to seed the DHT on startup and on Reconnect.
+        Manual entries take priority over auto-cached and built-in defaults.
+      </p>
+      <ul class="bootstrap-list" id="bootstrap-list" aria-busy="true">
+        <li class="bootstrap-empty">Loading…</li>
+      </ul>
+      <div class="bootstrap-add-row">
+        <input id="bootstrap-add-addr" placeholder="host:port — e.g. relay.example.com:9000" autocomplete="off" />
+        <input id="bootstrap-add-note" placeholder="Note (optional)" autocomplete="off" maxlength="80" />
+        <button class="add-btn" id="bootstrap-add-btn">Add</button>
+      </div>
+      <div class="section-actions">
+        <button id="bootstrap-reconnect">Reconnect</button>
+      </div>
+    </section>
+    <section class="settings-section" id="ice-section">
+      <h4>STUN / TURN servers</h4>
+      <p class="section-help">
+        Relay servers used by your browser's WebRTC stack to traverse NAT.
+        Custom entries are merged with peers discovered through the network.
+      </p>
+      <ul class="bootstrap-list" id="ice-list" aria-busy="true">
+        <li class="bootstrap-empty">Loading…</li>
+      </ul>
+      <div class="ice-add-grid">
+        <input id="ice-add-url"  placeholder="stun:host:port  or  turn:host:port?transport=udp" autocomplete="off" />
+        <input id="ice-add-user" placeholder="Username (TURN)" autocomplete="off" />
+        <input id="ice-add-cred" placeholder="Credential (TURN)" autocomplete="off" type="password" />
+        <button class="add-btn" id="ice-add-btn">Add</button>
+      </div>
+      <label class="check-row">
+        <input type="checkbox" id="ice-disable-fallback" />
+        <span>Don't fall back to the public Google STUN server</span>
+      </label>
+    </section>
+    <section class="settings-section" id="netstatus-section">
+      <h4>Network status</h4>
+      <p class="section-help">Read-only diagnostics about the local DHT node.</p>
+      <ul class="netstatus-list" id="netstatus-list" aria-busy="true">
+        <li>Loading…</li>
+      </ul>
+    </section>
+  `;
+  await initBootstrapPanel(panel);
+  await initICEPanel(panel);
+  await initNetworkStatusPanel(panel);
+}
+
+async function initBootstrapPanel(panel) {
+  const addBtn = panel.querySelector('#bootstrap-add-btn');
+  const addAddr = panel.querySelector('#bootstrap-add-addr');
+  const addNote = panel.querySelector('#bootstrap-add-note');
+  const reconnectBtn = panel.querySelector('#bootstrap-reconnect');
+
+  async function refresh(initial) {
+    try {
+      const data = await api('/api/bootstrap');
+      renderBootstrapList(data.entries || []);
+    } catch (e) {
+      if (initial) {
+        panel.querySelector('#bootstrap-list').innerHTML =
+          `<li class="bootstrap-empty">Failed to load: ${escapeHTML(e.message)}</li>`;
+      } else {
+        toast(e.message, 'error');
+      }
+    }
+  }
+
+  addBtn.onclick = async () => {
+    const address = addAddr.value.trim();
+    if (!address) { addAddr.focus(); return; }
+    const note = addNote.value.trim();
+    addBtn.disabled = true;
+    try {
+      const data = await api('/api/bootstrap/add', { method: 'POST', body: { address, note } });
+      addAddr.value = '';
+      addNote.value = '';
+      renderBootstrapList(data.entries || []);
+      if (data.dial_error) {
+        toast(`Added but unreachable: ${data.dial_error}`, 'error');
+      } else {
+        toast('Bootstrap added — dialed ok');
+      }
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      addBtn.disabled = false;
+      addAddr.focus();
+    }
+  };
+  addAddr.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); addBtn.click(); }
+  });
+  addNote.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); addBtn.click(); }
+  });
+
+  reconnectBtn.onclick = async () => {
+    reconnectBtn.disabled = true;
+    const original = reconnectBtn.textContent;
+    reconnectBtn.textContent = 'Reconnecting…';
+    try {
+      const data = await api('/api/bootstrap/reconnect', { method: 'POST', body: {} });
+      renderBootstrapList(data.entries || []);
+      const ok = (data.results || []).filter(r => r.status === 'ok').length;
+      const total = (data.results || []).length;
+      if (total === 0) {
+        toast('No enabled bootstrap entries to dial');
+      } else {
+        toast(`Reconnect: ${ok}/${total} succeeded`, ok === total ? null : 'error');
+      }
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      reconnectBtn.textContent = original;
+      reconnectBtn.disabled = false;
+    }
+  };
+
+  await refresh(true);
+}
+
+function renderBootstrapList(entries) {
+  const list = document.getElementById('bootstrap-list');
+  if (!list) return;
+  list.removeAttribute('aria-busy');
+  if (!entries.length) {
+    list.innerHTML = `<li class="bootstrap-empty">No bootstrap entries yet. Add one below to get started.</li>`;
+    return;
+  }
+  list.innerHTML = entries.map(renderBootstrapRow).join('');
+  for (const e of entries) {
+    wireBootstrapRow(e);
+  }
+}
+
+function renderBootstrapRow(e) {
+  const id = bootstrapRowId(e);
+  const sourceLabel = e.source === 'manual' ? 'Manual' : (e.source === 'cache' ? 'Cached' : 'Default');
+  const statusAttr = e.last_status || '';
+  const statusTitle = bootstrapStatusTitle(e);
+  const subParts = [`<span class="source-tag ${e.source}">${sourceLabel}</span>`];
+  if (e.note) subParts.push(`<span class="note" title="${escapeHTML(e.note)}">${escapeHTML(e.note)}</span>`);
+  if (e.last_status_at) {
+    subParts.push(`<span title="${escapeHTML(new Date(e.last_status_at * 1000).toLocaleString())}">${bootstrapRelativeTime(e.last_status_at)}</span>`);
+  }
+  const toggleHTML = e.source === 'manual'
+    ? `<button class="toggle-switch" data-action="toggle" data-addr="${escapeHTML(e.address)}" role="switch" aria-checked="${e.enabled ? 'true' : 'false'}" title="${e.enabled ? 'Disable' : 'Enable'}"></button>`
+    : '';
+  const removable = e.source !== 'default';
+  const removeHTML = removable
+    ? `<button class="icon-btn ghost" data-action="remove" data-addr="${escapeHTML(e.address)}" data-source="${e.source}" title="Remove" aria-label="Remove">
+         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+           <path d="M5 7h14M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M7 7l1 12a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2l1-12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+         </svg>
+       </button>`
+    : '';
+  return `
+    <li class="bootstrap-row ${e.enabled ? '' : 'disabled'}" id="${id}">
+      <span class="bootstrap-status" data-status="${escapeHTML(statusAttr)}" title="${escapeHTML(statusTitle)}"></span>
+      <div class="bootstrap-meta">
+        <div class="bootstrap-addr" title="${escapeHTML(e.address)}">${escapeHTML(e.address)}</div>
+        <div class="bootstrap-sub">${subParts.join('')}</div>
+      </div>
+      <div class="bootstrap-actions">${toggleHTML}${removeHTML}</div>
+    </li>`;
+}
+
+function wireBootstrapRow(e) {
+  const row = document.getElementById(bootstrapRowId(e));
+  if (!row) return;
+  const toggle = row.querySelector('[data-action="toggle"]');
+  if (toggle) {
+    toggle.addEventListener('click', async () => {
+      const next = toggle.getAttribute('aria-checked') !== 'true';
+      try {
+        const data = await api('/api/bootstrap/toggle', {
+          method: 'POST',
+          body: { address: e.address, enabled: next },
+        });
+        renderBootstrapList(data.entries || []);
+      } catch (err) { toast(err.message, 'error'); }
+    });
+  }
+  const remove = row.querySelector('[data-action="remove"]');
+  if (remove) {
+    remove.addEventListener('click', async () => {
+      try {
+        const data = await api('/api/bootstrap/remove', {
+          method: 'POST',
+          body: { address: e.address, source: e.source },
+        });
+        renderBootstrapList(data.entries || []);
+        toast('Removed');
+      } catch (err) { toast(err.message, 'error'); }
+    });
+  }
+}
+
+function bootstrapRowId(e) {
+  return 'bs-' + (e.address || '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '');
+}
+
+function bootstrapStatusTitle(e) {
+  if (!e.last_status) return 'Not yet attempted';
+  const when = e.last_status_at ? ' at ' + new Date(e.last_status_at * 1000).toLocaleString() : '';
+  return (e.last_status === 'ok' ? 'Last bootstrap succeeded' : 'Last bootstrap failed') + when;
+}
+
+function bootstrapRelativeTime(unixSeconds) {
+  const diff = Math.floor(Date.now() / 1000 - unixSeconds);
+  if (diff < 5) return 'just now';
+  if (diff < 60) return diff + 's ago';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Network tab — STUN/TURN servers + read-only DHT status
+// ──────────────────────────────────────────────────────────────────
+async function initICEPanel(panel) {
+  const list = panel.querySelector('#ice-list');
+  const url = panel.querySelector('#ice-add-url');
+  const user = panel.querySelector('#ice-add-user');
+  const cred = panel.querySelector('#ice-add-cred');
+  const addBtn = panel.querySelector('#ice-add-btn');
+  const fallbackBox = panel.querySelector('#ice-disable-fallback');
+
+  function render(state) {
+    list.removeAttribute('aria-busy');
+    fallbackBox.checked = !!state.disable_default_fallback;
+    const entries = state.entries || [];
+    if (!entries.length) {
+      list.innerHTML = `<li class="bootstrap-empty">No custom ICE servers — using whatever the network discovers.</li>`;
+      return;
+    }
+    list.innerHTML = entries.map(e => {
+      const sourceLabel = e.source === 'manual' ? 'Manual' : 'Discovered';
+      const credChip = e.username ? `<span class="note">user: ${escapeHTML(e.username)}</span>` : '';
+      const toggle = e.source === 'manual'
+        ? `<button class="toggle-switch" data-action="toggle" data-url="${escapeHTML(e.url)}" role="switch" aria-checked="${e.enabled ? 'true' : 'false'}" title="${e.enabled ? 'Disable' : 'Enable'}"></button>`
+        : '';
+      const remove = e.source === 'manual'
+        ? `<button class="icon-btn ghost" data-action="remove" data-url="${escapeHTML(e.url)}" title="Remove" aria-label="Remove">
+             <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+               <path d="M5 7h14M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M7 7l1 12a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2l1-12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+             </svg>
+           </button>`
+        : '';
+      return `
+        <li class="bootstrap-row ${e.enabled ? '' : 'disabled'}">
+          <span class="bootstrap-status" data-status="" title=""></span>
+          <div class="bootstrap-meta">
+            <div class="bootstrap-addr" title="${escapeHTML(e.url)}">${escapeHTML(e.url)}</div>
+            <div class="bootstrap-sub">
+              <span class="source-tag ${e.source}">${sourceLabel}</span>
+              ${credChip}
+            </div>
+          </div>
+          <div class="bootstrap-actions">${toggle}${remove}</div>
+        </li>`;
+    }).join('');
+    list.querySelectorAll('[data-action="toggle"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const next = btn.getAttribute('aria-checked') !== 'true';
+        try {
+          const data = await api('/api/ice/toggle', { method: 'POST', body: { url: btn.dataset.url, enabled: next } });
+          render(data);
+        } catch (err) { toast(err.message, 'error'); }
+      });
+    });
+    list.querySelectorAll('[data-action="remove"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        try {
+          const data = await api('/api/ice/remove', { method: 'POST', body: { url: btn.dataset.url } });
+          render(data);
+          toast('Removed');
+        } catch (err) { toast(err.message, 'error'); }
+      });
+    });
+  }
+
+  async function refresh() {
+    try {
+      const data = await api('/api/ice');
+      render(data);
+    } catch (e) {
+      list.innerHTML = `<li class="bootstrap-empty">Failed: ${escapeHTML(e.message)}</li>`;
+    }
+  }
+
+  addBtn.onclick = async () => {
+    const u = url.value.trim();
+    if (!u) { url.focus(); return; }
+    addBtn.disabled = true;
+    try {
+      const data = await api('/api/ice/add', { method: 'POST', body: {
+        url: u, username: user.value.trim(), credential: cred.value,
+      }});
+      url.value = ''; user.value = ''; cred.value = '';
+      render(data);
+      toast('ICE server added');
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      addBtn.disabled = false;
+      url.focus();
+    }
+  };
+  url.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addBtn.click(); } });
+  cred.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addBtn.click(); } });
+
+  fallbackBox.addEventListener('change', async () => {
+    try {
+      const data = await api('/api/ice/fallback', { method: 'POST', body: { disabled: fallbackBox.checked } });
+      render(data);
+    } catch (e) {
+      toast(e.message, 'error');
+      fallbackBox.checked = !fallbackBox.checked;
+    }
+  });
+
+  await refresh();
+}
+
+async function initNetworkStatusPanel(panel) {
+  const list = panel.querySelector('#netstatus-list');
+  try {
+    const data = await api('/api/network/status');
+    list.removeAttribute('aria-busy');
+    const rows = [
+      ['Local UDP', data.local_address || '—'],
+      ['Identity', abbrev(data.identity_hash || '')],
+      ['Routing-table size', data.routing_table_size ?? 0],
+      ['Active sessions', data.active_sessions ?? 0],
+      ['Cached peers', data.seen_peers ?? 0],
+      ['Public mode', data.public_mode ? 'yes' : 'no'],
+    ];
+    list.innerHTML = rows.map(([k, v]) =>
+      `<li><span class="netstatus-key">${escapeHTML(k)}</span><span class="netstatus-val">${escapeHTML(String(v))}</span></li>`
+    ).join('');
+  } catch (e) {
+    list.innerHTML = `<li>Failed: ${escapeHTML(e.message)}</li>`;
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Security tab — passphrase, TOTP, sessions, audit log
+// ──────────────────────────────────────────────────────────────────
+async function initSecurityTab(panel) {
+  panel.innerHTML = `
+    <section class="settings-section" id="sec-passphrase-section">
+      <h4>Passphrase</h4>
+      <p class="section-help">Used to log in to this messenger from a remote browser.</p>
+      <div class="sec-actions">
+        <button id="sec-change-pass">Change passphrase…</button>
+        <span class="muted" id="sec-pass-status">—</span>
+      </div>
+    </section>
+    <section class="settings-section" id="sec-totp-section">
+      <h4>Two-factor authentication (TOTP)</h4>
+      <p class="section-help">A 6-digit code from an authenticator app (Aegis, Authy, 1Password) on top of the passphrase.</p>
+      <div class="sec-actions">
+        <button id="sec-totp-enroll" hidden>Enable TOTP…</button>
+        <button id="sec-totp-disable" class="danger" hidden>Disable TOTP…</button>
+        <button id="sec-recovery-regen" hidden>Regenerate recovery codes…</button>
+        <span class="muted" id="sec-totp-status">—</span>
+      </div>
+    </section>
+    <section class="settings-section" id="sec-sessions-section">
+      <h4>Active sessions</h4>
+      <p class="section-help">Logged-in browsers. Revoke any you don't recognise.</p>
+      <ul class="bootstrap-list" id="sec-sessions-list" aria-busy="true">
+        <li class="bootstrap-empty">Loading…</li>
+      </ul>
+    </section>
+    <section class="settings-section" id="sec-audit-section">
+      <h4>Audit log</h4>
+      <p class="section-help">Recent login attempts, lockouts and logouts.</p>
+      <ul class="audit-list" id="sec-audit-list" aria-busy="true">
+        <li>Loading…</li>
+      </ul>
+    </section>
+  `;
+
+  let state = await api('/api/auth/state');
+  const passStatus = panel.querySelector('#sec-pass-status');
+  const totpStatus = panel.querySelector('#sec-totp-status');
+  const enrollBtn = panel.querySelector('#sec-totp-enroll');
+  const disableBtn = panel.querySelector('#sec-totp-disable');
+  const regenBtn = panel.querySelector('#sec-recovery-regen');
+
+  function render() {
+    passStatus.textContent = state.passphrase_set
+      ? `Set on ${new Date(state.passphrase_updated_at * 1000).toLocaleDateString()}`
+      : 'Not set — public mode requires `messenger -set-password`';
+    panel.querySelector('#sec-change-pass').disabled = !state.passphrase_set;
+    if (state.totp_enrolled) {
+      totpStatus.textContent = `Enabled — ${state.recovery_codes_remaining} recovery code(s) left`;
+      enrollBtn.hidden = true;
+      disableBtn.hidden = false;
+      regenBtn.hidden = false;
+    } else {
+      totpStatus.textContent = 'Disabled';
+      enrollBtn.hidden = !state.passphrase_set;
+      disableBtn.hidden = true;
+      regenBtn.hidden = true;
+    }
+  }
+  render();
+
+  panel.querySelector('#sec-change-pass').onclick = async () => {
+    await showPassphraseChangeModal(state.totp_enrolled);
+    state = await api('/api/auth/state');
+    render();
+  };
+  enrollBtn.onclick = async () => {
+    const enrolled = await showTOTPEnrollModal();
+    if (enrolled) {
+      state = await api('/api/auth/state');
+      render();
+    }
+  };
+  disableBtn.onclick = async () => {
+    const ok = await showTOTPDisableModal();
+    if (ok) {
+      state = await api('/api/auth/state');
+      render();
+    }
+  };
+  regenBtn.onclick = async () => {
+    const refreshed = await showRecoveryRegenModal();
+    if (refreshed) {
+      state = await api('/api/auth/state');
+      render();
+    }
+  };
+
+  await loadAuthSessions(panel);
+  await loadAuditLog(panel);
+}
+
+async function loadAuthSessions(panel) {
+  const list = panel.querySelector('#sec-sessions-list');
+  try {
+    const data = await api('/api/auth/sessions');
+    list.removeAttribute('aria-busy');
+    const sessions = data.sessions || [];
+    if (!sessions.length) {
+      list.innerHTML = `<li class="bootstrap-empty">No active sessions tracked.</li>`;
+      return;
+    }
+    list.innerHTML = sessions.map(s => {
+      const isCurrent = s.is_current;
+      const ua = truncate(s.user_agent || 'unknown agent', 70);
+      const ip = s.remote_ip || '—';
+      const last = s.last_seen ? bootstrapRelativeTime(s.last_seen) : '—';
+      const removeBtn = isCurrent ? '' : `<button class="icon-btn ghost" data-revoke="${escapeHTML(s.public_id)}" title="Revoke" aria-label="Revoke">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+          <path d="M5 7h14M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M7 7l1 12a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2l1-12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg></button>`;
+      return `
+        <li class="bootstrap-row">
+          <span class="bootstrap-status" data-status="${isCurrent ? 'ok' : ''}" title="${isCurrent ? 'Current session' : ''}"></span>
+          <div class="bootstrap-meta">
+            <div class="bootstrap-addr" title="${escapeHTML(ua)}">${escapeHTML(ua)}</div>
+            <div class="bootstrap-sub">
+              <span class="source-tag ${isCurrent ? 'manual' : ''}">${isCurrent ? 'This browser' : 'Other'}</span>
+              <span>${escapeHTML(ip)}</span>
+              <span title="${escapeHTML(new Date(s.last_seen * 1000).toLocaleString())}">last seen ${escapeHTML(last)}</span>
+            </div>
+          </div>
+          <div class="bootstrap-actions">${removeBtn}</div>
+        </li>`;
+    }).join('');
+    list.querySelectorAll('[data-revoke]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        try {
+          await api('/api/auth/sessions/revoke', { method: 'POST', body: { public_id: btn.dataset.revoke } });
+          await loadAuthSessions(panel);
+          toast('Session revoked');
+        } catch (e) { toast(e.message, 'error'); }
+      });
+    });
+  } catch (e) {
+    list.innerHTML = `<li class="bootstrap-empty">Failed: ${escapeHTML(e.message)}</li>`;
+  }
+}
+
+async function loadAuditLog(panel) {
+  const list = panel.querySelector('#sec-audit-list');
+  try {
+    const data = await api('/api/auth/log?limit=50');
+    list.removeAttribute('aria-busy');
+    const entries = data.entries || [];
+    if (!entries.length) {
+      list.innerHTML = `<li>No audit events yet.</li>`;
+      return;
+    }
+    list.innerHTML = entries.map(e => {
+      const when = new Date(e.timestamp * 1000).toLocaleString();
+      const ua = truncate(e.user_agent || '—', 60);
+      const note = e.note ? ` · ${escapeHTML(e.note)}` : '';
+      return `<li>
+        <span class="audit-event">${escapeHTML(e.event)}</span>
+        <span class="audit-when" title="${escapeHTML(when)}">${escapeHTML(bootstrapRelativeTime(e.timestamp))}</span>
+        <span class="audit-ip">${escapeHTML(e.remote_ip || '—')}</span>
+        <span class="audit-ua" title="${escapeHTML(ua)}">${escapeHTML(ua)}${note}</span>
+      </li>`;
+    }).join('');
+  } catch (e) {
+    list.innerHTML = `<li>Failed: ${escapeHTML(e.message)}</li>`;
+  }
+}
+
+function showPassphraseChangeModal(totpEnrolled) {
+  return new Promise(resolve => {
+    const root = els.modalRoot;
+    const stepUpHTML = totpEnrolled ? `
+      <label>TOTP code (or recovery code)</label>
+      <input id="pp-code" inputmode="numeric" maxlength="20" autocomplete="one-time-code" />` : '';
+    const stack = document.createElement('div');
+    stack.className = 'modal-backdrop modal-stack';
+    stack.innerHTML = `
+        <div class="modal">
+          <h3>Change passphrase</h3>
+          <p class="muted">You'll be signed out of all other sessions.</p>
+          <label>Current passphrase</label>
+          <input id="pp-old" type="password" autocomplete="current-password" />
+          <label>New passphrase</label>
+          <input id="pp-new" type="password" autocomplete="new-password" />
+          <label>Confirm new passphrase</label>
+          <input id="pp-new2" type="password" autocomplete="new-password" />
+          ${stepUpHTML}
+          <div class="modal-actions">
+            <button id="pp-cancel">Cancel</button>
+            <button id="pp-save" class="primary">Save</button>
+          </div>
+        </div>`;
+    root.appendChild(stack);
+    const close = () => { stack.remove(); resolve(false); };
+    stack.querySelector('#pp-cancel').onclick = close;
+    stack.addEventListener('click', e => { if (e.target === stack) close(); });
+    stack.querySelector('#pp-save').onclick = async () => {
+      const oldP = stack.querySelector('#pp-old').value;
+      const n1 = stack.querySelector('#pp-new').value;
+      const n2 = stack.querySelector('#pp-new2').value;
+      if (!oldP || !n1) { toast('All fields required', 'error'); return; }
+      if (n1 !== n2) { toast('New passphrases do not match', 'error'); return; }
+      const codeRaw = totpEnrolled ? (stack.querySelector('#pp-code').value || '').trim() : '';
+      const body = { old: oldP, new: n1 };
+      if (/^[0-9]{6}$/.test(codeRaw)) body.code = codeRaw;
+      else if (codeRaw) body.recovery = codeRaw;
+      try {
+        await api('/api/auth/change-passphrase', { method: 'POST', body });
+        toast('Passphrase updated');
+        stack.remove();
+        resolve(true);
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    setTimeout(() => stack.querySelector('#pp-old').focus(), 50);
+  });
+}
+
+function showTOTPEnrollModal() {
+  return new Promise(async resolve => {
+    let start;
+    try {
+      start = await api('/api/auth/totp/start', { method: 'POST', body: {} });
+    } catch (e) {
+      toast(e.message, 'error');
+      resolve(false);
+      return;
+    }
+    const root = els.modalRoot;
+    root.insertAdjacentHTML('beforeend', `
+      <div class="modal-backdrop modal-stack">
+        <div class="modal">
+          <h3>Enable two-factor authentication</h3>
+          <p class="muted">Scan the secret with your authenticator app, then type a code to confirm.</p>
+          <pre class="fp-block" id="totp-secret">${escapeHTML(start.secret_b32)}</pre>
+          <p class="muted" style="margin-top:8px;font-size:12px;">Or paste this URL into a TOTP app:</p>
+          <pre class="fp-block" style="font-size:11px;">${escapeHTML(start.otpauth_url)}</pre>
+          <label>6-digit code</label>
+          <input id="totp-code" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" />
+          <div class="modal-actions">
+            <button id="totp-cancel">Cancel</button>
+            <button id="totp-confirm" class="primary">Enable</button>
+          </div>
+        </div>
+      </div>`);
+    const stack = root.querySelector('.modal-stack');
+    const close = () => { stack.remove(); resolve(false); };
+    stack.querySelector('#totp-cancel').onclick = close;
+    stack.addEventListener('click', e => { if (e.target === stack) close(); });
+    stack.querySelector('#totp-confirm').onclick = async () => {
+      const code = stack.querySelector('#totp-code').value.trim();
+      try {
+        const data = await api('/api/auth/totp/finish', {
+          method: 'POST',
+          body: { enroll_id: start.enroll_id, code },
+        });
+        stack.remove();
+        await showRecoveryCodesModal(data.recovery_codes || []);
+        resolve(true);
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    setTimeout(() => stack.querySelector('#totp-code').focus(), 50);
+  });
+}
+
+function showTOTPDisableModal() {
+  return new Promise(resolve => {
+    const root = els.modalRoot;
+    const stack = document.createElement('div');
+    stack.className = 'modal-backdrop modal-stack';
+    stack.innerHTML = `
+        <div class="modal">
+          <h3>Disable two-factor authentication</h3>
+          <p class="muted">Provide a current 6-digit code or a recovery code (passphrase alone will not disable 2FA).</p>
+          <label>TOTP or recovery code</label>
+          <input id="off-code" inputmode="text" maxlength="20" autocomplete="one-time-code" />
+          <label>Passphrase</label>
+          <input id="off-pass" type="password" autocomplete="current-password" />
+          <div class="modal-actions">
+            <button id="off-cancel">Cancel</button>
+            <button id="off-confirm" class="primary danger">Disable</button>
+          </div>
+        </div>`;
+    root.appendChild(stack);
+    const close = () => { stack.remove(); resolve(false); };
+    stack.querySelector('#off-cancel').onclick = close;
+    stack.addEventListener('click', e => { if (e.target === stack) close(); });
+    stack.querySelector('#off-confirm').onclick = async () => {
+      const codeRaw = stack.querySelector('#off-code').value.trim();
+      const pass = stack.querySelector('#off-pass').value;
+      const body = { passphrase: pass };
+      if (/^[0-9]{6}$/.test(codeRaw)) body.code = codeRaw;
+      else if (codeRaw) body.recovery = codeRaw;
+      try {
+        await api('/api/auth/totp/disable', { method: 'POST', body });
+        toast('Two-factor disabled');
+        stack.remove();
+        resolve(true);
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    setTimeout(() => stack.querySelector('#off-code').focus(), 50);
+  });
+}
+
+function showRecoveryRegenModal() {
+  return new Promise(resolve => {
+    const root = els.modalRoot;
+    root.insertAdjacentHTML('beforeend', `
+      <div class="modal-backdrop modal-stack">
+        <div class="modal">
+          <h3>Regenerate recovery codes</h3>
+          <p class="muted">Confirm with a current TOTP code or passphrase. Old codes will stop working.</p>
+          <label>TOTP code</label>
+          <input id="rg-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
+          <label>Or passphrase</label>
+          <input id="rg-pass" type="password" autocomplete="current-password" />
+          <div class="modal-actions">
+            <button id="rg-cancel">Cancel</button>
+            <button id="rg-confirm" class="primary">Regenerate</button>
+          </div>
+        </div>
+      </div>`);
+    const stack = root.querySelector('.modal-stack');
+    const close = () => { stack.remove(); resolve(false); };
+    stack.querySelector('#rg-cancel').onclick = close;
+    stack.addEventListener('click', e => { if (e.target === stack) close(); });
+    stack.querySelector('#rg-confirm').onclick = async () => {
+      const codeRaw = stack.querySelector('#rg-code').value.trim();
+      const pass = stack.querySelector('#rg-pass').value;
+      const body = { passphrase: pass };
+      if (/^[0-9]{6}$/.test(codeRaw)) body.code = codeRaw;
+      else if (codeRaw) body.recovery = codeRaw;
+      try {
+        const data = await api('/api/auth/recovery/regenerate', { method: 'POST', body });
+        stack.remove();
+        await showRecoveryCodesModal(data.recovery_codes || []);
+        resolve(true);
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    setTimeout(() => stack.querySelector('#rg-code').focus(), 50);
+  });
+}
+
+function showRecoveryCodesModal(codes) {
+  return new Promise(resolve => {
+    const root = els.modalRoot;
+    root.insertAdjacentHTML('beforeend', `
+      <div class="modal-backdrop modal-stack">
+        <div class="modal">
+          <h3>Save these recovery codes</h3>
+          <p class="muted">Store them somewhere safe. Each code lets you sign in once if you lose your authenticator.</p>
+          <pre class="fp-block">${codes.map(escapeHTML).join('\n')}</pre>
+          <div class="modal-actions">
+            <button id="rc-copy">Copy</button>
+            <button id="rc-done" class="primary">Done</button>
+          </div>
+        </div>
+      </div>`);
+    const stack = root.querySelector('.modal-stack');
+    stack.querySelector('#rc-copy').onclick = () => {
+      navigator.clipboard.writeText(codes.join('\n')).then(() => toast('Copied'));
+    };
+    stack.querySelector('#rc-done').onclick = () => { stack.remove(); resolve(); };
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Privacy tab — history retention, storage usage/vacuum, identity backup
+// ──────────────────────────────────────────────────────────────────
+async function initPrivacyTab(panel) {
+  panel.innerHTML = `
+    <section class="settings-section">
+      <h4>History retention</h4>
+      <p class="section-help">Automatically delete chat messages older than the chosen age. Set to 0 to disable.</p>
+      <div class="settings-row">
+        <input id="retain-days" type="number" min="0" max="3650" step="1" value="0" />
+        <span class="muted">days (0 = keep forever)</span>
+        <button id="retain-save">Save</button>
+      </div>
+    </section>
+    <section class="settings-section">
+      <h4>Storage</h4>
+      <p class="section-help">Local SQLite database — contacts, messages, outbox, sessions.</p>
+      <ul class="netstatus-list" id="storage-list" aria-busy="true">
+        <li>Loading…</li>
+      </ul>
+      <div class="section-actions">
+        <button id="storage-vacuum">Vacuum database</button>
+      </div>
+    </section>
+    <section class="settings-section">
+      <h4>Identity backup</h4>
+      <p class="section-help">Download an encrypted copy of your identity seed. Anyone with this file and your passphrase can impersonate you — store it as carefully as the passphrase.</p>
+      <div class="section-actions">
+        <button id="identity-export">Export identity…</button>
+      </div>
+    </section>
+  `;
+
+  const retainInput = panel.querySelector('#retain-days');
+  const retainSave = panel.querySelector('#retain-save');
+  try {
+    const cur = await api('/api/settings/history-retention');
+    retainInput.value = String(cur.days || 0);
+  } catch (e) { /* leave default */ }
+  retainSave.onclick = async () => {
+    const v = Math.max(0, Math.min(3650, parseInt(retainInput.value, 10) || 0));
+    retainInput.value = String(v);
+    try {
+      await api('/api/settings/history-retention', { method: 'POST', body: { days: v } });
+      toast('Saved');
+    } catch (e) { toast(e.message, 'error'); }
+  };
+
+  const storageList = panel.querySelector('#storage-list');
+  async function loadUsage() {
+    try {
+      const u = await api('/api/storage/usage');
+      storageList.removeAttribute('aria-busy');
+      const rows = [
+        ['Database file', humanSize(u.db_bytes || 0)],
+        ['Messages', String(u.messages || 0)],
+        ['Contacts', String(u.contacts || 0)],
+        ['Outbox queued', String(u.outbox || 0)],
+      ];
+      storageList.innerHTML = rows.map(([k, v]) =>
+        `<li><span class="netstatus-key">${escapeHTML(k)}</span><span class="netstatus-val">${escapeHTML(v)}</span></li>`
+      ).join('');
+    } catch (e) { storageList.innerHTML = `<li>Failed: ${escapeHTML(e.message)}</li>`; }
+  }
+  await loadUsage();
+  panel.querySelector('#storage-vacuum').onclick = async () => {
+    try {
+      const r = await api('/api/storage/vacuum', { method: 'POST', body: {} });
+      toast(`Reclaimed ${humanSize(r.reclaimed_bytes || 0)}`);
+      await loadUsage();
+    } catch (e) { toast(e.message, 'error'); }
+  };
+
+  panel.querySelector('#identity-export').onclick = () => showIdentityExportModal();
+}
+
+async function showIdentityExportModal() {
+  let totpEnrolled = false;
+  try {
+    const st = await api('/api/auth/state');
+    totpEnrolled = !!st.totp_enrolled;
+  } catch (e) { /* fall back to passphrase-only modal */ }
+  return new Promise(resolve => {
+    const root = els.modalRoot;
+    const stepUpHTML = totpEnrolled ? `
+      <label>TOTP code (or recovery code)</label>
+      <input id="ix-code" inputmode="text" maxlength="20" autocomplete="one-time-code" />` : '';
+    const stack = document.createElement('div');
+    stack.className = 'modal-backdrop modal-stack';
+    stack.innerHTML = `
+        <div class="modal">
+          <h3>Export identity</h3>
+          <p class="muted">Confirm your current passphrase. The exported file will be encrypted with the same passphrase.</p>
+          <label>Passphrase</label>
+          <input id="ix-pass" type="password" autocomplete="current-password" />
+          ${stepUpHTML}
+          <div class="modal-actions">
+            <button id="ix-cancel">Cancel</button>
+            <button id="ix-go" class="primary">Download</button>
+          </div>
+        </div>`;
+    root.appendChild(stack);
+    const close = () => { stack.remove(); resolve(); };
+    stack.querySelector('#ix-cancel').onclick = close;
+    stack.querySelector('#ix-go').onclick = async () => {
+      const pass = stack.querySelector('#ix-pass').value;
+      if (!pass) { toast('Passphrase required', 'error'); return; }
+      const body = { passphrase: pass };
+      if (totpEnrolled) {
+        const codeRaw = (stack.querySelector('#ix-code').value || '').trim();
+        if (/^[0-9]{6}$/.test(codeRaw)) body.code = codeRaw;
+        else if (codeRaw) body.recovery = codeRaw;
+      }
+      try {
+        const r = await fetch('/api/identity/export', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'X-Requested-With': 'udisend',
+            'Content-Type': 'application/json',
+            ...(TOKEN ? { 'Authorization': 'Bearer ' + TOKEN } : {}),
+          },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'udisend-identity.bin';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        toast('Identity exported');
+        close();
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    setTimeout(() => stack.querySelector('#ix-pass').focus(), 50);
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Notifications tab — browser notifications + verbose-logs toggle
+// ──────────────────────────────────────────────────────────────────
+async function initNotificationsTab(panel) {
+  const supported = 'Notification' in window;
+  const permission = supported ? Notification.permission : 'unsupported';
+  const enabled = localStorage.getItem('udisend_notifications') === 'on' && permission === 'granted';
+  panel.innerHTML = `
+    <section class="settings-section">
+      <h4>Browser notifications</h4>
+      <p class="section-help">Show a desktop notification for incoming messages and calls when this tab is in the background.</p>
+      <label class="check-row">
+        <input type="checkbox" id="notif-enable" ${enabled ? 'checked' : ''} ${supported ? '' : 'disabled'} />
+        <span>${supported ? 'Show notifications' : 'Not supported by this browser'}</span>
+      </label>
+      <p class="muted" id="notif-status" style="font-size:12px;">Permission: ${escapeHTML(permission)}</p>
+    </section>
+    <section class="settings-section" id="logs-section">
+      <h4>Diagnostics</h4>
+      <p class="section-help">Verbose server logs help diagnose connectivity issues, at the cost of larger log files.</p>
+      <label class="check-row">
+        <input type="checkbox" id="logs-verbose" />
+        <span>Verbose server logs</span>
+      </label>
+    </section>
+  `;
+  const cb = panel.querySelector('#notif-enable');
+  const status = panel.querySelector('#notif-status');
+  cb.addEventListener('change', async () => {
+    if (!cb.checked) {
+      localStorage.setItem('udisend_notifications', 'off');
+      return;
+    }
+    if (Notification.permission === 'default') {
+      const got = await Notification.requestPermission();
+      status.textContent = `Permission: ${got}`;
+      if (got !== 'granted') { cb.checked = false; return; }
+    }
+    if (Notification.permission === 'granted') {
+      localStorage.setItem('udisend_notifications', 'on');
+    } else {
+      cb.checked = false;
+      localStorage.setItem('udisend_notifications', 'off');
+    }
+  });
+
+  const verbose = panel.querySelector('#logs-verbose');
+  try {
+    const cur = await api('/api/settings/log-level');
+    verbose.checked = cur.level === 'debug';
+  } catch (e) { /* leave unchecked */ }
+  verbose.addEventListener('change', async () => {
+    try {
+      await api('/api/settings/log-level', { method: 'POST', body: { level: verbose.checked ? 'debug' : 'info' } });
+      toast(verbose.checked ? 'Verbose logs on' : 'Verbose logs off');
+    } catch (e) {
+      toast(e.message, 'error');
+      verbose.checked = !verbose.checked;
+    }
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────
 function aliasOf(hash) {
@@ -1540,6 +2581,32 @@ function checkmarkIcon() {
   </svg>`;
 
   return span;
+}
+
+// maybeNotify shows a desktop notification iff the user opted in AND the
+// document is currently hidden. Quietly noop'd in any other case so we
+// never compete with the in-page UI for the user's attention. Clicking
+// the notification focuses the window and selects the relevant chat.
+function maybeNotify(title, body, peerHash, opts) {
+  if (!('Notification' in window)) return;
+  if (Notification.permission !== 'granted') return;
+  if (localStorage.getItem('udisend_notifications') !== 'on') return;
+  if (typeof document !== 'undefined' && !document.hidden) return;
+  try {
+    const n = new Notification(title, {
+      body,
+      tag: peerHash || title,
+      silent: false,
+      requireInteraction: !!(opts && opts.requireInteraction),
+    });
+    n.onclick = () => {
+      window.focus();
+      if (peerHash) selectContact(peerHash);
+      n.close();
+    };
+  } catch (e) {
+    console.warn('notification failed', e);
+  }
 }
 
 function toast(msg, kind) {

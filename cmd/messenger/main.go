@@ -52,14 +52,29 @@ func run() error {
 	flag.Var(&bootstrap, "bootstrap", "peer to bootstrap from — IPv4/IPv6/DNS-name with port, e.g. 1.2.3.4:9000 or relay.example.com:9000 (can be repeated; omit to use community defaults)")
 	openBrowser := flag.Bool("open", true, "open the browser UI on start")
 	verbose := flag.Bool("v", false, "verbose logs")
+
+	setPassword := flag.Bool("set-password", false, "interactively set the webui passphrase, then exit (required for non-loopback bind)")
+	setupTOTP := flag.Bool("setup-totp", false, "enroll a TOTP second factor and print recovery codes, then exit")
+	resetTOTP := flag.Bool("reset-totp", false, "remove TOTP enrollment and recovery codes, then exit")
+
+	publicHost := flag.String("public-host", "", "externally-visible hostname for the printed URL in public mode (e.g. messenger.example.com)")
+	trustProxy := flag.Bool("trust-proxy", false, "honor X-Forwarded-For and skip in-process TLS — caller asserts a TLS-terminating reverse proxy is in front (e.g. Caddy)")
+	tlsCert := flag.String("tls-cert", "", "path to TLS certificate (PEM); requires -tls-key")
+	tlsKey := flag.String("tls-key", "", "path to TLS private key (PEM); requires -tls-cert")
 	flag.Parse()
 
-	level := slog.LevelInfo
+	logLevel := new(slog.LevelVar)
 	if *verbose {
-		level = slog.LevelDebug
+		logLevel.Set(slog.LevelDebug)
+	} else {
+		logLevel.Set(slog.LevelInfo)
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
+
+	if *setPassword || *setupTOTP || *resetTOTP {
+		return runAuthSubcommand(*storageDir, *setPassword, *setupTOTP, *resetTOTP)
+	}
 
 	id, err := config.LoadOrCreateIdentity(*identityPath)
 	if err != nil {
@@ -75,18 +90,49 @@ func run() error {
 	if err := os.MkdirAll(*storageDir, 0o755); err != nil {
 		return fmt.Errorf("storage dir: %w", err)
 	}
-	store, err := storage.Open(ctx, filepath.Join(*storageDir, "messenger.db"))
+	dbPath := filepath.Join(*storageDir, "messenger.db")
+	store, err := storage.Open(ctx, dbPath)
 	if err != nil {
 		return err
 	}
 
+	// Persisted log level overrides the -v default unless -v was passed
+	// explicitly (in which case the user's CLI choice wins).
+	if !*verbose {
+		if v, ok, _ := store.GetSetting(ctx, "log.level"); ok {
+			switch v {
+			case "debug":
+				logLevel.Set(slog.LevelDebug)
+			case "warn":
+				logLevel.Set(slog.LevelWarn)
+			case "error":
+				logLevel.Set(slog.LevelError)
+			}
+		}
+	}
+
+	creds, err := store.GetAuthCredentials(ctx)
+	if err != nil {
+		return errors.Join(err, store.Close())
+	}
+	publicMode, err := resolvePublicMode(*listenHTTP, creds != nil, publicConfig{
+		PublicHost: *publicHost,
+		TrustProxy: *trustProxy,
+		TLSCert:    *tlsCert,
+		TLSKey:     *tlsKey,
+	})
+	if err != nil {
+		return errors.Join(err, store.Close())
+	}
+
 	node, err := network.Open(ctx, network.Config{
-		Identity:      id,
-		Mode:          network.ModeClient,
-		Listen:        *listenUDP,
-		Bootstrap:     bootstrap,
-		Logger:        logger,
-		SeenPeerStore: store,
+		Identity:               id,
+		Mode:                   network.ModeClient,
+		Listen:                 *listenUDP,
+		Bootstrap:              bootstrap,
+		Logger:                 logger,
+		SeenPeerStore:          store,
+		BootstrapOverrideStore: store,
 	})
 	if err != nil {
 		return errors.Join(err, store.Close())
@@ -100,9 +146,16 @@ func run() error {
 	})
 
 	srv, err := httpui.NewServer(httpui.Config{
-		Messenger: mngr,
-		Listen:    *listenHTTP,
-		Logger:    logger,
+		Messenger:  mngr,
+		Listen:     *listenHTTP,
+		Logger:     logger,
+		Public:     publicMode,
+		PublicHost: *publicHost,
+		TrustProxy: *trustProxy,
+		TLSCert:    *tlsCert,
+		TLSKey:     *tlsKey,
+		LogLevel:   logLevel,
+		DBPath:     dbPath,
 	})
 	if err != nil {
 		mngr.Close()
@@ -110,10 +163,14 @@ func run() error {
 		return errors.Join(err, node.Close(), store.Close())
 	}
 	url := srv.URL()
-	logger.Info("UI ready", "url", url)
+	logger.Info("UI ready", "url", url, "public", publicMode)
 	fmt.Println()
 	fmt.Println("┌─ udisend messenger ──────────────────────────────────────────────")
-	fmt.Println("│  Open this URL in your browser (auth token included):")
+	if publicMode {
+		fmt.Println("│  Public mode — sign in with your passphrase:")
+	} else {
+		fmt.Println("│  Open this URL in your browser (auth token included):")
+	}
 	fmt.Println("│  ", url)
 	fmt.Println("│")
 	fmt.Println("│  My destination_hash:", id.Public().DestinationHash().String())
@@ -122,7 +179,9 @@ func run() error {
 	fmt.Println("└──────────────────────────────────────────────────────────────────")
 	fmt.Println()
 
-	if *openBrowser {
+	// Suppress auto-open in public mode — typically running on a headless
+	// VPS where there is no browser to open.
+	if *openBrowser && !publicMode {
 		if err := openInBrowser(url); err != nil {
 			logger.Warn("open browser failed (open the URL above manually)", "err", err)
 		}

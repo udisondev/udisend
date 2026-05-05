@@ -166,6 +166,36 @@ func TestContactDelete_HTTPRoute(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestCSRF_BlocksMutatingPOSTWithoutHeader verifies that a state-changing
+// API request without the X-Requested-With marker is rejected with 403,
+// even when the auth token is correct. The defense matters most for
+// loopback bind: a malicious page in the browser can hit 127.0.0.1 with
+// a cross-origin form POST and would carry the cookie but not a custom
+// header. With the CSRF guard, that attack 403s.
+func TestCSRF_BlocksMutatingPOSTWithoutHeader(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	alice := startMessenger(t, ctx, "alice", dir, "127.0.0.1:0", "127.0.0.1:0", nil)
+
+	body := bytes.NewReader([]byte(`{"hash":"00000000000000000000000000000000","alias":"x"}`))
+	req, _ := http.NewRequest(http.MethodPost,
+		"http://"+alice.srv.LocalAddress()+"/api/contacts/add", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+alice.token)
+	// Note: deliberately missing X-Requested-With.
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 type peer struct {
@@ -195,10 +225,11 @@ func startMessenger(t *testing.T, ctx context.Context, name, root, udp, http str
 	}
 
 	node, err := network.Open(ctx, network.Config{
-		Identity:      id,
-		Listen:        udp,
-		Bootstrap:     bootstrap,
-		SeenPeerStore: store,
+		Identity:               id,
+		Listen:                 udp,
+		Bootstrap:              bootstrap,
+		SeenPeerStore:          store,
+		BootstrapOverrideStore: store,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -269,6 +300,7 @@ func postJSON(p *peer, path string, body any) ([]byte, error) {
 	req, _ := http.NewRequest(http.MethodPost, "http://"+p.srv.LocalAddress()+path, bytes.NewReader(blob))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.token)
+	req.Header.Set("X-Requested-With", "udisend")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -288,6 +320,7 @@ func postJSONResp(p *peer, path string, body any) (*http.Response, error) {
 	req, _ := http.NewRequest(http.MethodPost, "http://"+p.srv.LocalAddress()+path, bytes.NewReader(blob))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.token)
+	req.Header.Set("X-Requested-With", "udisend")
 
 	return http.DefaultClient.Do(req)
 }
