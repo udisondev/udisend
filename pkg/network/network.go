@@ -26,6 +26,7 @@ import (
 	"github.com/udisondev/udisend/pkg/stun"
 	"github.com/udisondev/udisend/pkg/transport"
 	"github.com/udisondev/udisend/pkg/turn"
+	"github.com/udisondev/udisend/pkg/webrtc"
 )
 
 // Mode selects the role this node plays in the DHT.
@@ -84,6 +85,27 @@ type Config struct {
 	// Income(). Zero uses DefaultIncomeBuffer. The pump blocks on full
 	// (no drops) — backpressure for signaling.
 	IncomeBuffer int
+	// Now, when non-nil, replaces time.Now in time-sensitive paths
+	// (currently bootstrapOne's success/failure timestamp). Tests pin
+	// it to a fixture; production callers leave it nil for time.Now.
+	Now func() time.Time
+	// Transport, when non-nil, is used as the underlying transport
+	// instead of opening a UDP socket via Listen. Tests inject a
+	// transport.MemoryHub-backed transport so the entire stack runs
+	// in-process. Production callers leave it nil.
+	Transport transport.Transport
+
+	// MeshEnabled, when true, spins up the inter-node WebRTC mesh
+	// (Phase 10): persistent DataChannels between nodes that survive
+	// a coordinated outage of public-IP signaling-relay nodes. The
+	// mesh runs in parallel to the UDP DHT/signaling stack — DHT
+	// RPC and signaling envelopes still ride UDP — so leaving this
+	// off is the safe default for legacy / Phase 9 builds.
+	MeshEnabled bool
+
+	// MaxMeshLinks caps the live PeerSession count when mesh is
+	// enabled. 0 falls back to webrtc.DefaultMaxLinks (8).
+	MaxMeshLinks int
 }
 
 // DefaultIncomeBuffer is the size of the Income channel when Config
@@ -103,13 +125,18 @@ var (
 type Node struct {
 	cfg Config
 
-	transport *transport.UDPTransport
+	transport transport.Transport
 	dht       *dht.Node
 	publisher *presence.Publisher
 	resolver  *presence.Resolver
 	signaling *signaling.Service
 	stunSrv   *stun.Server
 	turnSrv   *turn.Server
+
+	// Mesh stack (Phase 10) — nil unless cfg.MeshEnabled.
+	mesh         *MeshSignaler
+	rtcTransport *transport.WebRTCTransport
+	peerManager  *webrtc.PeerManager
 
 	sessMu   sync.RWMutex
 	sessions map[sessionKey]*signaling.Channel
@@ -142,6 +169,9 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 	}
 	if cfg.IncomeBuffer <= 0 {
 		cfg.IncomeBuffer = DefaultIncomeBuffer
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
 	}
 
 	// design.md §7-8: bootstrap source priority — explicit cfg.Bootstrap,
@@ -178,9 +208,15 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 		}
 	}
 
-	tr, err := transport.ListenUDP(cfg.Listen)
-	if err != nil {
-		return nil, err
+	var tr transport.Transport
+	if cfg.Transport != nil {
+		tr = cfg.Transport
+	} else {
+		udp, err := transport.ListenUDP(cfg.Listen)
+		if err != nil {
+			return nil, err
+		}
+		tr = udp
 	}
 
 	n := &Node{
@@ -235,6 +271,14 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 		Logger:       cfg.Logger,
 	})
 
+	if cfg.MeshEnabled {
+		if err := n.buildMesh(); err != nil {
+			_ = tr.Close()
+
+			return nil, fmt.Errorf("network: build mesh: %w", err)
+		}
+	}
+
 	if cfg.PublicIP != "" && cfg.Mode == ModeRelay {
 		stunAddr := cfg.STUNAddr
 		if stunAddr == "" {
@@ -266,6 +310,98 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 	}
 
 	return n, nil
+}
+
+// buildMesh wires the Phase 10 inter-node mesh stack. It runs as a
+// best-effort layer alongside the UDP DHT/signaling — if any piece
+// fails to construct, the whole node refuses to start so the
+// operator notices rather than silently shipping a half-mesh.
+//
+// Order: MeshSignaler bridges signaling.Service → WebRTCTransport
+// → PeerManager (driven by a DHT-backed selector). The composite
+// transport is NOT installed: DHT and signaling continue to use the
+// UDP transport directly because their peer addresses are UDPAddr,
+// not WebRTCAddr. The mesh is parallel infrastructure consumed by
+// higher layers that need it (e.g. presence-gossip or app-traffic
+// routing).
+func (n *Node) buildMesh() error {
+	if n.signaling == nil {
+		return errors.New("mesh requires signaling service")
+	}
+
+	mesh := NewMeshSignaler(n.signaling, n.cfg.Logger)
+
+	rtcTr, err := transport.NewWebRTCTransport(transport.WebRTCTransportConfig{
+		Self:     n.cfg.Identity.Public().DestinationHash(),
+		Signaler: mesh,
+		Logger:   n.cfg.Logger,
+	})
+	if err != nil {
+		mesh.Close()
+
+		return fmt.Errorf("rtc transport: %w", err)
+	}
+
+	pm, err := webrtc.NewPeerManager(webrtc.PeerManagerConfig{
+		Transport: rtcTr,
+		Selector:  &dhtMeshSelector{n: n},
+		MaxLinks:  n.cfg.MaxMeshLinks,
+		Logger:    n.cfg.Logger,
+	})
+	if err != nil {
+		_ = rtcTr.Close()
+		mesh.Close()
+
+		return fmt.Errorf("peer manager: %w", err)
+	}
+
+	n.mesh = mesh
+	n.rtcTransport = rtcTr
+	n.peerManager = pm
+
+	return nil
+}
+
+// MeshTransport returns the underlying WebRTCTransport, or nil if
+// mesh is disabled. Callers that want to peek mesh inbox (e.g.
+// presence-gossip layer in 10.10+) hold this directly.
+func (n *Node) MeshTransport() *transport.WebRTCTransport { return n.rtcTransport }
+
+// MeshPeerManager returns the live PeerManager, or nil if mesh is
+// disabled. Useful for diagnostics / observability snapshots.
+func (n *Node) MeshPeerManager() *webrtc.PeerManager { return n.peerManager }
+
+// dhtMeshSelector picks K closest peers to self from the DHT
+// routing table. Self-centred selection is the natural fit for a
+// resilience overlay: the closer a peer is in XOR, the more our
+// routing depends on it; meshing with them keeps the graph
+// densely connected exactly where it matters most.
+//
+// Phase 10.8 will add a CapCanWebRTCMesh filter so legacy contacts
+// are skipped — for now we return all closest contacts and rely on
+// PeerManager's Connect failures to back off legacy peers.
+type dhtMeshSelector struct {
+	n *Node
+}
+
+// SelectPeers returns up to k closest contacts to self.
+func (s *dhtMeshSelector) SelectPeers(_ context.Context, k int) []identity.Hash {
+	if s.n == nil || s.n.dht == nil {
+		return nil
+	}
+	self := s.n.cfg.Identity.Public().DestinationHash()
+	contacts := s.n.dht.Table().Closest(self, k)
+	out := make([]identity.Hash, 0, len(contacts))
+	for _, c := range contacts {
+		// Filter self defensively — Closest should not return us, but
+		// k-bucket implementations differ.
+		if c.ID == self {
+			continue
+		}
+		out = append(out, c.ID)
+	}
+
+	return out
 }
 
 func capsFor(mode Mode, hasPublicIP bool) presence.Capability {
@@ -350,6 +486,30 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
+	// Mesh stack (Phase 10): WebRTCTransport pumps inbound mesh
+	// envelopes from the signaling.Channel into per-peer
+	// PeerSessions; PeerManager keeps K live links by polling the
+	// DHT-backed selector. Both are best-effort like STUN/TURN —
+	// a mesh failure must not collapse the DHT/signaling loops.
+	if n.rtcTransport != nil {
+		g.Go(func() error {
+			if err := n.rtcTransport.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
+				n.cfg.Logger.Warn("network: rtc transport exited with error", "err", err)
+			}
+
+			return nil
+		})
+	}
+	if n.peerManager != nil {
+		g.Go(func() error {
+			if err := n.peerManager.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
+				n.cfg.Logger.Warn("network: peer manager exited with error", "err", err)
+			}
+
+			return nil
+		})
+	}
+
 	err := g.Wait()
 	closeErr := n.closeServers()
 	n.pumpWg.Wait()
@@ -386,7 +546,7 @@ func (n *Node) Bootstrap(ctx context.Context, addr string) error {
 // for addresses the user has not added — the storage layer silently
 // ignores unknown rows.
 func (n *Node) bootstrapOne(ctx context.Context, addr string) error {
-	now := time.Now()
+	now := n.cfg.Now()
 	peer, err := n.transport.Dial(addr)
 	if err != nil {
 		n.cfg.Logger.Warn("network: bootstrap parse", "addr", addr, "err", err)
@@ -442,6 +602,23 @@ func (n *Node) Close() error {
 func (n *Node) closeServers() error {
 	var joined error
 	n.closeOnce.Do(func() {
+		// Mesh stack first: PeerManager owns the dial loop, the
+		// WebRTCTransport owns PeerSessions, MeshSignaler holds the
+		// service-level mesh handler registration. Tear them down
+		// before signaling so in-flight Connects unwind cleanly.
+		if n.peerManager != nil {
+			if err := n.peerManager.Close(); err != nil {
+				joined = errors.Join(joined, fmt.Errorf("network: peer manager close: %w", err))
+			}
+		}
+		if n.rtcTransport != nil {
+			if err := n.rtcTransport.Close(); err != nil {
+				joined = errors.Join(joined, fmt.Errorf("network: rtc transport close: %w", err))
+			}
+		}
+		if n.mesh != nil {
+			n.mesh.Close()
+		}
 		// signaling.Service.Close is void by contract — it tears down
 		// channels best-effort and returns nothing to aggregate.
 		n.signaling.Close()
