@@ -50,6 +50,17 @@ type Router interface {
 // Handler is invoked when a remote peer establishes a session.
 type Handler func(peer identity.Hash, ch *Channel)
 
+// MeshHandler is invoked when a peer sends an InnerMesh* envelope
+// (offer / answer / candidate) on an established channel. The payload
+// is already decrypted under the channel's Noise key. The handler
+// runs on the dispatcher goroutine — implementations MUST not block.
+//
+// Channels are not modified before the handler fires, so the same
+// *Channel handle the application receives via Handler is what the
+// mesh-handler sees here, allowing the network-layer mesh-signaler
+// to call ch.SendMesh on the responder side.
+type MeshHandler func(ch *Channel, kind byte, sdp []byte)
+
 // Service wires Noise sessions to the DHT transport and exposes a small
 // connect / accept API.
 // MaxHalfOpenPerIP caps the number of in-flight (handshake-not-yet-
@@ -79,7 +90,8 @@ type Service struct {
 	// invariant as `sessions`.
 	halfOpenByIP map[string]int
 
-	handler atomic.Pointer[Handler]
+	handler     atomic.Pointer[Handler]
+	meshHandler atomic.Pointer[MeshHandler]
 
 	relayMu   sync.Mutex
 	relayHits map[string][]time.Time
@@ -125,6 +137,18 @@ func NewService(cfg Config) *Service {
 		s.router.Store(&r)
 	}
 	return s
+}
+
+// SetMeshHandler registers a callback invoked when an InnerMesh*
+// envelope arrives on an established channel. Pass nil to disable.
+func (s *Service) SetMeshHandler(h MeshHandler) {
+	if h == nil {
+		s.meshHandler.Store(nil)
+
+		return
+	}
+	hp := h
+	s.meshHandler.Store(&hp)
 }
 
 // SetHandler registers a callback invoked on every accepted incoming session.
@@ -350,6 +374,12 @@ func (s *Service) dispatch(ctx context.Context, from net.Addr, env *Envelope) {
 			return
 		}
 		ch.handleData(env)
+	case InnerMeshOffer, InnerMeshAnswer, InnerMeshCandidate:
+		if !ok {
+			s.logger.Debug("signaling: mesh envelope without session", "type", env.InnerType)
+			return
+		}
+		ch.handleMesh(env)
 	case InnerBye:
 		if !ok {
 			return
@@ -381,16 +411,43 @@ func (s *Service) acceptInit(ctx context.Context, from net.Addr, env *Envelope) 
 	// already has MaxHalfOpenPerIP responder slots in flight. Without
 	// this gate, an attacker rotating SessionIDs from one IP can pin
 	// HandshakeTimeout × N responder allocations live concurrently.
+	//
+	// Reserve the slot under the first lock so that the expensive
+	// noise.NewResponder + ReadMessage + WriteMessage path runs only for
+	// callers that already hold a reservation. Without this ordering, a
+	// burst of N concurrent INITs from one IP all pass an unlocked
+	// pre-check, trigger N Curve25519 DH operations, and only then drop
+	// to the cap — multiplying CPU work per inbound packet far above 1×.
 	ipKey := relayHostKey(from)
 	s.mu.Lock()
-	if ipKey != "" && s.halfOpenByIP[ipKey] >= MaxHalfOpenPerIP {
-		s.mu.Unlock()
-		s.logger.Debug("signaling: HELLO_INIT drop (half-open cap)",
-			"from", from, "in_flight", MaxHalfOpenPerIP)
+	if ipKey != "" {
+		if s.halfOpenByIP[ipKey] >= MaxHalfOpenPerIP {
+			s.mu.Unlock()
+			s.logger.Debug("signaling: HELLO_INIT drop (half-open cap)",
+				"from", from, "in_flight", MaxHalfOpenPerIP)
 
-		return
+			return
+		}
+		s.halfOpenByIP[ipKey]++
 	}
 	s.mu.Unlock()
+
+	// On any error path before s.sessions[key] is set we MUST release the
+	// reservation; otherwise a burst of malformed INITs leaks slots until
+	// the per-IP cap is permanently saturated.
+	committed := false
+	defer func() {
+		if committed || ipKey == "" {
+			return
+		}
+		s.mu.Lock()
+		if n := s.halfOpenByIP[ipKey]; n > 1 {
+			s.halfOpenByIP[ipKey] = n - 1
+		} else {
+			delete(s.halfOpenByIP, ipKey)
+		}
+		s.mu.Unlock()
+	}()
 
 	resp, err := noise.NewResponder(s.id)
 	if err != nil {
@@ -418,21 +475,9 @@ func (s *Service) acceptInit(ctx context.Context, from net.Addr, env *Envelope) 
 	ch := s.newChannel(env.Sender, env.SessionID, from, resp)
 	ch.halfOpenIP = ipKey
 	s.mu.Lock()
-	if ipKey != "" {
-		// Re-check the cap under the same lock that increments — between
-		// the first check and now another goroutine may have incremented
-		// it past the threshold.
-		if s.halfOpenByIP[ipKey] >= MaxHalfOpenPerIP {
-			s.mu.Unlock()
-			s.logger.Debug("signaling: HELLO_INIT drop (half-open cap, race)",
-				"from", from)
-
-			return
-		}
-		s.halfOpenByIP[ipKey]++
-	}
 	s.sessions[key] = ch
 	s.mu.Unlock()
+	committed = true
 
 	// Half-open responder DoS guard (design.md §8): if the initiator
 	// never sends HELLO_FINAL the channel sits forever consuming memory
@@ -538,10 +583,17 @@ func (s *Service) Connect(ctx context.Context, peer identity.Hash) (*Channel, er
 		return nil, fmt.Errorf("signaling: send HELLO_INIT: %w", err)
 	}
 
+	// time.NewTimer + Stop instead of time.After: Connect runs once per
+	// session attempt, but on graceful shutdown many concurrent Connects
+	// can be cancelled mid-handshake. NewTimer + Stop releases the timer
+	// slot immediately on the ctx-cancel / closed paths; time.After would
+	// hold it until natural expiry (HandshakeTimeout).
+	timer := time.NewTimer(HandshakeTimeout)
+	defer timer.Stop()
 	select {
 	case <-ch.ready:
 		return ch, nil
-	case <-time.After(HandshakeTimeout):
+	case <-timer.C:
 		s.removeSession(sessionKey{peer: peer, sid: sid})
 		return nil, errors.New("signaling: handshake timeout")
 	case <-ctx.Done():

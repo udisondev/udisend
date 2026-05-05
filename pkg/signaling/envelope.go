@@ -56,13 +56,35 @@ func NewSessionID() (SessionID, error) {
 }
 
 // Inner-payload type codes.
+//
+// The 0x06–0x08 range carries node-to-node WebRTC mesh handshake
+// (Phase 10). Payloads are encrypted under the same Noise XK session
+// as InnerData — the discriminator is at the envelope layer so the
+// mesh-handler at network.Node can dispatch without peeking inside
+// ciphertext. Adding new InnerType codes is wire-format-additive:
+// older builds either decode them to InnerType=N and surface as
+// "unknown inner type" Debug logs (forward-compatible).
 const (
-	InnerHelloInit  byte = 0x01 // Noise XK message 1
-	InnerHelloResp  byte = 0x02 // Noise XK message 2
-	InnerHelloFinal byte = 0x03 // Noise XK message 3
-	InnerData       byte = 0x04 // encrypted application data
-	InnerBye        byte = 0x05 // graceful close
+	InnerHelloInit     byte = 0x01 // Noise XK message 1
+	InnerHelloResp     byte = 0x02 // Noise XK message 2
+	InnerHelloFinal    byte = 0x03 // Noise XK message 3
+	InnerData          byte = 0x04 // encrypted application data
+	InnerBye           byte = 0x05 // graceful close
+	InnerMeshOffer     byte = 0x06 // node-mesh WebRTC SDP offer (encrypted)
+	InnerMeshAnswer    byte = 0x07 // node-mesh WebRTC SDP answer (encrypted)
+	InnerMeshCandidate byte = 0x08 // node-mesh ICE candidate (encrypted)
 )
+
+// IsMeshInner reports whether kind is one of the InnerMesh* codes.
+// Used by Channel.SendMesh to refuse non-mesh payloads.
+func IsMeshInner(kind byte) bool {
+	switch kind {
+	case InnerMeshOffer, InnerMeshAnswer, InnerMeshCandidate:
+		return true
+	default:
+		return false
+	}
+}
 
 // MaxInnerSize caps the inner payload to bound decode work.
 const MaxInnerSize = 64 * 1024

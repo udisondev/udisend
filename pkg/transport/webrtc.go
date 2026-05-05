@@ -45,6 +45,66 @@ var (
 // because it goes into every Packet.From.Network() call site.
 const rtcScheme = "rtc"
 
+// MeshSDPKind discriminates the three mesh-handshake message types
+// exchanged between two network nodes to bring up a WebRTC
+// DataChannel. Values mirror the InnerMesh* constants in pkg/signaling
+// at the wire layer; we keep a transport-package-local enum so the
+// pkg/transport API does not depend on pkg/signaling.
+type MeshSDPKind byte
+
+// MeshSDP* identify the three message kinds.
+const (
+	MeshSDPOffer     MeshSDPKind = 1
+	MeshSDPAnswer    MeshSDPKind = 2
+	MeshSDPCandidate MeshSDPKind = 3
+)
+
+// String renders the kind as a readable label for logs / errors.
+func (k MeshSDPKind) String() string {
+	switch k {
+	case MeshSDPOffer:
+		return "offer"
+	case MeshSDPAnswer:
+		return "answer"
+	case MeshSDPCandidate:
+		return "candidate"
+	default:
+		return "unknown"
+	}
+}
+
+// MeshSDPMsg is one inbound mesh-handshake event delivered by a
+// Signaler.
+type MeshSDPMsg struct {
+	Peer identity.Hash
+	Kind MeshSDPKind
+	SDP  []byte
+}
+
+// Signaler is the port WebRTCTransport uses to exchange mesh
+// SDP/ICE messages with peers via the existing signaling.Service /
+// Noise XK channel infrastructure. Implementations are provided by
+// pkg/network — see pkg/network.MeshSignaler. Defining the interface
+// here (rather than in pkg/network) lets pkg/transport stay free of
+// signaling/network imports while still expressing the contract its
+// peer-management code needs.
+//
+// SendMeshSDP is responsible for opening or reusing a signaling
+// Channel to peer, encrypting `sdp` under that Channel's Noise key,
+// and shipping it as an InnerMesh{Offer,Answer,Candidate} envelope.
+// It MUST return only after the wire send succeeds (or fails) — the
+// caller treats the post-return state as authoritative for retry.
+//
+// RecvMeshSDP returns a stream of inbound mesh events. The channel
+// SHOULD have a small buffer so a slow consumer cannot deadlock the
+// signaling dispatch goroutine; implementations drop or block by
+// their own policy. Closing the channel on shutdown is OPTIONAL —
+// most consumers gate on context instead.
+type Signaler interface {
+	SendMeshSDP(ctx context.Context, peer identity.Hash, kind MeshSDPKind, sdp []byte) error
+	RecvMeshSDP() <-chan MeshSDPMsg
+}
+
 // WebRTCAddr identifies a peer on the WebRTC mesh. It is a peer-keyed
 // address, not a host:port — the underlying transport (pion's ICE
 // agent) is responsible for actually finding the peer's network

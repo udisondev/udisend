@@ -3,6 +3,7 @@ package signaling
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -54,8 +55,9 @@ type Channel struct {
 	closeOnce sync.Once
 	closed    chan struct{}
 
-	pending [][]byte // DATA frames received before handshake+verify completes
-	mu      sync.Mutex
+	pending     [][]byte           // DATA frames received before handshake+verify completes
+	pendingMesh []pendingMeshFrame // mesh frames received before handshake+verify completes
+	mu          sync.Mutex
 
 	// handshakeTimer fires HandshakeTimeout after acceptInit if the
 	// initiator never completes the handshake (responder DoS guard).
@@ -254,6 +256,19 @@ func (c *Channel) verifyAndAdmit() {
 // without limit (design.md §8 DoS).
 const MaxPendingDataFrames = 8
 
+// MaxPendingMeshFrames mirrors MaxPendingDataFrames for the mesh
+// envelope queue. Same DoS rationale: an attacker that completes
+// handshake but spams InnerMesh* before identity verification clears
+// would otherwise grow this slice unbounded.
+const MaxPendingMeshFrames = 8
+
+// pendingMeshFrame is one queued mesh envelope (ciphertext + inner
+// kind) waiting for verifyAndAdmit to flip verified.
+type pendingMeshFrame struct {
+	kind    byte
+	payload []byte
+}
+
 // handleData decrypts a DATA frame. If either the handshake has not
 // yet completed OR the responder-side identity verification is still
 // in flight, buffer the ciphertext until verifyAndAdmit flushes it.
@@ -287,7 +302,10 @@ func (c *Channel) flushPending() {
 	c.mu.Lock()
 	frames := c.pending
 	c.pending = nil
+	meshFrames := c.pendingMesh
+	c.pendingMesh = nil
 	c.mu.Unlock()
+
 	for _, raw := range frames {
 		if !c.noise.Done() {
 			return
@@ -305,6 +323,25 @@ func (c *Channel) flushPending() {
 			return
 		}
 	}
+
+	hp := c.service.meshHandler.Load()
+	for _, mf := range meshFrames {
+		if !c.noise.Done() {
+			return
+		}
+		c.recvMu.Lock()
+		plain, err := c.noise.Decrypt(mf.payload, nil)
+		c.recvMu.Unlock()
+		if err != nil {
+			c.service.logger.Warn("signaling: pending mesh decrypt",
+				"peer", c.peer, "err", err)
+			continue
+		}
+		if hp == nil {
+			continue
+		}
+		(*hp)(c, mf.kind, plain)
+	}
 }
 
 func (c *Channel) signalReady() {
@@ -313,4 +350,72 @@ func (c *Channel) signalReady() {
 	default:
 		close(c.ready)
 	}
+}
+
+// SendMesh encrypts sdp under the channel's Noise key and ships it
+// inside an InnerMesh{Offer,Answer,Candidate} envelope. The kind MUST
+// be one of the InnerMesh* constants — anything else is rejected to
+// prevent application traffic from leaking through the mesh path.
+//
+// Lock semantics mirror Send: sendMu serialises the AEAD nonce
+// counter advance across mesh and data sends so they can interleave
+// safely.
+func (c *Channel) SendMesh(ctx context.Context, kind byte, sdp []byte) error {
+	if !IsMeshInner(kind) {
+		return fmt.Errorf("signaling: SendMesh: invalid inner kind %d", kind)
+	}
+
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+
+	if !c.noise.Done() {
+		return errors.New("signaling: handshake not complete")
+	}
+	ct, err := c.noise.Encrypt(sdp, nil)
+	if err != nil {
+		return err
+	}
+
+	return c.service.sendEnvelope(ctx, c, kind, ct)
+}
+
+// handleMesh decrypts an InnerMesh* envelope and dispatches it to the
+// service-level mesh handler if one is registered. Pre-handshake or
+// pre-verify mesh envelopes are queued until verifyAndAdmit flips
+// `verified` — symmetric to handleData. Without buffering, an
+// initiator that races a mesh-offer right after HELLO_FINAL can lose
+// it because the responder's identity-verify goroutine hasn't yet
+// flipped the gate (typical MemoryHub timing in tests; observable in
+// production under tight retry loops too). recvMu mirrors
+// handleData's serialisation so noise receive-counter advances stay
+// atomic across mesh / data / pending-flush paths.
+func (c *Channel) handleMesh(env *Envelope) {
+	if !c.noise.Done() || !c.verified.Load() {
+		c.mu.Lock()
+		if len(c.pendingMesh) < MaxPendingMeshFrames {
+			c.pendingMesh = append(c.pendingMesh, pendingMeshFrame{
+				kind:    env.InnerType,
+				payload: env.Payload,
+			})
+		}
+		c.mu.Unlock()
+
+		return
+	}
+
+	c.recvMu.Lock()
+	plain, err := c.noise.Decrypt(env.Payload, nil)
+	c.recvMu.Unlock()
+	if err != nil {
+		c.service.logger.Warn("signaling: mesh decrypt", "peer", c.peer, "err", err)
+		return
+	}
+
+	hp := c.service.meshHandler.Load()
+	if hp == nil {
+		// Handler not registered: silent drop is correct — node may
+		// run with mesh disabled.
+		return
+	}
+	(*hp)(c, env.InnerType, plain)
 }
