@@ -796,20 +796,29 @@ func encodeContacts(cs []Contact) []EncodedContact {
 	return out
 }
 
-// decodeContacts turns wire EncodedContacts into runtime Contacts and
-// adds them to the routing table. Phase 9: bucket.add now enforces a
-// per-/24 (IPv4) or /64 (IPv6) cap, so a peer that lists 20
-// attacker-IDs all colocated on one host cannot fill a bucket — at
-// most MaxContactsPerSubnet of those land. The cap is the actual
-// sybil defence; the caller (iterativeFind) uses the returned slice
-// to drive subsequent queries regardless of whether the entries made
-// it into the bucket.
+// decodeContacts turns wire EncodedContacts into runtime Contacts.
+//
+// Phase 9 audit fix: the per-/24 cap is applied to the RETURNED slice
+// as well as the routing table. Without this, a hostile peer can put
+// 20 attacker-chosen NodeIDs all on one /24 into a single NODES
+// response and force iterativeFind to fan out 20 outbound FIND_NODEs
+// — closing the routing-table-insert side without closing the
+// iterative-driver amplifier. Returning at most MaxContactsPerSubnet
+// per /24 group bounds the fan-out symmetrically with bucket.add.
 func (n *Node) decodeContacts(cs []EncodedContact) []Contact {
 	out := make([]Contact, 0, len(cs))
+	subnetCount := make(map[string]int, len(cs))
 	for _, ec := range cs {
 		addr, err := n.transport.Dial(ec.Addr)
 		if err != nil {
 			continue
+		}
+		key := addrSubnet(addr)
+		if key != "" && subnetCount[key] >= MaxContactsPerSubnet {
+			continue
+		}
+		if key != "" {
+			subnetCount[key]++
 		}
 		c := Contact{ID: ec.ID, Addr: addr, LastSeen: time.Now()}
 		out = append(out, c)

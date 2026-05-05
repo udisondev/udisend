@@ -33,11 +33,20 @@ type Store struct {
 // writers; synchronous=NORMAL for crash-durable writes without the FULL
 // fsync cost; foreign_keys=ON; busy_timeout=5000ms so concurrent writers
 // (Vacuum, history-prune, message append) wait rather than fail loud.
+//
+// SQLite PRAGMAs other than journal_mode are PER-CONNECTION. To make
+// the hardening apply globally we pin the database/sql pool to a
+// single connection (single-user messenger doesn't need parallel
+// writers, and WAL gives readers concurrency without extra
+// connections). Phase 9 audit caught the previous behaviour where
+// any pool-spawned second connection started with SQLite defaults.
 func Open(ctx context.Context, path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open: %w", err)
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("storage: ping: %w", err)
@@ -350,21 +359,23 @@ var ErrOutboxFull = errors.New("storage: outbox full for peer")
 // AddOutboxItem queues a payload for `peer`. Refuses when the per-peer
 // cap is reached — the caller should surface the error so the sender
 // knows the message was not persisted.
+//
+// The cap is enforced atomically via INSERT ... SELECT ... WHERE
+// (SELECT COUNT < cap), so two concurrent QueueOutbox calls cannot
+// both observe count=N-1 and both insert. RowsAffected==0 indicates
+// the cap was hit.
 func (s *Store) AddOutboxItem(ctx context.Context, peer identity.Hash, payload []byte) (int64, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM outbox WHERE peer_hash = ?`, peer.String()).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("storage: count outbox: %w", err)
-	}
-	if n >= MaxOutboxItemsPerPeer {
-		return 0, ErrOutboxFull
-	}
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO outbox (peer_hash, payload, created_at) VALUES (?, ?, ?)
-	`, peer.String(), payload, time.Now().Unix())
+		INSERT INTO outbox (peer_hash, payload, created_at)
+		SELECT ?, ?, ?
+		WHERE (SELECT COUNT(*) FROM outbox WHERE peer_hash = ?) < ?
+	`, peer.String(), payload, time.Now().Unix(), peer.String(), MaxOutboxItemsPerPeer)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("storage: add outbox item: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return 0, ErrOutboxFull
 	}
 
 	return res.LastInsertId()

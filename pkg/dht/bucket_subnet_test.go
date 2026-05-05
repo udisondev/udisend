@@ -48,6 +48,31 @@ func TestBucket_SubnetCap(t *testing.T) {
 			},
 			wantInBkt: 6,
 		},
+		{
+			name: "ipv6 same /64 capped",
+			ips: []string{
+				"[2001:db8::1]:9000", "[2001:db8::2]:9000", "[2001:db8::3]:9000",
+				"[2001:db8::4]:9000",
+			},
+			wantInBkt: MaxContactsPerSubnet,
+		},
+		{
+			name: "ipv6 different /64 admitted",
+			ips: []string{
+				"[2001:db8:1::1]:9000", "[2001:db8:2::1]:9000",
+				"[2001:db8:3::1]:9000", "[2001:db8:4::1]:9000",
+			},
+			wantInBkt: 4,
+		},
+		{
+			name: "ipv4-mapped-ipv6 collapses with raw ipv4",
+			ips: []string{
+				"10.1.1.1:9000",
+				"[::ffff:10.1.1.2]:9000",
+				"[::ffff:10.1.1.3]:9000",
+			},
+			wantInBkt: MaxContactsPerSubnet,
+		},
 	}
 
 	for _, tc := range cases {

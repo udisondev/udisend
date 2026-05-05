@@ -224,15 +224,17 @@ func (s *Service) relay(ctx context.Context, from net.Addr, env *Envelope) {
 	}
 }
 
+// relaySweepThreshold is the map size at which allowRelayFrom does a
+// full GC pass. Below it we only trim the per-IP list of the IP we
+// just observed — O(1) amortised. Above it we sweep the full table
+// once and reset the counter. Bounds the worst-case-per-call cost
+// flagged in the Phase 9 review.
+const relaySweepThreshold = 256
+
 // allowRelayFrom is the per-source-IP gate. Sliding-window counter on
-// `from`'s IP; drop when over the cap. Map cleanup is opportunistic,
-// triggered on every check; the table is naturally bounded because
-// stale entries are evicted as soon as the next request lands.
+// `from`'s IP; drop when over the cap.
 func (s *Service) allowRelayFrom(from net.Addr) bool {
-	host, _, err := net.SplitHostPort(from.String())
-	if err != nil {
-		host = from.String()
-	}
+	host := relayHostKey(from)
 
 	now := time.Now()
 	cutoff := now.Add(-time.Minute)
@@ -242,22 +244,50 @@ func (s *Service) allowRelayFrom(from net.Addr) bool {
 	if s.relayHits == nil {
 		s.relayHits = make(map[string][]time.Time)
 	}
-	// Sweep stale entries lazily — bounded work per call.
-	for ip, ts := range s.relayHits {
-		trimmed := trimRelayTimes(ts, cutoff)
-		if len(trimmed) == 0 {
-			delete(s.relayHits, ip)
-		} else {
-			s.relayHits[ip] = trimmed
+
+	// Trim only the per-IP list we are about to update — O(window) per
+	// call. Full-map sweep happens only when the table grows past
+	// threshold, which keeps memory bounded under attack without
+	// burning CPU on every legitimate relay.
+	hits := trimRelayTimes(s.relayHits[host], cutoff)
+	if len(s.relayHits) > relaySweepThreshold {
+		for ip, ts := range s.relayHits {
+			if ip == host {
+				continue
+			}
+			trimmed := trimRelayTimes(ts, cutoff)
+			if len(trimmed) == 0 {
+				delete(s.relayHits, ip)
+			} else {
+				s.relayHits[ip] = trimmed
+			}
 		}
 	}
-	hits := s.relayHits[host]
 	if len(hits) >= relayBudgetPerMinute {
+		s.relayHits[host] = hits
+
 		return false
 	}
 	s.relayHits[host] = append(hits, now)
 
 	return true
+}
+
+// relayHostKey extracts a stable key for rate-limiting from a remote
+// address. *net.UDPAddr — preferred, drops the port and the IPv6 zone
+// identifier so an attacker can't pivot the bucket by varying %eth0.
+// Falls back to the raw String() for non-UDP transports (in-memory
+// pipe used by some tests).
+func relayHostKey(addr net.Addr) string {
+	if u, ok := addr.(*net.UDPAddr); ok && u.IP != nil {
+		return u.IP.String()
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+
+	return host
 }
 
 func trimRelayTimes(ts []time.Time, cutoff time.Time) []time.Time {
@@ -315,7 +345,10 @@ func (s *Service) dispatch(ctx context.Context, from net.Addr, env *Envelope) {
 			s.logger.Debug("signaling: BYE before handshake done", "peer", env.Sender)
 			return
 		}
-		if _, err := ch.noise.Decrypt(env.Payload, nil); err != nil {
+		ch.recvMu.Lock()
+		_, err := ch.noise.Decrypt(env.Payload, nil)
+		ch.recvMu.Unlock()
+		if err != nil {
 			s.logger.Debug("signaling: forged BYE drop", "peer", env.Sender, "err", err)
 			return
 		}
@@ -377,26 +410,16 @@ func (s *Service) acceptInit(ctx context.Context, from net.Addr, env *Envelope) 
 
 // verifySenderIdentity checks that the noise session's authenticated
 // peer-static (X25519) matches the one bound to env.Sender's
-// destination hash via the resolver.
+// destination hash via the resolver. Returns true ONLY when the
+// lookup succeeds AND the keys match. A budget-exhausted lookup is a
+// hard reject — the caller (Channel.verifyAndAdmit) shuts the
+// channel down before any DATA frame leaks to the application.
 //
-// Phase 9 audit: an attacker who completed a Noise handshake under
-// their own static key but claimed someone else's destination_hash
-// would have been allowed to install a Channel and have DATA frames
-// decoded if our resolver had not yet cached the legitimate peer's
-// presence. The fix attempts a strict resolver lookup with retries;
-// if the lookup eventually succeeds, the peer-static must match. If
-// the lookup CANNOT succeed within the budget — and only then — we
-// fall back to deferred verification: the channel installs but the
-// `unverified` flag is set so app-layer SignedSDP MUST reject any
-// payload whose Ed25519 signature does not match the contact's
-// pubkey. The flag is cleared when a later observation matches.
-//
-// This split exists because in a fresh-membership network the
-// publisher's PutValue may not have replicated the legitimate
-// sender's record by the time the responder is asked to admit a
-// channel. Refusing outright would prevent first contacts from
-// ever succeeding. The resolver retries first; only after exhausting
-// the budget do we admit-with-mark.
+// Runs OFF the dispatcher goroutine so a slow resolver does not
+// block DHT/signaling packet processing. The 4-second budget is
+// generous because cold-cache first-contact may need the publisher's
+// PutValue to have replicated; if it hasn't by then, the connection
+// is refused and the caller is expected to retry.
 func (s *Service) verifySenderIdentity(parent context.Context, sender identity.Hash, sess *noise.Session) bool {
 	got, err := sess.PeerStatic()
 	if err != nil {
@@ -407,6 +430,8 @@ func (s *Service) verifySenderIdentity(parent context.Context, sender identity.H
 	defer cancel()
 
 	backoff := 200 * time.Millisecond
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
 	for ctx.Err() == nil {
 		lookupCtx, lcancel := context.WithTimeout(ctx, time.Second)
 		rec, err := s.resolver.Lookup(lookupCtx, sender)
@@ -422,21 +447,16 @@ func (s *Service) verifySenderIdentity(parent context.Context, sender identity.H
 		}
 		select {
 		case <-ctx.Done():
-		case <-time.After(backoff):
+			return false
+		case <-timer.C:
 		}
 		if backoff < time.Second {
 			backoff *= 2
 		}
+		timer.Reset(backoff)
 	}
 
-	// Resolver budget exhausted: admit-with-deferred-verification. The
-	// app layer (messenger.SignedSDP) is the actual security boundary
-	// in this case. Logged as a warning so operators see how often
-	// presence is racing channel install.
-	s.logger.Warn("signaling: admit incoming session with deferred verification — resolver miss",
-		"sender", sender)
-
-	return true
+	return false
 }
 
 // Connect initiates a handshake with `peer` and returns the open channel.

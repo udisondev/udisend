@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/udisondev/udisend/pkg/identity"
@@ -34,14 +35,26 @@ type Channel struct {
 	// confidentiality and authenticity. The HTTP+SSE bridge fans out
 	// /api/signal/send requests across goroutines so this is reachable.
 	sendMu sync.Mutex
+	// recvMu serialises Decrypt across the dispatcher's handleData path
+	// AND verifyAndAdmit's flushPending. The receive-side CipherState
+	// has its own counter that the same race-condition concerns apply
+	// to as sendMu's send-side state.
+	recvMu sync.Mutex
 	noise  *noise.Session
 	inbox  chan []byte
 	ready  chan struct{}
 
+	// verified is true once the responder's identity check (peer-static
+	// vs presence record) has succeeded. Frames received in the
+	// post-handshake-pre-verification window are buffered in `pending`
+	// and only released to inbox after this flips. Closes the silent-
+	// admission window flagged in the Phase 9 review.
+	verified atomic.Bool
+
 	closeOnce sync.Once
 	closed    chan struct{}
 
-	pending [][]byte // DATA frames received before handshake completes
+	pending [][]byte // DATA frames received before handshake+verify completes
 	mu      sync.Mutex
 
 	// handshakeTimer fires HandshakeTimeout after acceptInit if the
@@ -146,6 +159,11 @@ func (c *Channel) shutdown() {
 }
 
 // handleResp drives the initiator's side past handshake message 2.
+// Initiator-side channels are inherently verified: Service.Connect
+// calls resolver.Lookup before initiating the handshake, so the
+// X25519 static the responder authenticates with is already known to
+// match the destination_hash we connected to. Mark verified here so
+// flushPending unblocks any DATA frames that raced ahead.
 func (c *Channel) handleResp(ctx context.Context, env *Envelope) {
 	if _, err := c.noise.ReadMessage(env.Payload); err != nil {
 		c.service.logger.Warn("signaling: HELLO_RESP read", "err", err)
@@ -163,16 +181,24 @@ func (c *Channel) handleResp(ctx context.Context, env *Envelope) {
 		c.shutdown()
 		return
 	}
+	c.verified.Store(true)
 	c.signalReady()
 	c.flushPending()
 }
 
 // handleFinal drives the responder's side past handshake message 3.
 // Noise XK pattern carries the initiator's static key in m3, so this
-// is the first point at which resp.PeerStatic() is actually defined —
-// and the right place to verify the initiator's claimed sender hash
-// (env.Sender, captured at session install) really maps to the X25519
-// pubkey they authenticated themselves with.
+// is the first point at which resp.PeerStatic() is actually defined.
+//
+// Identity verification (peer-static vs presence record) is dispatched
+// to a goroutine so the dispatcher's recv path is never blocked by a
+// resolver round-trip. Until verification succeeds, the channel is
+// installed but no DATA frames reach the application: handleData
+// buffers them in `pending` (capped) and flushPending releases them
+// only after `verified` flips true. Mismatch / lookup-budget
+// exhaustion -> the channel is shut down before any frame leaks. This
+// closes the recv-goroutine block AND the silent-admission window
+// flagged in the Phase 9 review.
 func (c *Channel) handleFinal(env *Envelope) {
 	if _, err := c.noise.ReadMessage(env.Payload); err != nil {
 		c.service.logger.Warn("signaling: HELLO_FINAL read", "err", err)
@@ -180,20 +206,26 @@ func (c *Channel) handleFinal(env *Envelope) {
 		return
 	}
 
+	if c.handshakeTimer != nil {
+		c.handshakeTimer.Stop()
+	}
+
+	go c.verifyAndAdmit()
+}
+
+// verifyAndAdmit runs the resolver-backed identity check off the
+// dispatcher goroutine. On match: the channel becomes usable
+// (signalReady + flushPending + handler invoked). On mismatch /
+// resolver budget exhaustion: the channel is removed and shut down
+// before any DATA frame is decoded into the application inbox.
+func (c *Channel) verifyAndAdmit() {
 	if !c.service.verifySenderIdentity(context.Background(), c.peer, c.noise) {
 		c.service.logger.Warn("signaling: HELLO_FINAL identity mismatch", "claimed", c.peer)
 		c.service.removeSession(sessionKey{peer: c.peer, sid: c.sid})
 		c.shutdown()
 		return
 	}
-
-	// Handshake complete — release the responder DoS-guard timer
-	// closure so the runtime timer wheel doesn't hold it for the rest
-	// of HandshakeTimeout. nil for initiator-side channels.
-	if c.handshakeTimer != nil {
-		c.handshakeTimer.Stop()
-	}
-
+	c.verified.Store(true)
 	c.signalReady()
 	c.flushPending()
 
@@ -209,11 +241,14 @@ func (c *Channel) handleFinal(env *Envelope) {
 // without limit (design.md §8 DoS).
 const MaxPendingDataFrames = 8
 
-// handleData decrypts a DATA frame. If the handshake hasn't yet completed
-// (rare; reorder under packet-level race), buffer the ciphertext for
-// later replay — bounded by MaxPendingDataFrames.
+// handleData decrypts a DATA frame. If either the handshake has not
+// yet completed OR the responder-side identity verification is still
+// in flight, buffer the ciphertext until verifyAndAdmit flushes it.
+// Bounded by MaxPendingDataFrames so a peer that finishes handshake
+// then floods DATA before identity check completes cannot grow the
+// per-channel slice without limit.
 func (c *Channel) handleData(env *Envelope) {
-	if !c.noise.Done() {
+	if !c.noise.Done() || !c.verified.Load() {
 		c.mu.Lock()
 		if len(c.pending) < MaxPendingDataFrames {
 			c.pending = append(c.pending, env.Payload)
@@ -222,7 +257,9 @@ func (c *Channel) handleData(env *Envelope) {
 		return
 	}
 
+	c.recvMu.Lock()
 	plain, err := c.noise.Decrypt(env.Payload, nil)
+	c.recvMu.Unlock()
 	if err != nil {
 		c.service.logger.Warn("signaling: data decrypt", "err", err)
 		return
@@ -242,7 +279,9 @@ func (c *Channel) flushPending() {
 		if !c.noise.Done() {
 			return
 		}
+		c.recvMu.Lock()
 		plain, err := c.noise.Decrypt(raw, nil)
+		c.recvMu.Unlock()
 		if err != nil {
 			c.service.logger.Warn("signaling: pending decrypt", "err", err)
 			continue

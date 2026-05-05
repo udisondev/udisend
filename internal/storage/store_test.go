@@ -11,6 +11,46 @@ import (
 	"github.com/udisondev/udisend/pkg/identity"
 )
 
+func TestAddOutboxItem_Cap(t *testing.T) {
+	t.Parallel()
+	s := mkStore(t)
+	id, _ := identity.Generate(rand.Reader)
+	peer := id.Public().DestinationHash()
+
+	for i := 0; i < storage.MaxOutboxItemsPerPeer; i++ {
+		if _, err := s.AddOutboxItem(t.Context(), peer, []byte("payload")); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+	if _, err := s.AddOutboxItem(t.Context(), peer, []byte("over")); !errors.Is(err, storage.ErrOutboxFull) {
+		t.Fatalf("at cap: err = %v, want ErrOutboxFull", err)
+	}
+
+	other, _ := identity.Generate(rand.Reader)
+	if _, err := s.AddOutboxItem(t.Context(), other.Public().DestinationHash(), []byte("ok")); err != nil {
+		t.Fatalf("other peer should still accept: %v", err)
+	}
+}
+
+func TestPruneOutboxOlderThan(t *testing.T) {
+	t.Parallel()
+	s := mkStore(t)
+	id, _ := identity.Generate(rand.Reader)
+	peer := id.Public().DestinationHash()
+	if _, err := s.AddOutboxItem(t.Context(), peer, []byte("recent")); err != nil {
+		t.Fatal(err)
+	}
+
+	future := time.Now().Add(time.Hour).Unix()
+	n, err := s.PruneOutboxOlderThan(t.Context(), future)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 row deleted, got %d", n)
+	}
+}
+
 func mkStore(t *testing.T) *storage.Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")

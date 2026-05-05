@@ -175,7 +175,9 @@ func (m *Messenger) outboxRetentionPump(ctx context.Context) {
 		cutoff := time.Now().Add(-OutboxRetentionDays * 24 * time.Hour).Unix()
 		n, err := m.cfg.Storage.PruneOutboxOlderThan(ctx, cutoff)
 		if err != nil {
-			m.logger.Warn("messenger: outbox prune", "err", err)
+			if !errors.Is(err, context.Canceled) {
+				m.logger.Warn("messenger: outbox prune", "err", err)
+			}
 			return
 		}
 		if n > 0 {
@@ -228,7 +230,9 @@ func (m *Messenger) historyRetentionPump(ctx context.Context) {
 		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixNano()
 		n, err := m.cfg.Storage.PruneMessagesOlderThan(ctx, cutoff)
 		if err != nil {
-			m.logger.Warn("messenger: history prune", "err", err)
+			if !errors.Is(err, context.Canceled) {
+				m.logger.Warn("messenger: history prune", "err", err)
+			}
 			return
 		}
 		if n > 0 {
