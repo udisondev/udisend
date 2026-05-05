@@ -52,6 +52,15 @@ const rtcScheme = "rtc"
 // punching with a single retry.
 const connectTimeoutDefault = 30 * time.Second
 
+// maxFireConcurrency caps in-flight signaler-bound goroutines spawned
+// by fireSDP / fireICE. With K=8 mesh peers, an ICE candidate burst
+// can produce 50+ candidates per peer — without this gate, pion
+// callbacks would spawn hundreds of goroutines that all sit on a
+// 30s SendMeshSDP if the signaling channel slows down. 32 is enough
+// to absorb a burst from one peer without piling up; the buffered
+// semaphore back-pressures pion's callback site naturally.
+const maxFireConcurrency = 32
+
 // MeshSDPKind discriminates the three mesh-handshake message types
 // exchanged between two network nodes to bring up a WebRTC
 // DataChannel. Values mirror the InnerMesh* constants in pkg/signaling
@@ -205,6 +214,10 @@ type WebRTCTransport struct {
 	closed    chan struct{}
 	wg        sync.WaitGroup
 
+	// fireSem bounds in-flight goroutines spawned by fireSDP /
+	// fireICE. See maxFireConcurrency for rationale.
+	fireSem chan struct{}
+
 	// Observability counters surfaced via Stats(). atomic.Int64 so
 	// concurrent updates from per-peer pumpInbox / Connect / Send
 	// goroutines never tear; cheap enough to update on every packet.
@@ -283,6 +296,7 @@ func NewWebRTCTransport(cfg WebRTCTransportConfig) (*WebRTCTransport, error) {
 		peers:          make(map[identity.Hash]*peerEntry),
 		pending:        make(map[identity.Hash]*pendingDial),
 		closed:         make(chan struct{}),
+		fireSem:        make(chan struct{}, maxFireConcurrency),
 	}, nil
 }
 
@@ -658,7 +672,10 @@ func (t *WebRTCTransport) pumpInbox(peer identity.Hash, sess *udwebrtc.PeerSessi
 }
 
 // fireSDP routes outbound SDPs from a PeerSession through the
-// signaler. Runs on a pion goroutine — must not block.
+// signaler. Runs on a pion-internal goroutine — must not block.
+// Concurrency is bounded by t.fireSem so an ICE candidate burst
+// across many peers cannot grow the goroutine count linearly with
+// candidate × peer count (Phase 10 review iter-3 finding #2).
 func (t *WebRTCTransport) fireSDP(peer identity.Hash, kind udwebrtc.SDPKind, sdp []byte) {
 	var meshKind MeshSDPKind
 	switch kind {
@@ -670,33 +687,42 @@ func (t *WebRTCTransport) fireSDP(peer identity.Hash, kind udwebrtc.SDPKind, sdp
 		t.logger.Debug("rtc: unknown SDP kind", "peer", peer, "kind", kind)
 		return
 	}
-
-	// Fire-and-forget on a fresh goroutine: SendMeshSDP may block on
-	// the signaling channel, and we are running on a pion-internal
-	// goroutine. tracked by t.wg so Close drains us.
-	t.wg.Add(1)
-	go func() {
-		defer t.wg.Done()
-
-		ctx, cancel := context.WithTimeout(context.Background(), t.connectTimeout)
-		defer cancel()
-		if err := t.signaler.SendMeshSDP(ctx, peer, meshKind, sdp); err != nil {
-			t.logger.Warn("rtc: signaler send sdp", "peer", peer, "kind", meshKind, "err", err)
-		}
-	}()
+	t.fireDispatch(peer, meshKind, sdp, false)
 }
 
 // fireICE routes outbound ICE candidates through the signaler. Same
-// non-blocking discipline as fireSDP.
+// non-blocking discipline as fireSDP. ICE-candidate flood is the
+// highest-volume firing path, so bounded concurrency matters most
+// here — see maxFireConcurrency.
 func (t *WebRTCTransport) fireICE(peer identity.Hash, candidate string) {
+	t.fireDispatch(peer, MeshSDPCandidate, []byte(candidate), true)
+}
+
+// fireDispatch is the shared body of fireSDP / fireICE: acquire one
+// fireSem slot (back-pressuring pion's callback site briefly if all
+// 32 slots are busy), spawn the bounded goroutine, run SendMeshSDP,
+// release. The semaphore-acquire is a non-blocking try with a
+// closed-shortcut so we never deadlock on shutdown.
+func (t *WebRTCTransport) fireDispatch(peer identity.Hash, kind MeshSDPKind, payload []byte, debug bool) {
+	select {
+	case t.fireSem <- struct{}{}:
+	case <-t.closed:
+		return
+	}
+
 	t.wg.Add(1)
 	go func() {
 		defer t.wg.Done()
+		defer func() { <-t.fireSem }()
 
 		ctx, cancel := context.WithTimeout(context.Background(), t.connectTimeout)
 		defer cancel()
-		if err := t.signaler.SendMeshSDP(ctx, peer, MeshSDPCandidate, []byte(candidate)); err != nil {
-			t.logger.Debug("rtc: signaler send ice", "peer", peer, "err", err)
+		if err := t.signaler.SendMeshSDP(ctx, peer, kind, payload); err != nil {
+			if debug {
+				t.logger.Debug("rtc: signaler send", "peer", peer, "kind", kind, "err", err)
+			} else {
+				t.logger.Warn("rtc: signaler send", "peer", peer, "kind", kind, "err", err)
+			}
 		}
 	}()
 }

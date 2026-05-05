@@ -188,3 +188,37 @@ func TestPeerSession_RejectsLargePayload(t *testing.T) {
 // Compile-time: ensures Signaler kind enum is referenced so tests in
 // this package can route between PeerSession and the wider transport.
 var _ transport.MeshSDPKind
+
+// TestPeerSession_RangeRecvExitsAfterClose verifies that consumers
+// using `for msg := range sess.Recv()` exit cleanly when the session
+// is closed. Iter-3 review caught that `inbox` was never closed —
+// readers using the range form would hang indefinitely. The fix
+// drains in-flight OnMessage callbacks via recvWg before closing
+// inbox.
+func TestPeerSession_RangeRecvExitsAfterClose(t *testing.T) {
+	t.Parallel()
+
+	var h identity.Hash
+	p, err := udwebrtc.NewPeerSession(udwebrtc.PeerSessionConfig{Peer: h})
+	if err != nil {
+		t.Fatalf("NewPeerSession: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range p.Recv() {
+			// drain
+		}
+	}()
+
+	if err := p.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("range over Recv() did not exit after Close")
+	}
+}

@@ -324,7 +324,6 @@ func (c *Channel) flushPending() {
 		}
 	}
 
-	hp := c.service.meshHandler.Load()
 	for _, mf := range meshFrames {
 		if !c.noise.Done() {
 			return
@@ -337,6 +336,11 @@ func (c *Channel) flushPending() {
 				"peer", c.peer, "err", err)
 			continue
 		}
+		// Reload meshHandler per frame: review iter-1 finding #9.
+		// If SetMeshHandler runs between flushPending start and
+		// here, a single-load-before-loop would drop early frames
+		// despite the handler now being live.
+		hp := c.service.meshHandler.Load()
 		if hp == nil {
 			continue
 		}

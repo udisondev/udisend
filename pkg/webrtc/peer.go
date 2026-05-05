@@ -128,6 +128,12 @@ type PeerSession struct {
 
 	bufferLow chan struct{} // unblocks Send when bufferedAmount drops
 	sendMu    sync.Mutex    // serialises Send so concurrent writers don't race the high-water check
+
+	// recvWg tracks in-flight OnMessage callbacks so Close can drain
+	// them before closing inbox — see Close. Without this, a callback
+	// that picked the `case p.inbox <- ...` branch right before Close
+	// would race with `close(p.inbox)` and panic.
+	recvWg sync.WaitGroup
 }
 
 // NewPeerSession constructs a session and wires the pion-side
@@ -319,12 +325,22 @@ func (p *PeerSession) Send(payload []byte) error {
 	// Wait once if we're already past the high-water mark — readers
 	// drain via OnBufferedAmountLow → bufferLow signal. We never wait
 	// indefinitely; if the peer is gone the dc.Send below will fail.
+	//
+	// time.NewTimer + Stop instead of time.After: a Send hot path
+	// hammering the high-water mark would otherwise leak one timer
+	// goroutine per blocked-and-then-unblocked call (the timer stays
+	// alive until natural expiry — 30 s — even after the select
+	// fires on bufferLow / closed). Stop releases the timer slot
+	// immediately on the unblocked paths.
 	if dc.BufferedAmount() > BufferedAmountHighWater {
+		timer := time.NewTimer(connectTimeout)
 		select {
 		case <-p.bufferLow:
+			timer.Stop()
 		case <-p.closed:
+			timer.Stop()
 			return ErrClosed
-		case <-time.After(connectTimeout):
+		case <-timer.C:
 			return ErrBufferFull
 		}
 	}
@@ -359,15 +375,22 @@ func (p *PeerSession) RestartICE() error {
 }
 
 // Close tears down the pion PeerConnection and closes the inbox so
-// readers exit. Idempotent.
+// `for msg := range sess.Recv()` consumers exit cleanly. Idempotent.
+//
+// Order matters: close `closed` first so any in-flight OnMessage
+// callbacks bail on the select. Then pc.Close() blocks until pion
+// drains its readLoop — no new OnMessage will fire after it returns.
+// recvWg.Wait() catches any callback that started Add(1)'ing before
+// the readLoop exit but hasn't reached its defer Done yet. Only then
+// is it safe to close inbox; an in-flight callback that picked the
+// `inbox <- msg.Data` send case would otherwise race the close.
 func (p *PeerSession) Close() error {
 	var err error
 	p.closeOnce.Do(func() {
 		close(p.closed)
 		err = p.pc.Close()
-		// inbox is fed by OnMessage which holds an internal pion lock;
-		// we cannot safely close it without coordinating, so let GC
-		// reclaim. Readers gate on p.closed.
+		p.recvWg.Wait()
+		close(p.inbox)
 	})
 
 	return err
@@ -386,6 +409,21 @@ func (p *PeerSession) attachDataChannel(dc *pion.DataChannel) {
 	})
 
 	dc.OnMessage(func(msg pion.DataChannelMessage) {
+		// recvWg gate: registers this callback as in-flight so Close
+		// can wait for it before closing the inbox channel. Without
+		// this, a callback that picks the inbox-send branch right as
+		// Close runs would race close(p.inbox) and panic.
+		p.recvWg.Add(1)
+		defer p.recvWg.Done()
+
+		// Fast-path bail if Close already fired — avoids the racy
+		// send-vs-close interleaving below.
+		select {
+		case <-p.closed:
+			return
+		default:
+		}
+
 		// pion delivers fresh-allocated bytes, so we can ship them to
 		// the inbox without copying.
 		select {
