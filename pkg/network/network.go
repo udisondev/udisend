@@ -684,9 +684,19 @@ func (n *Node) LocalAddress() string { return n.transport.LocalAddr().String() }
 // Stats is a read-only snapshot of internal counters surfaced to the
 // webui Settings → Network → Status panel. Cheap to compute — does no
 // IO and holds no locks across boundaries.
+//
+// Phase 10 added the RTC* fields. They are zero when MeshEnabled is
+// false; the webui can hide the WebRTC mesh block via that signal.
 type Stats struct {
 	RoutingTableSize int
 	ActiveSessions   int
+
+	RTCPeers           int
+	RTCBytesSent       int64
+	RTCBytesRecv       int64
+	RTCConnectAttempts int64
+	RTCConnectFailures int64
+	RTCICERestarts     int64
 }
 
 // Stats returns a fresh Stats snapshot.
@@ -695,10 +705,21 @@ func (n *Node) Stats() Stats {
 	active := len(n.sessions)
 	n.sessMu.RUnlock()
 
-	return Stats{
+	out := Stats{
 		RoutingTableSize: n.dht.Table().Size(),
 		ActiveSessions:   active,
 	}
+	if n.rtcTransport != nil {
+		rtcStats := n.rtcTransport.Stats()
+		out.RTCPeers = rtcStats.Peers
+		out.RTCBytesSent = rtcStats.BytesSent
+		out.RTCBytesRecv = rtcStats.BytesRecv
+		out.RTCConnectAttempts = rtcStats.ConnectAttempts
+		out.RTCConnectFailures = rtcStats.ConnectFailures
+		out.RTCICERestarts = rtcStats.ICERestarts
+	}
+
+	return out
 }
 
 // Identity returns the node's identity. Higher layers need it to sign

@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/udisondev/udisend/pkg/identity"
@@ -203,6 +204,43 @@ type WebRTCTransport struct {
 	closeOnce sync.Once
 	closed    chan struct{}
 	wg        sync.WaitGroup
+
+	// Observability counters surfaced via Stats(). atomic.Int64 so
+	// concurrent updates from per-peer pumpInbox / Connect / Send
+	// goroutines never tear; cheap enough to update on every packet.
+	bytesSent       atomic.Int64
+	bytesRecv       atomic.Int64
+	connectAttempts atomic.Int64
+	connectFailures atomic.Int64
+	iceRestarts     atomic.Int64
+}
+
+// Stats is a snapshot of WebRTCTransport observability counters.
+// Safe to call concurrently with traffic.
+type Stats struct {
+	Peers           int
+	BytesSent       int64
+	BytesRecv       int64
+	ConnectAttempts int64
+	ConnectFailures int64
+	ICERestarts     int64
+}
+
+// Stats returns a fresh counter snapshot. Cheap (atomic.Load + map
+// length).
+func (t *WebRTCTransport) Stats() Stats {
+	t.mu.Lock()
+	peers := len(t.peers)
+	t.mu.Unlock()
+
+	return Stats{
+		Peers:           peers,
+		BytesSent:       t.bytesSent.Load(),
+		BytesRecv:       t.bytesRecv.Load(),
+		ConnectAttempts: t.connectAttempts.Load(),
+		ConnectFailures: t.connectFailures.Load(),
+		ICERestarts:     t.iceRestarts.Load(),
+	}
 }
 
 // peerEntry holds an open PeerSession plus the goroutine that pumps
@@ -312,6 +350,7 @@ func (t *WebRTCTransport) Send(_ context.Context, to net.Addr, payload []byte) e
 			return err
 		}
 	}
+	t.bytesSent.Add(int64(len(payload)))
 
 	return nil
 }
@@ -414,7 +453,11 @@ func (t *WebRTCTransport) Connect(ctx context.Context, peer identity.Hash) error
 	t.pending[peer] = pd
 	t.mu.Unlock()
 
+	t.connectAttempts.Add(1)
 	err := t.dial(ctx, peer)
+	if err != nil {
+		t.connectFailures.Add(1)
+	}
 
 	t.mu.Lock()
 	pd.err = err
@@ -599,6 +642,7 @@ func (t *WebRTCTransport) pumpInbox(peer identity.Hash, sess *udwebrtc.PeerSessi
 			if !ok {
 				return
 			}
+			t.bytesRecv.Add(int64(len(payload)))
 			pkt := Packet{From: addr, Payload: payload}
 			select {
 			case t.inbox <- pkt:
