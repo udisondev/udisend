@@ -65,6 +65,33 @@ func (s *Store) SetPassphrase(ctx context.Context, encodedHash string) error {
 	return nil
 }
 
+// DeleteAuthCredentials removes the entire credentials row (passphrase
+// hash + TOTP secret), any unconsumed recovery codes, and ALL live
+// sessions. Idempotent. Wiping sessions in the same transaction is
+// load-bearing for "reset" semantics: without it a stolen cookie issued
+// before the reset survives and grants API access against whatever
+// passphrase the operator sets next, defeating the whole point of the
+// reset.
+func (s *Store) DeleteAuthCredentials(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("storage: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_credentials WHERE id = 1`); err != nil {
+		return fmt.Errorf("storage: delete auth_credentials: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_recovery_codes`); err != nil {
+		return fmt.Errorf("storage: wipe recovery codes: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions`); err != nil {
+		return fmt.Errorf("storage: wipe sessions: %w", err)
+	}
+
+	return tx.Commit()
+}
+
 // SetTOTPSecret stores the raw TOTP secret. Returns ErrCredentialsNotSet
 // if no passphrase row exists — TOTP without a passphrase makes no sense.
 func (s *Store) SetTOTPSecret(ctx context.Context, secret []byte) error {

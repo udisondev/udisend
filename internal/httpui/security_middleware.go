@@ -20,12 +20,21 @@ func validatePublicModeConfig(cfg Config) error {
 	if !cfg.Public {
 		return nil
 	}
-	if isLoopbackBind(cfg.Listen) {
-		return errors.New("httpui: public mode requires a non-loopback listen address")
+	// Loopback bind is forbidden EXCEPT when the operator runs behind a
+	// reverse proxy (TrustProxy=true). In that case loopback is the
+	// correct pattern: Caddy/nginx terminates TLS on a public socket and
+	// forwards to 127.0.0.1:<port>. Without this exception, public-proxy
+	// mode is unreachable.
+	if isLoopbackBind(cfg.Listen) && !cfg.TrustProxy {
+		return errors.New("httpui: public mode requires a non-loopback listen address (or TrustProxy with a reverse proxy in front)")
 	}
 	hasInlineTLS := cfg.TLSCert != "" && cfg.TLSKey != ""
-	if !hasInlineTLS && !cfg.TrustProxy {
-		return errors.New("httpui: public mode requires TLS (-tls-cert + -tls-key) or -trust-proxy with a TLS-terminating reverse proxy")
+	hasTLSConfig := cfg.TLSConfig != nil
+	if hasInlineTLS && hasTLSConfig {
+		return errors.New("httpui: TLSCert/TLSKey and TLSConfig are mutually exclusive")
+	}
+	if !hasInlineTLS && !hasTLSConfig && !cfg.TrustProxy {
+		return errors.New("httpui: public mode requires TLS (TLSCert+TLSKey or TLSConfig) or TrustProxy with a TLS-terminating reverse proxy")
 	}
 
 	return nil
@@ -156,7 +165,7 @@ func (s *Server) secureHeaders(next http.Handler) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Permissions-Policy", "geolocation=(), payment=(), usb=(), magnetometer=(), accelerometer=(), gyroscope=()")
-		if s.publicMode && (s.tlsCert != "" || strings.HasPrefix(r.Header.Get("X-Forwarded-Proto"), "https")) {
+		if s.publicMode && (s.hasTLS || strings.HasPrefix(r.Header.Get("X-Forwarded-Proto"), "https")) {
 			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 

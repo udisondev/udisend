@@ -1,6 +1,33 @@
 package storage_test
 
-import "testing"
+import (
+	"testing"
+)
+
+func TestAppSettings_Delete(t *testing.T) {
+	t.Parallel()
+	s := mkStore(t)
+	ctx := t.Context()
+
+	if err := s.SetSetting(ctx, "deploy.mode", "lan-ip"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.GetSetting(ctx, "deploy.mode"); !ok {
+		t.Fatal("setup: key must be present before delete")
+	}
+
+	if err := s.DeleteSetting(ctx, "deploy.mode"); err != nil {
+		t.Fatalf("DeleteSetting: %v", err)
+	}
+	if _, ok, _ := s.GetSetting(ctx, "deploy.mode"); ok {
+		t.Fatal("DeleteSetting did not remove the row")
+	}
+
+	// Idempotent on missing key.
+	if err := s.DeleteSetting(ctx, "deploy.mode"); err != nil {
+		t.Fatalf("DeleteSetting idempotent: %v", err)
+	}
+}
 
 func TestAppSettings_GetSet(t *testing.T) {
 	t.Parallel()

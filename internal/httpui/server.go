@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -45,7 +46,12 @@ type Server struct {
 	publicHost string
 	tlsCert    string
 	tlsKey     string
-	authH      *authHandlers
+	// hasTLS is true when this server terminates TLS in-process — either
+	// via cfg.TLSCert/TLSKey files or via cfg.TLSConfig (autocert). Used
+	// to gate HSTS, which we MUST NOT send over plaintext lest browsers
+	// pin a host that has no working HTTPS endpoint.
+	hasTLS bool
+	authH  *authHandlers
 
 	// logLevel is a runtime-mutable level the Settings → Notifications
 	// panel can flip to enable verbose logs without restart. nil disables
@@ -91,6 +97,12 @@ type Config struct {
 	// the Secure flag on session cookies. Only meaningful in public mode.
 	TrustProxy bool
 
+	// AllowOpaqueOrigin tolerates `Origin: null` on POST /login. Required
+	// in lan-ip mode where browsers downgrade to opaque origin after a
+	// self-signed cert override; left false elsewhere so `null` Origin
+	// remains a CSRF signal.
+	AllowOpaqueOrigin bool
+
 	// TLSCert and TLSKey, when both non-empty, switch Run() to ServeTLS.
 	// Mutually exclusive with TrustProxy in practice (you either terminate
 	// TLS in-process or behind a proxy), though both being set is harmless
@@ -108,6 +120,13 @@ type Config struct {
 	// Used by the Storage usage panel to compute file size and
 	// vacuum-reclaimed bytes. Empty disables the size column.
 	DBPath string
+
+	// TLSConfig, when non-nil, supplies the TLS configuration for
+	// ServeTLS. Mutually exclusive with TLSCert/TLSKey. Used by callers
+	// that manage certificates externally (e.g. autocert/Let's Encrypt
+	// plumbing in cmd/messenger). The caller is responsible for choosing
+	// safe MinVersion / curves; httpui will not override them.
+	TLSConfig *tls.Config
 }
 
 // NewServer constructs the HTTP UI without starting it.
@@ -140,6 +159,7 @@ func NewServer(cfg Config) (*Server, error) {
 		publicHost: cfg.PublicHost,
 		tlsCert:    cfg.TLSCert,
 		tlsKey:     cfg.TLSKey,
+		hasTLS:     (cfg.TLSCert != "" && cfg.TLSKey != "") || cfg.TLSConfig != nil,
 		logLevel:   cfg.LogLevel,
 		dbPath:     cfg.DBPath,
 		wsConns:    make(map[*sseClient]struct{}),
@@ -162,9 +182,10 @@ func NewServer(cfg Config) (*Server, error) {
 				LockDuration:  15 * time.Minute,
 				MaxTrackedIPs: 50000,
 			},
-			secureCookie: true,
-			trustProxy:   cfg.TrustProxy,
-			now:          time.Now,
+			secureCookie:      true,
+			trustProxy:        cfg.TrustProxy,
+			allowOpaqueOrigin: cfg.AllowOpaqueOrigin,
+			now:               time.Now,
 		}
 	}
 
@@ -243,6 +264,9 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		s.server.TLSConfig = hardenedTLSConfig()
+	}
+	if cfg.TLSConfig != nil {
+		s.server.TLSConfig = cfg.TLSConfig
 	}
 	cfg.Messenger.SetIncomingHandler(s.onIncomingSession)
 	cfg.Messenger.SetPeerOnlineHandler(s.onPeerOnline)
@@ -323,9 +347,14 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	var err error
-	if s.tlsCert != "" && s.tlsKey != "" {
+	switch {
+	case s.tlsCert != "" && s.tlsKey != "":
 		err = s.server.ServeTLS(s.listener, s.tlsCert, s.tlsKey)
-	} else {
+	case s.server.TLSConfig != nil:
+		// Caller provided a complete TLSConfig (e.g. autocert.Manager.TLSConfig);
+		// ServeTLS picks up the certificate via TLSConfig.GetCertificate.
+		err = s.server.ServeTLS(s.listener, "", "")
+	default:
 		err = s.server.Serve(s.listener)
 	}
 	if errors.Is(err, http.ErrServerClosed) {

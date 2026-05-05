@@ -35,3 +35,15 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 
 	return nil
 }
+
+// DeleteSetting removes a row. Idempotent — no error if the key was
+// already absent. Used by deployment-profile teardown so the next load
+// sees "no profile" instead of a row with empty values.
+func (s *Store) DeleteSetting(ctx context.Context, key string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM app_settings WHERE key = ?`, key)
+	if err != nil {
+		return fmt.Errorf("storage: delete setting %q: %w", key, err)
+	}
+
+	return nil
+}

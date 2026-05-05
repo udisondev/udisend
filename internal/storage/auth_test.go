@@ -46,6 +46,64 @@ func TestAuthCredentials_PassphraseUpsert(t *testing.T) {
 	}
 }
 
+func TestAuthCredentials_Delete(t *testing.T) {
+	t.Parallel()
+	s := mkStore(t)
+	ctx := t.Context()
+
+	// Idempotent before any set.
+	if err := s.DeleteAuthCredentials(ctx); err != nil {
+		t.Fatalf("DeleteAuthCredentials before set: %v", err)
+	}
+
+	if err := s.SetPassphrase(ctx, "encoded-hash"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTOTPSecret(ctx, []byte("0123456789abcdef0123")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetAuthCredentials(ctx); got == nil {
+		t.Fatal("setup: creds must be present before delete")
+	}
+
+	// Live session before reset — must be invalidated by DeleteAuthCredentials,
+	// otherwise a previously-stolen cookie keeps full API access until idle TTL.
+	now := time.Now()
+	if err := s.CreateAuthSession(ctx, storage.AuthSession{
+		ID: "sess-pre-reset", CreatedAt: now, LastSeen: now,
+		RemoteIP: "1.2.3.4", UserAgent: "x",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DeleteAuthCredentials(ctx); err != nil {
+		t.Fatalf("DeleteAuthCredentials: %v", err)
+	}
+	got, err := s.GetAuthCredentials(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil after delete, got %+v", got)
+	}
+
+	// Session row must be wiped — without this fix, Validate() still finds it
+	// and the operator's "reset" becomes a security non-event.
+	sess, err := s.GetAuthSession(ctx, "sess-pre-reset")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess != nil {
+		t.Errorf("DeleteAuthCredentials must wipe live sessions; got %+v", sess)
+	}
+
+	// SetTOTPSecret on the now-cleared row must surface ErrCredentialsNotSet
+	// (matches the "no passphrase yet" semantics — the row really is gone).
+	if err := s.SetTOTPSecret(ctx, []byte("0123456789abcdef0123")); !errors.Is(err, storage.ErrCredentialsNotSet) {
+		t.Errorf("SetTOTPSecret after delete: want ErrCredentialsNotSet, got %v", err)
+	}
+}
+
 func TestAuthCredentials_TOTPLifecycle(t *testing.T) {
 	t.Parallel()
 	s := mkStore(t)

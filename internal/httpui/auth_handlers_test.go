@@ -110,9 +110,9 @@ func (f *loginFixture) post(path string, form url.Values, sessionCookie string) 
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("X-Forwarded-For", "198.51.100.7")
-	// Logout in real wiring requires the CSRF custom header; login does
-	// not (Origin-check + SameSite cover that boundary). Setting it here
-	// for both keeps the fixture simple.
+	// X-Requested-With is required by requireCSRFHeader on most state-changing
+	// endpoints; login itself doesn't gate on it but setting it keeps the
+	// fixture uniform across tests that hit logout / api/* paths.
 	req.Header.Set("X-Requested-With", "udisend")
 	if sessionCookie != "" {
 		req.AddCookie(&http.Cookie{Name: cookieNameSession, Value: sessionCookie})
@@ -399,33 +399,43 @@ func TestLoginPOST_CookieAttributes(t *testing.T) {
 	}
 }
 
-func TestSameOriginIfPresent(t *testing.T) {
+// TestCheckLoginOrigin pins the conditional same-origin contract for
+// /login: strict in trusted-cert modes, tolerant of `Origin: null` in
+// lan-ip mode where browsers downgrade to opaque origin after a
+// self-signed cert override.
+func TestCheckLoginOrigin(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		host   string
-		origin string
-		want   bool
+		name              string
+		host              string
+		origin            string
+		allowOpaqueOrigin bool
+		want              bool
 	}{
-		{"missing origin allowed", "messenger.example.com", "", true},
-		{"same origin", "messenger.example.com", "https://messenger.example.com", true},
-		{"different host blocked", "messenger.example.com", "https://evil.example.org", false},
-		{"different scheme same host allowed", "messenger.example.com", "http://messenger.example.com", true},
-		{"malformed origin blocked", "messenger.example.com", "::not a url::", false},
+		{"missing origin allowed", "messenger.example.com", "", false, true},
+		{"same origin", "messenger.example.com", "https://messenger.example.com", false, true},
+		{"different host blocked", "messenger.example.com", "https://evil.example.org", false, false},
+		{"different scheme same host allowed", "messenger.example.com", "http://messenger.example.com", false, true},
+		{"malformed origin blocked", "messenger.example.com", "::not a url::", false, false},
+		// Opaque origin behavior — the regression path for lan-ip.
+		{"null rejected in trusted-cert mode", "192.168.0.105:8443", "null", false, false},
+		{"null accepted in self-signed mode", "192.168.0.105:8443", "null", true, true},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			h := &authHandlers{allowOpaqueOrigin: tt.allowOpaqueOrigin}
 			r, _ := http.NewRequest(http.MethodPost, "/login", nil)
 			r.Host = tt.host
 			if tt.origin != "" {
 				r.Header.Set("Origin", tt.origin)
 			}
-			got := sameOriginIfPresent(r)
+			got, reason := h.checkLoginOrigin(r)
 			if got != tt.want {
-				t.Errorf("sameOriginIfPresent(host=%q origin=%q) = %v, want %v",
-					tt.host, tt.origin, got, tt.want)
+				t.Errorf("checkLoginOrigin(host=%q origin=%q allow=%v) = %v (reason %q), want %v",
+					tt.host, tt.origin, tt.allowOpaqueOrigin, got, reason, tt.want)
 			}
 		})
 	}

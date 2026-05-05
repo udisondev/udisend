@@ -2,7 +2,9 @@ package httpui
 
 import (
 	"context"
+	"fmt"
 	"html/template"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -39,7 +41,14 @@ type authHandlers struct {
 	limiter      *auth.RateLimiter
 	secureCookie bool
 	trustProxy   bool
-	now          func() time.Time
+	// allowOpaqueOrigin tolerates `Origin: null` on POST /login. Browsers
+	// downgrade to opaque origin after a self-signed cert override, which
+	// is the expected state in lan-ip deployments. Set via Config in modes
+	// that issue self-signed certs; left false where the cert is publicly
+	// trusted (public-tls, public-autocert, public-proxy) so a `null`
+	// Origin remains a CSRF signal.
+	allowOpaqueOrigin bool
+	now               func() time.Time
 }
 
 type loginViewData struct {
@@ -99,7 +108,7 @@ func (h *authHandlers) handleLoginGET(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if creds == nil {
-		http.Error(w, "auth not configured — run `messenger -set-password` on the host first", http.StatusServiceUnavailable)
+		http.Error(w, "auth not configured — run `udisend public -enable <addr>` on the host first", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -107,7 +116,13 @@ func (h *authHandlers) handleLoginGET(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *authHandlers) handleLoginPOST(w http.ResponseWriter, r *http.Request) {
-	if !sameOriginIfPresent(r) {
+	if ok, reason := h.checkLoginOrigin(r); !ok {
+		slog.Warn("login: origin rejected",
+			"reason", reason,
+			"origin", r.Header.Get("Origin"),
+			"host", r.Host,
+			"proto", r.Proto,
+		)
 		http.Error(w, "bad origin", http.StatusForbidden)
 		return
 	}
@@ -320,26 +335,6 @@ func (h *authHandlers) clientIP(r *http.Request) string {
 	return host
 }
 
-// sameOriginIfPresent enforces that, when the browser sent an Origin
-// header, it matches the request's Host. Browsers always set Origin on
-// POST, so a same-origin form submission goes through; a cross-origin one
-// (the login-CSRF / session-fixation vector) is rejected. Non-browser
-// clients (curl, integration tests) typically omit Origin and are allowed
-// — they can't be tricked into pre-filling a passphrase by a malicious
-// site, which is the threat we're addressing here.
-func sameOriginIfPresent(r *http.Request) bool {
-	o := r.Header.Get("Origin")
-	if o == "" {
-		return true
-	}
-	u, err := url.Parse(o)
-	if err != nil {
-		return false
-	}
-
-	return u.Host == r.Host
-}
-
 func (h *authHandlers) audit(ctx context.Context, event, ip, ua, note string) error {
 	return h.store.WriteAuthLog(ctx, storage.AuthLogEntry{
 		Timestamp: h.now(),
@@ -348,6 +343,50 @@ func (h *authHandlers) audit(ctx context.Context, event, ip, ua, note string) er
 		UserAgent: truncateUA(ua),
 		Note:      note,
 	})
+}
+
+// checkLoginOrigin enforces a same-origin POST to /login. Browsers
+// always set Origin on cross-origin POST, so a same-origin form goes
+// through; a cross-origin one (the login-CSRF / session-fixation
+// vector) is rejected.
+//
+// The wrinkle: Chromium and Safari downgrade pages to "opaque origin"
+// after the user accepts a self-signed cert override, sending
+// `Origin: null` on subsequent POST. Strict comparison would falsely
+// reject every login on lan-ip deployments. We tolerate `null` only
+// when the deployment is known to issue a self-signed cert
+// (`allowOpaqueOrigin`). For TLS modes with a publicly-trusted cert,
+// `null` remains a CSRF signal and stays rejected.
+//
+// Trade-off in lan-ip mode: lose strong CSRF defence on /login. The
+// remaining defences are: rate-limiter (5/min, 20-fail lockout),
+// Argon2id passphrase hashing, single-tenant deployment (no other
+// account to fixate into), audit log. For udisend's threat model this
+// is an acceptable degradation.
+//
+// Non-browser clients (curl, integration tests) typically omit Origin
+// and are allowed — they cannot be tricked into pre-filling a
+// passphrase by a malicious site.
+func (h *authHandlers) checkLoginOrigin(r *http.Request) (bool, string) {
+	o := r.Header.Get("Origin")
+	if o == "" {
+		return true, ""
+	}
+	if o == "null" {
+		if h.allowOpaqueOrigin {
+			return true, ""
+		}
+		return false, `Origin "null" rejected (not a self-signed-cert deployment)`
+	}
+	u, err := url.Parse(o)
+	if err != nil {
+		return false, fmt.Sprintf("Origin %q unparseable: %v", o, err)
+	}
+	if u.Host != r.Host {
+		return false, fmt.Sprintf("Origin host %q != request Host %q", u.Host, r.Host)
+	}
+
+	return true, ""
 }
 
 // truncateUA caps user-agent strings before persistence. Hostile clients

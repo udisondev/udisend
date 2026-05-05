@@ -5,6 +5,7 @@
 /cmd/messenger/messenger
 /messenger
 /network
+/udisend
 
 # Task build cache
 /.task/
