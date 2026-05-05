@@ -243,7 +243,7 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 
 	n.resolver = presence.NewResolver(nodeAdapter{n.dht}, cfg.PresenceTTL)
 
-	caps := capsFor(cfg.Mode, cfg.PublicIP != "")
+	caps := capsFor(cfg.Mode, cfg.PublicIP != "", cfg.MeshEnabled)
 	pubAddr := tr.LocalAddr().String()
 	if cfg.PublicIP != "" {
 		// Operators routinely bind to 0.0.0.0; the published record
@@ -372,30 +372,43 @@ func (n *Node) MeshTransport() *transport.WebRTCTransport { return n.rtcTranspor
 func (n *Node) MeshPeerManager() *webrtc.PeerManager { return n.peerManager }
 
 // dhtMeshSelector picks K closest peers to self from the DHT
-// routing table. Self-centred selection is the natural fit for a
-// resilience overlay: the closer a peer is in XOR, the more our
-// routing depends on it; meshing with them keeps the graph
-// densely connected exactly where it matters most.
+// routing table that advertise CapCanWebRTCMesh. Self-centred
+// selection is the natural fit for a resilience overlay: the closer
+// a peer is in XOR, the more our routing depends on it; meshing
+// with them keeps the graph densely connected exactly where it
+// matters most.
 //
-// Phase 10.8 will add a CapCanWebRTCMesh filter so legacy contacts
-// are skipped — for now we return all closest contacts and rely on
-// PeerManager's Connect failures to back off legacy peers.
+// We over-fetch (4×k) from the routing table to give the cap-filter
+// some headroom — peers without the mesh bit are silently dropped,
+// so a routing-table dominated by legacy contacts still produces a
+// reasonable selection. The presence resolver is consulted via the
+// node's resolver; lookups that fail (cache-miss / record-expired)
+// drop the contact for this tick rather than blocking reconcile —
+// the next tick re-evaluates with fresher records.
 type dhtMeshSelector struct {
 	n *Node
 }
 
-// SelectPeers returns up to k closest contacts to self.
-func (s *dhtMeshSelector) SelectPeers(_ context.Context, k int) []identity.Hash {
+// SelectPeers returns up to k closest contacts to self that
+// advertise CapCanWebRTCMesh.
+func (s *dhtMeshSelector) SelectPeers(ctx context.Context, k int) []identity.Hash {
 	if s.n == nil || s.n.dht == nil {
 		return nil
 	}
 	self := s.n.cfg.Identity.Public().DestinationHash()
-	contacts := s.n.dht.Table().Closest(self, k)
-	out := make([]identity.Hash, 0, len(contacts))
+	contacts := s.n.dht.Table().Closest(self, 4*k)
+
+	out := make([]identity.Hash, 0, k)
 	for _, c := range contacts {
+		if len(out) >= k {
+			break
+		}
 		// Filter self defensively — Closest should not return us, but
 		// k-bucket implementations differ.
 		if c.ID == self {
+			continue
+		}
+		if !s.hasMeshCapability(ctx, c.ID) {
 			continue
 		}
 		out = append(out, c.ID)
@@ -404,23 +417,48 @@ func (s *dhtMeshSelector) SelectPeers(_ context.Context, k int) []identity.Hash 
 	return out
 }
 
-func capsFor(mode Mode, hasPublicIP bool) presence.Capability {
+// hasMeshCapability checks the local presence cache (resolver) for
+// the peer's record and tests CapCanWebRTCMesh. A miss is treated
+// as "not mesh-capable" (skip) — we never block on a remote DHT
+// lookup here because reconcile must not stall.
+func (s *dhtMeshSelector) hasMeshCapability(ctx context.Context, peer identity.Hash) bool {
+	if s.n.resolver == nil {
+		return false
+	}
+
+	// 250ms is the local-cache budget — if the resolver has the
+	// record cached this returns instantly; otherwise a full lookup
+	// would block reconcile, so we cap and treat timeout as miss.
+	lctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+
+	rec, err := s.n.resolver.Lookup(lctx, peer)
+	if err != nil || rec == nil {
+		return false
+	}
+
+	return rec.Capabilities.Has(presence.CapCanWebRTCMesh)
+}
+
+func capsFor(mode Mode, hasPublicIP, meshEnabled bool) presence.Capability {
+	var caps presence.Capability
 	switch mode {
 	case ModeRelay:
-		caps := presence.CapCanRelay | presence.CapCanBootstrap
+		caps = presence.CapCanRelay | presence.CapCanBootstrap
 		if hasPublicIP {
 			caps |= presence.CapPublicIP | presence.CapCanSTUN | presence.CapCanTURN
 		}
-
-		return caps
 	default:
 		// ModeClient
 		if hasPublicIP {
-			return presence.CapPublicIP
+			caps = presence.CapPublicIP
 		}
-
-		return 0
 	}
+	if meshEnabled {
+		caps |= presence.CapCanWebRTCMesh
+	}
+
+	return caps
 }
 
 // Run starts every loop and blocks until ctx is cancelled or any loop

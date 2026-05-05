@@ -21,12 +21,21 @@ import (
 type Capability uint32
 
 // Capability bits.
+//
+// Bit 5 (CapCanWebRTCMesh) is the Phase 10 marker: the node will
+// accept mesh-handshake envelopes (InnerMeshOffer/Answer/Candidate)
+// and runs a PeerManager filling K live DataChannels. Legacy
+// builds (Phase ≤ 9) do not set this bit; they continue to work
+// alongside Phase 10 nodes — the selector skips them, and a stray
+// mesh-handshake envelope that reaches a legacy node decodes as
+// "unknown inner type" and is dropped at debug-log level.
 const (
-	CapPublicIP     Capability = 1 << 0
-	CapCanRelay     Capability = 1 << 1
-	CapCanBootstrap Capability = 1 << 2
-	CapCanSTUN      Capability = 1 << 3
-	CapCanTURN      Capability = 1 << 4
+	CapPublicIP      Capability = 1 << 0
+	CapCanRelay      Capability = 1 << 1
+	CapCanBootstrap  Capability = 1 << 2
+	CapCanSTUN       Capability = 1 << 3
+	CapCanTURN       Capability = 1 << 4
+	CapCanWebRTCMesh Capability = 1 << 5
 )
 
 // Has reports whether c has all of bits set.
@@ -51,6 +60,7 @@ func (c Capability) String() string {
 	add("Bootstrap", CapCanBootstrap)
 	add("STUN", CapCanSTUN)
 	add("TURN", CapCanTURN)
+	add("WebRTCMesh", CapCanWebRTCMesh)
 	return out
 }
 
