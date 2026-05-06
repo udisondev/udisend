@@ -417,7 +417,7 @@ func WaitFor(t *testing.T, timeout time.Duration, predicate func() bool) bool {
 func (c *Cluster) KnowsAbout(i, j int) bool {
 	pi := c.Peer(i)
 	pj := c.Peer(j)
-	_, ok := pi.node.Table().GetContact(pj.node.ID())
+	_, ok := pi.node.Table().Contact(pj.node.ID())
 
 	return ok
 }

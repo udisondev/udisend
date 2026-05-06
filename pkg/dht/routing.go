@@ -4,6 +4,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/udisondev/udisend/pkg/identity"
 )
 
 // RoutingTable is a Kademlia routing table over 128-bit IDs.
@@ -15,12 +17,15 @@ type RoutingTable struct {
 	buckets [IDBits]*bucket
 }
 
-// NewRoutingTable constructs a routing table for `self` with bucket size k.
-func NewRoutingTable(self NodeID, k int) *RoutingTable {
+// NewRoutingTable constructs a routing table for self with bucket size k.
+// self may be any identity.PeerID; only its 16-byte representation is
+// retained internally.
+func NewRoutingTable(self identity.PeerID, k int) *RoutingTable {
 	if k <= 0 {
 		k = DefaultK
 	}
-	return &RoutingTable{self: self, k: k}
+
+	return &RoutingTable{self: self.Bytes(), k: k}
 }
 
 // Self returns the local node's ID.
@@ -49,28 +54,33 @@ func (rt *RoutingTable) Add(c Contact) {
 	b.add(c, now)
 }
 
-// Remove drops the contact with the given ID, if any.
-func (rt *RoutingTable) Remove(id NodeID) bool {
-	if id == rt.self {
+// Remove drops the contact with the given ID, if any. id may be any
+// identity.PeerID; only its 16-byte representation is consulted.
+func (rt *RoutingTable) Remove(id identity.PeerID) bool {
+	nid := id.Bytes()
+	if nid == rt.self {
 		return false
 	}
-	idx := BucketIndex(rt.self, id)
+	idx := BucketIndex(rt.self, nid)
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	b := rt.buckets[idx]
 	if b == nil {
 		return false
 	}
-	return b.remove(id)
+
+	return b.remove(nid)
 }
 
-// GetContact returns the routing-table entry for id, if present.
-// Used by the maybeProbe path to skip probes for peers we already know.
-func (rt *RoutingTable) GetContact(id NodeID) (Contact, bool) {
-	if id == rt.self {
+// Contact returns the routing-table entry for id, if present. Used
+// by the maybeProbe path to skip probes for peers we already know.
+// id may be any identity.PeerID.
+func (rt *RoutingTable) Contact(id identity.PeerID) (Contact, bool) {
+	nid := id.Bytes()
+	if nid == rt.self {
 		return Contact{}, false
 	}
-	idx := BucketIndex(rt.self, id)
+	idx := BucketIndex(rt.self, nid)
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 	b := rt.buckets[idx]
@@ -78,7 +88,7 @@ func (rt *RoutingTable) GetContact(id NodeID) (Contact, bool) {
 		return Contact{}, false
 	}
 	for _, c := range b.contacts {
-		if c.ID == id {
+		if c.ID == nid {
 			return c, true
 		}
 	}
@@ -126,15 +136,17 @@ func (rt *RoutingTable) All() []Contact {
 	return out
 }
 
-// Closest returns the n contacts with the smallest XOR distance to target.
-// If fewer than n are known, returns whatever is available.
-func (rt *RoutingTable) Closest(target NodeID, n int) []Contact {
+// Closest returns the n contacts with the smallest XOR distance to
+// target. If fewer than n are known, returns whatever is available.
+// target may be any identity.PeerID.
+func (rt *RoutingTable) Closest(target identity.PeerID, n int) []Contact {
 	if n <= 0 {
 		return nil
 	}
+	tid := target.Bytes()
 	all := rt.All()
 	slices.SortFunc(all, func(a, b Contact) int {
-		return distanceCompare(a.ID, b.ID, target)
+		return distanceCompare(a.ID, b.ID, tid)
 	})
 	if len(all) > n {
 		all = all[:n]

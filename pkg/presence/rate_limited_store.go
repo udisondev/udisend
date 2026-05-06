@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/udisondev/udisend/pkg/dht"
+	"github.com/udisondev/udisend/pkg/identity"
 )
 
 // DefaultMaxRecordsPerIP caps how many presence records a single source
@@ -72,16 +73,17 @@ func NewRateLimitedStore(inner dht.Store) *RateLimitedStore {
 // Put is the unsourced path — used by callers that do not know the
 // network origin (local writes, tests). It applies no per-IP limit
 // because there is no "per IP" to apply against.
-func (s *RateLimitedStore) Put(key dht.NodeID, value []byte, ttl time.Duration) {
+func (s *RateLimitedStore) Put(key identity.PeerID, value []byte, ttl time.Duration) {
 	s.inner.Put(key, value, ttl)
 }
 
 // PutFromSource is the rate-limited entry point used by the DHT node
-// when a STORE RPC arrives from `source`. Presence records are decoded
+// when a STORE RPC arrives from source. Presence records are decoded
 // + signature-verified before any slot is allocated. Mismatches between
-// the record's claimed Address and `source` are tolerated (peers behind
-// NAT routinely have them) — the cap keys on `source` only.
-func (s *RateLimitedStore) PutFromSource(key dht.NodeID, value []byte, ttl time.Duration, source net.Addr) {
+// the record's claimed Address and source are tolerated (peers behind
+// NAT routinely have them) — the cap keys on source only.
+func (s *RateLimitedStore) PutFromSource(key identity.PeerID, value []byte, ttl time.Duration, source net.Addr) {
+	nid := key.Bytes()
 	ip := addrIP(source)
 	if ip == "" {
 		s.inner.Put(key, value, ttl)
@@ -117,7 +119,7 @@ func (s *RateLimitedStore) PutFromSource(key dht.NodeID, value []byte, ttl time.
 	}
 
 	s.mu.Lock()
-	prev, isUpdate := s.ipByKey[key]
+	prev, isUpdate := s.ipByKey[nid]
 	keys, ipKnown := s.keyByIP[ip]
 	if !isUpdate && len(keys) >= limit {
 		s.mu.Unlock()
@@ -135,7 +137,7 @@ func (s *RateLimitedStore) PutFromSource(key dht.NodeID, value []byte, ttl time.
 	}
 	if isUpdate && prev != ip {
 		if old := s.keyByIP[prev]; old != nil {
-			delete(old, key)
+			delete(old, nid)
 			if len(old) == 0 {
 				delete(s.keyByIP, prev)
 			}
@@ -145,15 +147,15 @@ func (s *RateLimitedStore) PutFromSource(key dht.NodeID, value []byte, ttl time.
 		keys = make(map[dht.NodeID]struct{})
 		s.keyByIP[ip] = keys
 	}
-	keys[key] = struct{}{}
-	s.ipByKey[key] = ip
+	keys[nid] = struct{}{}
+	s.ipByKey[nid] = ip
 	s.mu.Unlock()
 
 	s.inner.Put(key, value, ttl)
 }
 
 // Get is a pass-through.
-func (s *RateLimitedStore) Get(key dht.NodeID) ([]byte, bool) {
+func (s *RateLimitedStore) Get(key identity.PeerID) ([]byte, bool) {
 	return s.inner.Get(key)
 }
 

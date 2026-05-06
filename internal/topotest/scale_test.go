@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/udisondev/udisend/internal/topotest"
+	"github.com/udisondev/udisend/pkg/identity"
 )
 
 // §9 — scale tier. We exercise medium-sized clusters under
@@ -83,7 +84,7 @@ func runScale(t *testing.T, n int, lookupTimeout time.Duration) {
 	// joined late only know their seed; with it, they know the
 	// neighbourhood that seed walked them through.
 	for i := range n {
-		var rnd [16]byte
+		var rnd identity.Hash
 		for k := range rnd {
 			rnd[k] = byte(r.IntN(256))
 		}

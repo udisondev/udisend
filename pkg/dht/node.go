@@ -307,7 +307,7 @@ func (n *Node) maybeProbe(id NodeID, from net.Addr) {
 		return
 	}
 	// Already in routing table → no need to re-probe.
-	if known, ok := n.table.GetContact(id); ok && known.Addr != nil {
+	if known, ok := n.table.Contact(id); ok && known.Addr != nil {
 		return
 	}
 
@@ -429,14 +429,14 @@ func (n *Node) Ping(ctx context.Context, addr net.Addr) error {
 }
 
 // FindNode asks `addr` for the K closest contacts to target.
-func (n *Node) FindNode(ctx context.Context, addr net.Addr, target NodeID) ([]Contact, error) {
+func (n *Node) FindNode(ctx context.Context, addr net.Addr, target identity.PeerID) ([]Contact, error) {
 	hdr, err := n.newRequestHeader()
 	if err != nil {
 		return nil, err
 	}
 	ch := n.register(hdr.TxID)
 	defer n.cancel(hdr.TxID)
-	if err := n.sendMsg(ctx, addr, &FindNodeMsg{Header: hdr, Target: target}); err != nil {
+	if err := n.sendMsg(ctx, addr, &FindNodeMsg{Header: hdr, Target: target.Bytes()}); err != nil {
 		return nil, err
 	}
 	resp, err := n.waitFor(ctx, ch, n.cfg.RequestTimeout)
@@ -447,19 +447,20 @@ func (n *Node) FindNode(ctx context.Context, addr net.Addr, target NodeID) ([]Co
 	if !ok {
 		return nil, fmt.Errorf("dht: expected NodesMsg, got %T", resp)
 	}
+
 	return n.decodeContacts(nodes.Contacts), nil
 }
 
-// FindValue queries `addr` for a stored value. If the peer doesn't have
+// FindValue queries addr for a stored value. If the peer doesn't have
 // it, returns (nil, contacts, nil) with the closest contacts.
-func (n *Node) FindValue(ctx context.Context, addr net.Addr, key NodeID) ([]byte, []Contact, error) {
+func (n *Node) FindValue(ctx context.Context, addr net.Addr, key identity.PeerID) ([]byte, []Contact, error) {
 	hdr, err := n.newRequestHeader()
 	if err != nil {
 		return nil, nil, err
 	}
 	ch := n.register(hdr.TxID)
 	defer n.cancel(hdr.TxID)
-	if err := n.sendMsg(ctx, addr, &FindValueMsg{Header: hdr, Key: key}); err != nil {
+	if err := n.sendMsg(ctx, addr, &FindValueMsg{Header: hdr, Key: key.Bytes()}); err != nil {
 		return nil, nil, err
 	}
 	resp, err := n.waitFor(ctx, ch, n.cfg.RequestTimeout)
@@ -476,18 +477,19 @@ func (n *Node) FindValue(ctx context.Context, addr net.Addr, key NodeID) ([]byte
 	}
 }
 
-// Store asks `addr` to store key=value.
-func (n *Node) Store(ctx context.Context, addr net.Addr, key NodeID, value []byte) error {
+// Store asks addr to store key=value.
+func (n *Node) Store(ctx context.Context, addr net.Addr, key identity.PeerID, value []byte) error {
 	hdr, err := n.newRequestHeader()
 	if err != nil {
 		return err
 	}
 	ch := n.register(hdr.TxID)
 	defer n.cancel(hdr.TxID)
-	if err := n.sendMsg(ctx, addr, &StoreMsg{Header: hdr, Key: key, Value: value}); err != nil {
+	if err := n.sendMsg(ctx, addr, &StoreMsg{Header: hdr, Key: key.Bytes(), Value: value}); err != nil {
 		return err
 	}
 	_, err = n.waitFor(ctx, ch, n.cfg.RequestTimeout)
+
 	return err
 }
 
@@ -525,23 +527,23 @@ func (n *Node) Bootstrap(ctx context.Context, peer net.Addr) error {
 
 // LookupNode runs an iterative FIND_NODE for target, returning the K
 // closest contacts found.
-func (n *Node) LookupNode(ctx context.Context, target NodeID) ([]Contact, error) {
-	return n.iterativeFind(ctx, target, false, nil)
+func (n *Node) LookupNode(ctx context.Context, target identity.PeerID) ([]Contact, error) {
+	return n.iterativeFind(ctx, target.Bytes(), false, nil)
 }
 
 // LookupValue runs an iterative FIND_VALUE for key. Returns (value, nil)
 // on success or (nil, contacts) if no peer holds the value.
-func (n *Node) LookupValue(ctx context.Context, key NodeID) ([]byte, []Contact, error) {
-	return n.iterativeFindValue(ctx, key)
+func (n *Node) LookupValue(ctx context.Context, key identity.PeerID) ([]byte, []Contact, error) {
+	return n.iterativeFindValue(ctx, key.Bytes())
 }
 
 // PutValue stores key=value on the K closest known peers AND on the
 // local sibling list, in parallel. design.md §4 / S-Kademlia §4.4: the
 // sibling replicas keep the record alive even if a Sybil cluster
-// captures the K closest peers to `key` — their data is duplicated
+// captures the K closest peers to key — their data is duplicated
 // onto our own neighbourhood, which the attacker would have to capture
 // independently.
-func (n *Node) PutValue(ctx context.Context, key NodeID, value []byte) error {
+func (n *Node) PutValue(ctx context.Context, key identity.PeerID, value []byte) error {
 	closest, err := n.LookupNode(ctx, key)
 	if err != nil {
 		return err

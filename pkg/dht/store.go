@@ -4,14 +4,20 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/udisondev/udisend/pkg/identity"
 )
 
 // Store is the local key/value store used by DHT nodes to keep replicated
 // presence records (and any other data the network agrees to host).
+//
+// Keys are accepted as identity.PeerID; only the 16-byte representation
+// is consulted. External backends with non-peer keys (e.g. content
+// hashes) can wrap their key type in a tiny PeerID adapter.
 type Store interface {
-	Put(key NodeID, value []byte, ttl time.Duration)
-	Get(key NodeID) ([]byte, bool)
-	// Sweep removes entries whose TTL has elapsed relative to `now`.
+	Put(key identity.PeerID, value []byte, ttl time.Duration)
+	Get(key identity.PeerID) ([]byte, bool)
+	// Sweep removes entries whose TTL has elapsed relative to now.
 	Sweep(now time.Time)
 }
 
@@ -22,7 +28,7 @@ type Store interface {
 // origin rather than fields the publisher claims about themselves.
 type SourcedStore interface {
 	Store
-	PutFromSource(key NodeID, value []byte, ttl time.Duration, source net.Addr)
+	PutFromSource(key identity.PeerID, value []byte, ttl time.Duration, source net.Addr)
 }
 
 // DefaultMemoryStoreEntries caps the number of distinct keys a
@@ -71,17 +77,18 @@ func NewMemoryStore(now func() time.Time) *MemoryStore {
 // same key replace the prior value (no eviction triggered). When
 // inserting a fresh key past MaxEntries, the entry with the soonest
 // expiry is evicted to make room.
-func (s *MemoryStore) Put(key NodeID, value []byte, ttl time.Duration) {
+func (s *MemoryStore) Put(key identity.PeerID, value []byte, ttl time.Duration) {
+	nid := key.Bytes()
 	cp := make([]byte, len(value))
 	copy(cp, value)
 	exp := s.now().Add(ttl)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.entries[key]; !exists {
+	if _, exists := s.entries[nid]; !exists {
 		s.evictIfFullLocked()
 	}
-	s.entries[key] = storeEntry{value: cp, expires: exp}
+	s.entries[nid] = storeEntry{value: cp, expires: exp}
 }
 
 // evictIfFullLocked drops the entry with the soonest expiry when the
@@ -116,9 +123,10 @@ func (s *MemoryStore) evictIfFullLocked() {
 }
 
 // Get returns the stored value if present and not expired.
-func (s *MemoryStore) Get(key NodeID) ([]byte, bool) {
+func (s *MemoryStore) Get(key identity.PeerID) ([]byte, bool) {
+	nid := key.Bytes()
 	s.mu.RLock()
-	e, ok := s.entries[key]
+	e, ok := s.entries[nid]
 	s.mu.RUnlock()
 	if !ok {
 		return nil, false
@@ -128,6 +136,7 @@ func (s *MemoryStore) Get(key NodeID) ([]byte, bool) {
 	}
 	out := make([]byte, len(e.value))
 	copy(out, e.value)
+
 	return out, true
 }
 
