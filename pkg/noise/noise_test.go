@@ -10,16 +10,28 @@ import (
 	"github.com/udisondev/udisend/pkg/noise"
 )
 
+// staticOf bridges identity.Identity into noise.StaticKeypair the same
+// way pkg/signaling does in production. Lives in the test file so the
+// noise package itself stays free of the identity import.
+func staticOf(id *identity.Identity) noise.StaticKeypair {
+	priv := id.XPriv()
+
+	return noise.StaticKeypair{
+		Private: append([]byte(nil), priv[:]...),
+		Public:  id.AgreementPublic(),
+	}
+}
+
 func TestXK_FullHandshakeAndDataExchange(t *testing.T) {
 	t.Parallel()
 	alice, _ := identity.Generate(rand.Reader)
 	bob, _ := identity.Generate(rand.Reader)
 
-	initiator, err := noise.NewInitiator(alice, bob.Public())
+	initiator, err := noise.NewInitiator(staticOf(alice), bob.AgreementPublic())
 	if err != nil {
 		t.Fatal(err)
 	}
-	responder, err := noise.NewResponder(bob)
+	responder, err := noise.NewResponder(staticOf(bob))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +105,8 @@ func TestXK_TamperedHandshakeFails(t *testing.T) {
 	t.Parallel()
 	alice, _ := identity.Generate(rand.Reader)
 	bob, _ := identity.Generate(rand.Reader)
-	initiator, _ := noise.NewInitiator(alice, bob.Public())
-	responder, _ := noise.NewResponder(bob)
+	initiator, _ := noise.NewInitiator(staticOf(alice), bob.AgreementPublic())
+	responder, _ := noise.NewResponder(staticOf(bob))
 
 	m1, _ := initiator.WriteMessage(nil)
 	m1[0] ^= 0xFF
@@ -110,8 +122,8 @@ func TestXK_WrongResponderStatic(t *testing.T) {
 	bob, _ := identity.Generate(rand.Reader)
 
 	// initiator targets bob, but mallory tries to respond.
-	initiator, _ := noise.NewInitiator(alice, bob.Public())
-	mResponder, _ := noise.NewResponder(mallory)
+	initiator, _ := noise.NewInitiator(staticOf(alice), bob.AgreementPublic())
+	mResponder, _ := noise.NewResponder(staticOf(mallory))
 
 	m1, _ := initiator.WriteMessage(nil)
 	if _, err := mResponder.ReadMessage(m1); err != nil {
@@ -137,8 +149,8 @@ func TestEncrypt_RefusesPastMessageBudget(t *testing.T) {
 	t.Parallel()
 	alice, _ := identity.Generate(rand.Reader)
 	bob, _ := identity.Generate(rand.Reader)
-	initiator, _ := noise.NewInitiator(alice, bob.Public())
-	responder, _ := noise.NewResponder(bob)
+	initiator, _ := noise.NewInitiator(staticOf(alice), bob.AgreementPublic())
+	responder, _ := noise.NewResponder(staticOf(bob))
 
 	// Drive the handshake so cipher states exist.
 	m1, _ := initiator.WriteMessage(nil)
@@ -161,7 +173,7 @@ func TestEncrypt_BeforeHandshake(t *testing.T) {
 	t.Parallel()
 	alice, _ := identity.Generate(rand.Reader)
 	bob, _ := identity.Generate(rand.Reader)
-	initiator, _ := noise.NewInitiator(alice, bob.Public())
+	initiator, _ := noise.NewInitiator(staticOf(alice), bob.AgreementPublic())
 	if _, err := initiator.Encrypt([]byte("x"), nil); !errors.Is(err, noise.ErrSessionNotReady) {
 		t.Fatalf("err = %v, want ErrSessionNotReady", err)
 	}

@@ -22,6 +22,19 @@ import (
 // to complete.
 const HandshakeTimeout = 6 * time.Second
 
+// noiseStaticFromIdentity bridges *identity.Identity (Suite0x01) into
+// the noise.StaticKeypair shape flynn/noise needs. pkg/noise itself
+// no longer imports pkg/identity (Phase 11.4 decoupling), so the
+// conversion lives at the call site.
+func noiseStaticFromIdentity(id *identity.Identity) noise.StaticKeypair {
+	priv := id.XPriv()
+
+	return noise.StaticKeypair{
+		Private: append([]byte(nil), priv[:]...),
+		Public:  id.AgreementPublic(),
+	}
+}
+
 // AddressResolver returns the network address for a destination hash.
 // The signaling service uses presence.Resolver in production but tests
 // can substitute a static map.
@@ -449,7 +462,7 @@ func (s *Service) acceptInit(ctx context.Context, from net.Addr, env *Envelope) 
 		s.mu.Unlock()
 	}()
 
-	resp, err := noise.NewResponder(s.id)
+	resp, err := noise.NewResponder(noiseStaticFromIdentity(s.id))
 	if err != nil {
 		s.logger.Warn("signaling: responder init", "err", err)
 		return
@@ -560,7 +573,7 @@ func (s *Service) Connect(ctx context.Context, peer identity.Hash) (*Channel, er
 	if err != nil {
 		return nil, fmt.Errorf("signaling: dial %q: %w", rec.Address, err)
 	}
-	init, err := noise.NewInitiator(s.id, rec.Public)
+	init, err := noise.NewInitiator(noiseStaticFromIdentity(s.id), rec.Public.AgreementPublic())
 	if err != nil {
 		return nil, fmt.Errorf("signaling: noise init: %w", err)
 	}

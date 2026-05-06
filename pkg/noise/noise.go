@@ -17,9 +17,6 @@ import (
 	"sync/atomic"
 
 	"github.com/flynn/noise"
-	"golang.org/x/crypto/curve25519"
-
-	"github.com/udisondev/udisend/pkg/identity"
 )
 
 // Errors returned by the package.
@@ -71,44 +68,53 @@ type Session struct {
 	recvCount atomic.Uint64
 }
 
-// staticKeyFromIdentity pulls the X25519 keypair out of an identity. flynn
-// noise expects the raw 32-byte secret — we already clamp during identity
-// derivation, so it's safe to hand off directly.
-func staticKeyFromIdentity(id *identity.Identity) noise.DHKey {
-	priv := id.XPriv()
-	pub, _ := curve25519.X25519(priv[:], curve25519.Basepoint)
-	return noise.DHKey{Private: append([]byte(nil), priv[:]...), Public: pub}
-}
+// StaticKeypair is the raw X25519 keypair that the XK handshake
+// requires. Re-exported from flynn/noise so callers do not need a
+// transitive import. Construct it from your suite's keypair material:
+//
+//	priv := id.XPriv()
+//	kp := noise.StaticKeypair{
+//	    Private: append([]byte(nil), priv[:]...),
+//	    Public:  id.AgreementPublic(),
+//	}
+//
+// Implementations of other suites with the same DH curve (X25519)
+// supply their own bytes; suites with a different curve cannot use
+// this package.
+type StaticKeypair = noise.DHKey
 
 // NewInitiator starts a handshake aimed at the given responder static
-// public key.
-func NewInitiator(id *identity.Identity, peer identity.PublicIdentity) (*Session, error) {
+// public key. local is the initiator's static keypair; peerStatic is
+// the 32-byte X25519 public key of the responder.
+func NewInitiator(local StaticKeypair, peerStatic []byte) (*Session, error) {
 	hs, err := noise.NewHandshakeState(noise.Config{
 		CipherSuite:   cipherSuite,
 		Random:        nil,
 		Pattern:       noise.HandshakeXK,
 		Initiator:     true,
-		StaticKeypair: staticKeyFromIdentity(id),
-		PeerStatic:    peer.XPub[:],
+		StaticKeypair: local,
+		PeerStatic:    peerStatic,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("noise: init initiator: %w", err)
 	}
+
 	return &Session{hs: hs, initiator: true}, nil
 }
 
-// NewResponder starts a handshake awaiting an initiator who already knows
-// our static public key.
-func NewResponder(id *identity.Identity) (*Session, error) {
+// NewResponder starts a handshake awaiting an initiator who already
+// knows our static public key. local is the responder's static keypair.
+func NewResponder(local StaticKeypair) (*Session, error) {
 	hs, err := noise.NewHandshakeState(noise.Config{
 		CipherSuite:   cipherSuite,
 		Pattern:       noise.HandshakeXK,
 		Initiator:     false,
-		StaticKeypair: staticKeyFromIdentity(id),
+		StaticKeypair: local,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("noise: init responder: %w", err)
 	}
+
 	return &Session{hs: hs, initiator: false}, nil
 }
 

@@ -162,11 +162,12 @@ func (i *Identity) Agree(remote []byte) ([]byte, error) {
 // interface value. Implements Local.
 func (i *Identity) Remote() Remote { return i.Public() }
 
-// XPriv returns a copy of the X25519 secret. Used by Noise / Diffie–Hellman.
-//
-// Deprecated: prefer Agree (suite-agnostic). XPriv is retained as an
-// escape hatch for pkg/noise, which still feeds the raw key to
-// flynn/noise.
+// XPriv returns a copy of the X25519 secret. flynn/noise (consumed via
+// pkg/noise) requires the raw 32-byte private scalar to drive its own
+// CipherState construction; pkg/signaling bridges *Identity into a
+// noise.StaticKeypair through this method. Prefer Agree (suite-agnostic
+// ECDH) for any other use — XPriv is the documented escape hatch, not a
+// general-purpose accessor.
 func (i *Identity) XPriv() [curve25519.ScalarSize]byte { return i.xPriv }
 
 // SharedSecret performs an X25519 ECDH against peer.XPub and returns the
