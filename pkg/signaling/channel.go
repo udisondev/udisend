@@ -374,7 +374,8 @@ func (c *Channel) signalReady() {
 // interleave safely.
 func (c *Channel) SendExtension(ctx context.Context, kind byte, payload []byte) error {
 	if !isExtensionKind(kind) {
-		return fmt.Errorf("signaling: SendExtension: kind 0x%02x is signaling-internal", kind)
+		return fmt.Errorf("signaling: SendExtension: kind 0x%02x is signaling-internal (embedder range is 0x%02x-0xff)",
+			kind, extensionKindMin)
 	}
 
 	c.sendMu.Lock()

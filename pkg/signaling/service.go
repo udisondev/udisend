@@ -435,15 +435,18 @@ func (s *Service) dispatch(ctx context.Context, from net.Addr, env *Envelope) {
 		ch.shutdown()
 		s.removeSession(key)
 	default:
-		// Embedder range (>= 0x06): hand to the registered extension
-		// handler if any, else silent drop. Pre-session frames go
-		// nowhere — extension semantics are session-scoped.
-		if !isExtensionKind(env.InnerType) {
-			s.logger.Debug("signaling: unknown inner type", "type", env.InnerType)
+		// Every kind 0x01–0x05 is matched by an explicit case above,
+		// so reaching default means kind 0x00 or kind >= 0x06. Treat
+		// 0x00 as a malformed peer and the rest as embedder-range:
+		// hand them to the registered extension handler. Pre-session
+		// frames are dropped — extension semantics are session-scoped.
+		if env.InnerType == 0 {
+			s.logger.Debug("signaling: zero inner type", "peer", env.Sender)
 			return
 		}
 		if !ok {
-			s.logger.Debug("signaling: extension envelope without session", "type", env.InnerType)
+			s.logger.Debug("signaling: extension envelope without session",
+				"peer", env.Sender, "type", env.InnerType)
 			return
 		}
 		ch.handleExtension(env)

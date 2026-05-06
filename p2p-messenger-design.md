@@ -236,7 +236,7 @@ TTL   = 60-120 секунд
 ### Path discovery в signaling
 
 Маршрутизация signaling-сообщений **hop-by-hop**:
-- Клиент шлёт signaling envelope с `recipient_id`, не зная пути; формат — `pkg/signaling.Envelope` поверх `MsgRelay` (`pkg/dht/wire.go`).
+- Клиент шлёт signaling envelope с `recipient_id`, не зная пути; формат — `pkg/signaling.Envelope` поверх wire-frame с opcode 0x10 (приватная константа в `pkg/signaling/envelope.go`, лежит в embedder-range пакета `pkg/dht`; `pkg/dht` диспатчит такие frame'ы через `Config.Extension`).
 - Каждый промежуточный узел смотрит в свою routing table (k-buckets); если recipient — это сам узел или ближайший контакт с точным ID, frame доставляется/пересылается напрямую.
 - Если destination не в локальной таблице → fallback через **iterative `LookupNode`** (классическая Kademlia процедура поиска ближайших к target узлов, бежит до сходимости): результаты могут вернуть либо точный destination, либо ближайших соседей, через которых пакет идёт дальше. Реализация — `dhtRouter.NextHop` в `internal/network/network.go` и `internal/messenger/messenger.go`.
 - Hop-counter в envelope ограничивает forwarding: `MaxHops = 8`, превышение → drop.
@@ -497,7 +497,7 @@ ApplicationMessage {
 
 > **`pion/webrtc` на messenger-бинаре vs network-узле (Phase 10 sync 2026-05-05):**
 > - **Messenger-бинарь** — pion/webrtc НЕ используется (v2-сдвиг 2026-05-02). Go подписывает chat-SDP/ICE через `pkg/webrtc.SignedSDP` и пересылает через `signaling.Channel`, но саму `RTCPeerConnection` для chat-трафика держит браузер. См. §2 «Двухслойная модель».
-> - **Network-узел** — `pion/webrtc/v4` ИСПОЛЬЗУЕТСЯ для inter-node mesh (Phase 10). Каждый узел держит K=8 persistent DataChannel'ов к выбранным пирам поверх UDP-транспорта, обеспечивая отказоустойчивость графа связности при выпадении значительной части публичных узлов. См. ROADMAP.md § Phase 10. Mesh handshake (offer/answer/ICE между узлами) идёт через тот же `signaling.Channel` (Noise XK end-to-end) что и chat-сигналинг — отдельного протокола нет, добавлены только новые `InnerType` коды (`InnerMeshOffer/Answer/ICE`).
+> - **Network-узел** — `pion/webrtc/v4` ИСПОЛЬЗУЕТСЯ для inter-node mesh (Phase 10). Каждый узел держит K=8 persistent DataChannel'ов к выбранным пирам поверх UDP-транспорта, обеспечивая отказоустойчивость графа связности при выпадении значительной части публичных узлов. См. ROADMAP.md § Phase 10. Mesh handshake (offer/answer/ICE между узлами) идёт через тот же `signaling.Channel` (Noise XK end-to-end) что и chat-сигналинг — отдельного протокола нет, mesh использует embedder-range коды (private `meshKindOffer/Answer/Candidate = 0x06/0x07/0x08` в `pkg/network/mesh_signaler.go`); pkg/signaling сам про эти коды не знает и видит их как opaque payload через `Channel.SendExtension` / `Service.SetExtensionHandler`.
 
 ### Браузерная сторона (UI + WebRTC)
 

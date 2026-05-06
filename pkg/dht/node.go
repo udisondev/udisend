@@ -238,14 +238,20 @@ func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
 		n.cfg.Logger.Debug("dht: bad frame", "from", pkt.From, "err", err)
 		return
 	}
-	// Dispatch frames outside the DHT-owned opcode range (0x01–0x0F)
-	// to the embedder. The set below pins exactly which opcodes the
-	// DHT consumes natively; everything else — including future opcodes
-	// owned by embedders such as pkg/signaling — flows through Extension.
+	// The DHT consumes its own opcodes natively (0x01–0x08). The
+	// 0x09–0x0F slice is reserved for future DHT-owned opcodes:
+	// dropping these unhandled prevents an embedder that picks (say)
+	// 0x0A today from being silently broken when pkg/dht claims the
+	// byte tomorrow. Embedders own opcodes >= ExtensionRangeMin and
+	// receive matching frames through Config.Extension.
 	switch typ {
 	case MsgPing, MsgPong, MsgFindNode, MsgNodes,
 		MsgStore, MsgStoreOK, MsgFindValue, MsgValue:
 	default:
+		if typ < ExtensionRangeMin {
+			n.cfg.Logger.Debug("dht: drop reserved opcode", "typ", typ, "from", pkt.From)
+			return
+		}
 		if n.cfg.Extension != nil {
 			n.cfg.Extension.HandleDHTFrame(ctx, pkt, typ, body)
 		}

@@ -12,12 +12,12 @@ import (
 	"github.com/udisondev/udisend/pkg/transport"
 )
 
-// TestChannel_SendExtension_RoundTrip verifies the post-Phase-12
-// extension API: an embedder picks any kind in the embedder range
-// (>= 0x06), sends ciphertext through Channel.SendExtension on one
-// side, and receives the decrypted payload through SetExtensionHandler
-// on the other. Mirrors the previous SendMesh/SetMeshHandler pair —
-// signaling no longer knows about specific mesh opcodes.
+// TestChannel_SendExtension_RoundTrip verifies the embedder API:
+// an embedder picks any kind in the embedder range (>= 0x06), sends
+// ciphertext through Channel.SendExtension on one side, and receives
+// the decrypted payload through SetExtensionHandler on the other.
+// signaling does not know about specific embedder opcodes; the test
+// uses a generic kind 0x06 to make the contract explicit.
 func TestChannel_SendExtension_RoundTrip(t *testing.T) {
 	t.Parallel()
 

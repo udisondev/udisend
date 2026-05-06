@@ -8,11 +8,17 @@ import (
 	"github.com/udisondev/udisend/pkg/wire"
 )
 
-// Wire-frame type codes consumed by the DHT itself. These occupy the
-// reserved DHT-owned range 0x01–0x0F. Embedders (e.g. pkg/signaling)
-// that multiplex their own frames over the same socket pick opcodes
-// >= 0x10 and register a Config.Extension to receive them; pkg/dht
-// does not interpret embedder opcodes and never names them here.
+// Wire-frame type codes consumed by the DHT itself.
+//
+// Reserved opcode ranges:
+//
+//   - 0x01–0x08: in use by the DHT today (Ping..Value).
+//   - 0x09–0x0F: reserved for future DHT opcodes; frames in this range
+//     are silently dropped at the inbound boundary (defense-in-depth
+//     for embedders that follow the contract).
+//   - >= ExtensionRangeMin (0x10): embedder-owned. Frames are
+//     dispatched to Config.Extension. pkg/dht never interprets these
+//     opcodes.
 const (
 	MsgPing      byte = 0x01
 	MsgPong      byte = 0x02
@@ -23,6 +29,11 @@ const (
 	MsgFindValue byte = 0x07
 	MsgValue     byte = 0x08
 )
+
+// ExtensionRangeMin is the smallest wire-frame opcode embedders may
+// use for their own protocols layered over a dht.Node's UDP socket.
+// Anything below is reserved for the DHT's own use (current or future).
+const ExtensionRangeMin byte = 0x10
 
 // TxIDSize is the length of a transaction identifier.
 const TxIDSize = 16
