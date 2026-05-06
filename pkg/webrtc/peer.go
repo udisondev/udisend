@@ -55,8 +55,8 @@ type SDPKind byte
 
 // SDPOffer / SDPAnswer cover the pion SessionDescription Type field.
 const (
-	SDPOffer  SDPKind = 1
-	SDPAnswer SDPKind = 2
+	SDPOffer SDPKind = iota + 1
+	SDPAnswer
 )
 
 // String renders SDPKind for log lines.
