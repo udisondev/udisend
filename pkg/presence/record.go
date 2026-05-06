@@ -23,11 +23,11 @@ type Capability uint32
 // Capability bits.
 //
 // Bit 5 (CapCanWebRTCMesh) marks a node willing to accept mesh-handshake
-// envelopes (InnerMeshOffer/Answer/Candidate) and run a PeerManager
-// filling K live DataChannels. Nodes that do not set this bit continue
-// to work alongside mesh-capable nodes — the selector skips them, and a
-// stray mesh-handshake envelope that reaches a non-mesh node decodes as
-// "unknown inner type" and is dropped at debug-log level.
+// envelopes (carried as embedder-range signaling extensions) and run a
+// PeerManager filling K live DataChannels. Nodes that do not set this
+// bit continue to work alongside mesh-capable nodes — the selector
+// skips them, and a stray mesh envelope that reaches a non-mesh node
+// surfaces with no extension handler installed and is silently dropped.
 const (
 	CapPublicIP      Capability = 1 << 0
 	CapCanRelay      Capability = 1 << 1

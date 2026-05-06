@@ -56,9 +56,9 @@ type Channel struct {
 	closeOnce sync.Once
 	closed    chan struct{}
 
-	pending     [][]byte           // DATA frames received before handshake+verify completes
-	pendingMesh []pendingMeshFrame // mesh frames received before handshake+verify completes
-	mu          sync.Mutex
+	pending    [][]byte                // DATA frames received before handshake+verify completes
+	pendingExt []pendingExtensionFrame // extension frames received before handshake+verify completes
+	mu         sync.Mutex
 
 	// handshakeTimer fires Service.handshakeTimeout after acceptInit if the
 	// initiator never completes the handshake (responder DoS guard).
@@ -263,15 +263,15 @@ func (c *Channel) verifyAndAdmit() {
 // without limit (DoS hardening).
 const MaxPendingDataFrames = 8
 
-// MaxPendingMeshFrames mirrors MaxPendingDataFrames for the mesh
-// envelope queue. Same DoS rationale: an attacker that completes
-// handshake but spams InnerMesh* before identity verification clears
-// would otherwise grow this slice unbounded.
-const MaxPendingMeshFrames = 8
+// MaxPendingExtensionFrames mirrors MaxPendingDataFrames for the
+// embedder-extension envelope queue. Same DoS rationale: an attacker
+// that completes handshake but spams extension frames before identity
+// verification clears would otherwise grow this slice unbounded.
+const MaxPendingExtensionFrames = 8
 
-// pendingMeshFrame is one queued mesh envelope (ciphertext + inner
-// kind) waiting for verifyAndAdmit to flip verified.
-type pendingMeshFrame struct {
+// pendingExtensionFrame is one queued extension envelope (ciphertext +
+// inner kind) waiting for verifyAndAdmit to flip verified.
+type pendingExtensionFrame struct {
 	kind    byte
 	payload []byte
 }
@@ -309,8 +309,8 @@ func (c *Channel) flushPending() {
 	c.mu.Lock()
 	frames := c.pending
 	c.pending = nil
-	meshFrames := c.pendingMesh
-	c.pendingMesh = nil
+	extFrames := c.pendingExt
+	c.pendingExt = nil
 	c.mu.Unlock()
 
 	for _, raw := range frames {
@@ -331,26 +331,26 @@ func (c *Channel) flushPending() {
 		}
 	}
 
-	for _, mf := range meshFrames {
+	for _, ef := range extFrames {
 		if !c.noise.Done() {
 			return
 		}
 		c.recvMu.Lock()
-		plain, err := c.noise.Decrypt(mf.payload, nil)
+		plain, err := c.noise.Decrypt(ef.payload, nil)
 		c.recvMu.Unlock()
 		if err != nil {
-			c.service.logger.Warn("signaling: pending mesh decrypt",
+			c.service.logger.Warn("signaling: pending extension decrypt",
 				"peer", c.peer, "err", err)
 			continue
 		}
-		// Reload meshHandler per frame: if SetMeshHandler runs
+		// Reload extHandler per frame: if SetExtensionHandler runs
 		// between flushPending start and here, a single-load-before-loop
 		// would drop early frames despite the handler now being live.
-		hp := c.service.meshHandler.Load()
+		hp := c.service.extHandler.Load()
 		if hp == nil {
 			continue
 		}
-		(*hp)(c, mf.kind, plain)
+		(*hp)(c, ef.kind, plain)
 	}
 }
 
@@ -362,17 +362,19 @@ func (c *Channel) signalReady() {
 	}
 }
 
-// SendMesh encrypts sdp under the channel's Noise key and ships it
-// inside an InnerMesh{Offer,Answer,Candidate} envelope. The kind MUST
-// be one of the InnerMesh* constants — anything else is rejected to
-// prevent application traffic from leaking through the mesh path.
+// SendExtension encrypts payload under the channel's Noise key and
+// ships it inside an envelope whose inner-type is `kind`. The kind
+// MUST fall in the embedder range (>= 0x06); signaling-internal kinds
+// (0x01–0x05) are rejected to prevent application traffic from being
+// smuggled through the extension path and bypassing handleData's
+// noise-decrypt sequencing.
 //
 // Lock semantics mirror Send: sendMu serialises the AEAD nonce
-// counter advance across mesh and data sends so they can interleave
-// safely.
-func (c *Channel) SendMesh(ctx context.Context, kind byte, sdp []byte) error {
-	if !IsMeshInner(kind) {
-		return fmt.Errorf("signaling: SendMesh: invalid inner kind %d", kind)
+// counter advance across extension and data sends so they can
+// interleave safely.
+func (c *Channel) SendExtension(ctx context.Context, kind byte, payload []byte) error {
+	if !isExtensionKind(kind) {
+		return fmt.Errorf("signaling: SendExtension: kind 0x%02x is signaling-internal", kind)
 	}
 
 	c.sendMu.Lock()
@@ -381,7 +383,7 @@ func (c *Channel) SendMesh(ctx context.Context, kind byte, sdp []byte) error {
 	if !c.noise.Done() {
 		return errors.New("signaling: handshake not complete")
 	}
-	ct, err := c.noise.Encrypt(sdp, nil)
+	ct, err := c.noise.Encrypt(payload, nil)
 	if err != nil {
 		return err
 	}
@@ -389,21 +391,21 @@ func (c *Channel) SendMesh(ctx context.Context, kind byte, sdp []byte) error {
 	return c.service.sendEnvelope(ctx, c, kind, ct)
 }
 
-// handleMesh decrypts an InnerMesh* envelope and dispatches it to the
-// service-level mesh handler if one is registered. Pre-handshake or
-// pre-verify mesh envelopes are queued until verifyAndAdmit flips
-// `verified` — symmetric to handleData. Without buffering, an
-// initiator that races a mesh-offer right after HELLO_FINAL can lose
-// it because the responder's identity-verify goroutine hasn't yet
-// flipped the gate (typical MemoryHub timing in tests; observable in
-// production under tight retry loops too). recvMu mirrors
-// handleData's serialisation so noise receive-counter advances stay
-// atomic across mesh / data / pending-flush paths.
-func (c *Channel) handleMesh(env *Envelope) {
+// handleExtension decrypts an embedder-range envelope and dispatches
+// it to the service-level extension handler if one is registered.
+// Pre-handshake or pre-verify extension envelopes are queued until
+// verifyAndAdmit flips `verified` — symmetric to handleData. Without
+// buffering, an initiator that races an extension frame right after
+// HELLO_FINAL can lose it because the responder's identity-verify
+// goroutine hasn't yet flipped the gate (typical MemoryHub timing in
+// tests; observable in production under tight retry loops too).
+// recvMu mirrors handleData's serialisation so noise receive-counter
+// advances stay atomic across extension / data / pending-flush paths.
+func (c *Channel) handleExtension(env *Envelope) {
 	if !c.noise.Done() || !c.verified.Load() {
 		c.mu.Lock()
-		if len(c.pendingMesh) < MaxPendingMeshFrames {
-			c.pendingMesh = append(c.pendingMesh, pendingMeshFrame{
+		if len(c.pendingExt) < MaxPendingExtensionFrames {
+			c.pendingExt = append(c.pendingExt, pendingExtensionFrame{
 				kind:    env.InnerType,
 				payload: env.Payload,
 			})
@@ -417,14 +419,14 @@ func (c *Channel) handleMesh(env *Envelope) {
 	plain, err := c.noise.Decrypt(env.Payload, nil)
 	c.recvMu.Unlock()
 	if err != nil {
-		c.service.logger.Warn("signaling: mesh decrypt", "peer", c.peer, "err", err)
+		c.service.logger.Warn("signaling: extension decrypt", "peer", c.peer, "err", err)
 		return
 	}
 
-	hp := c.service.meshHandler.Load()
+	hp := c.service.extHandler.Load()
 	if hp == nil {
 		// Handler not registered: silent drop is correct — node may
-		// run with mesh disabled.
+		// run with the extension feature disabled.
 		return
 	}
 	(*hp)(c, env.InnerType, plain)

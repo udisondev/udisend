@@ -67,16 +67,17 @@ type Router interface {
 // Handler is invoked when a remote peer establishes a session.
 type Handler func(peer identity.Hash, ch *Channel)
 
-// MeshHandler is invoked when a peer sends an InnerMesh* envelope
-// (offer / answer / candidate) on an established channel. The payload
-// is already decrypted under the channel's Noise key. The handler
-// runs on the dispatcher goroutine — implementations MUST not block.
+// ExtensionHandler is invoked when a peer sends an envelope whose
+// inner-type falls in the embedder range (>= 0x06) on an established
+// channel. The payload is already decrypted under the channel's Noise
+// key. The handler runs on the dispatcher goroutine — implementations
+// MUST not block.
 //
 // Channels are not modified before the handler fires, so the same
 // *Channel handle the application receives via Handler is what the
-// mesh-handler sees here, allowing the network-layer mesh-signaler
-// to call ch.SendMesh on the responder side.
-type MeshHandler func(ch *Channel, kind byte, sdp []byte)
+// extension-handler sees here, allowing the embedder to call
+// ch.SendExtension on the responder side.
+type ExtensionHandler func(ch *Channel, kind byte, payload []byte)
 
 // Service wires Noise sessions to the DHT transport and exposes a small
 // connect / accept API.
@@ -108,8 +109,8 @@ type Service struct {
 	// invariant as `sessions`.
 	halfOpenByIP map[string]int
 
-	handler     atomic.Pointer[Handler]
-	meshHandler atomic.Pointer[MeshHandler]
+	handler    atomic.Pointer[Handler]
+	extHandler atomic.Pointer[ExtensionHandler]
 
 	relayMu   sync.Mutex
 	relayHits map[string][]time.Time
@@ -174,16 +175,17 @@ func NewService(cfg Config) *Service {
 	return s
 }
 
-// SetMeshHandler registers a callback invoked when an InnerMesh*
-// envelope arrives on an established channel. Pass nil to disable.
-func (s *Service) SetMeshHandler(h MeshHandler) {
+// SetExtensionHandler registers a callback invoked when an envelope
+// in the embedder range (inner-type >= 0x06) arrives on an established
+// channel. Pass nil to disable.
+func (s *Service) SetExtensionHandler(h ExtensionHandler) {
 	if h == nil {
-		s.meshHandler.Store(nil)
+		s.extHandler.Store(nil)
 
 		return
 	}
 	hp := h
-	s.meshHandler.Store(&hp)
+	s.extHandler.Store(&hp)
 }
 
 // SetHandler registers a callback invoked on every accepted incoming session.
@@ -411,12 +413,6 @@ func (s *Service) dispatch(ctx context.Context, from net.Addr, env *Envelope) {
 			return
 		}
 		ch.handleData(env)
-	case InnerMeshOffer, InnerMeshAnswer, InnerMeshCandidate:
-		if !ok {
-			s.logger.Debug("signaling: mesh envelope without session", "type", env.InnerType)
-			return
-		}
-		ch.handleMesh(env)
 	case InnerBye:
 		if !ok {
 			return
@@ -439,7 +435,18 @@ func (s *Service) dispatch(ctx context.Context, from net.Addr, env *Envelope) {
 		ch.shutdown()
 		s.removeSession(key)
 	default:
-		s.logger.Debug("signaling: unknown inner type", "type", env.InnerType)
+		// Embedder range (>= 0x06): hand to the registered extension
+		// handler if any, else silent drop. Pre-session frames go
+		// nowhere — extension semantics are session-scoped.
+		if !isExtensionKind(env.InnerType) {
+			s.logger.Debug("signaling: unknown inner type", "type", env.InnerType)
+			return
+		}
+		if !ok {
+			s.logger.Debug("signaling: extension envelope without session", "type", env.InnerType)
+			return
+		}
+		ch.handleExtension(env)
 	}
 }
 

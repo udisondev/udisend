@@ -65,33 +65,32 @@ func NewSessionID() (SessionID, error) {
 
 // Inner-payload type codes.
 //
-// The 0x06–0x08 range carries node-to-node WebRTC mesh handshake.
-// Payloads are encrypted under the same Noise XK session as InnerData —
-// the discriminator is at the envelope layer so the mesh-handler at
-// network.Node can dispatch without peeking inside ciphertext. Adding
-// new InnerType codes is wire-format-additive: older builds either
-// decode them to InnerType=N and surface as "unknown inner type" Debug
-// logs (forward-compatible).
+// Reserved ranges:
+//   - 0x01–0x05: signaling-internal. Owned by this package; consumers
+//     MUST NOT send envelopes with these inner-types via SendExtension.
+//   - 0x06–0xFF: embedder. pkg/signaling does not interpret these codes;
+//     it decrypts the payload under the channel's Noise key and hands
+//     it to the registered ExtensionHandler. The embedder owns the
+//     opcode space and may evolve it without changes to pkg/signaling.
+//
+// Adding new inner-types is wire-format-additive: older builds decode
+// the byte and either dispatch (if an ExtensionHandler covers it) or
+// silently drop (forward-compatible).
 const (
-	InnerHelloInit     byte = 0x01 // Noise XK message 1
-	InnerHelloResp     byte = 0x02 // Noise XK message 2
-	InnerHelloFinal    byte = 0x03 // Noise XK message 3
-	InnerData          byte = 0x04 // encrypted application data
-	InnerBye           byte = 0x05 // graceful close
-	InnerMeshOffer     byte = 0x06 // node-mesh WebRTC SDP offer (encrypted)
-	InnerMeshAnswer    byte = 0x07 // node-mesh WebRTC SDP answer (encrypted)
-	InnerMeshCandidate byte = 0x08 // node-mesh ICE candidate (encrypted)
+	InnerHelloInit  byte = 0x01 // Noise XK message 1
+	InnerHelloResp  byte = 0x02 // Noise XK message 2
+	InnerHelloFinal byte = 0x03 // Noise XK message 3
+	InnerData       byte = 0x04 // encrypted application data
+	InnerBye        byte = 0x05 // graceful close
 )
 
-// IsMeshInner reports whether kind is one of the InnerMesh* codes.
-// Used by Channel.SendMesh to refuse non-mesh payloads.
-func IsMeshInner(kind byte) bool {
-	switch kind {
-	case InnerMeshOffer, InnerMeshAnswer, InnerMeshCandidate:
-		return true
-	default:
-		return false
-	}
+// extensionKindMin is the smallest inner-type byte the embedder may
+// use via Channel.SendExtension. Anything below is signaling-internal.
+const extensionKindMin byte = 0x06
+
+// isExtensionKind reports whether kind falls in the embedder range.
+func isExtensionKind(kind byte) bool {
+	return kind >= extensionKindMin
 }
 
 // MaxInnerSize caps the inner payload to bound decode work.

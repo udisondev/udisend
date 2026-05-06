@@ -19,10 +19,21 @@ import (
 // of a stuck consumer rather than a tuning problem.
 const meshSignalerInboxSize = 128
 
+// Inner-payload type codes for the inter-node WebRTC mesh handshake.
+// These sit in the signaling embedder range (>= 0x06) — pkg/signaling
+// does not interpret them; it decrypts the payload and hands the
+// (kind, plaintext) pair to our SetExtensionHandler callback. Defined
+// here so signaling stays unaware of mesh semantics.
+const (
+	meshKindOffer     byte = 0x06
+	meshKindAnswer    byte = 0x07
+	meshKindCandidate byte = 0x08
+)
+
 // MeshSignaler bridges signaling.Service to transport.Signaler. It
 // manages a per-peer Channel pool: outbound SendMeshSDP calls open or
 // reuse a Channel via Service.Connect; inbound mesh envelopes are
-// captured through Service.SetMeshHandler and surfaced on
+// captured through Service.SetExtensionHandler and surfaced on
 // RecvMeshSDP. Each Channel here is dedicated to mesh handshake — it
 // is opened separately from any application-traffic Channel between
 // the same identities.
@@ -36,7 +47,7 @@ type MeshSignaler struct {
 }
 
 // NewMeshSignaler constructs a bridge and registers itself as the
-// mesh-handler on svc. Calling NewMeshSignaler twice on the same
+// extension-handler on svc. Calling NewMeshSignaler twice on the same
 // Service overwrites the prior handler (the bridge does not multiplex
 // — each Service has at most one mesh path at a time).
 func NewMeshSignaler(svc *signaling.Service, logger *slog.Logger) *MeshSignaler {
@@ -49,7 +60,7 @@ func NewMeshSignaler(svc *signaling.Service, logger *slog.Logger) *MeshSignaler 
 		incoming: make(chan transport.MeshSDPMsg, meshSignalerInboxSize),
 		channels: make(map[identity.Hash]*signaling.Channel),
 	}
-	svc.SetMeshHandler(ms.handle)
+	svc.SetExtensionHandler(ms.handle)
 
 	return ms
 }
@@ -74,22 +85,22 @@ func (ms *MeshSignaler) SendMeshSDP(
 		return fmt.Errorf("network: mesh channel: %w", err)
 	}
 
-	return ch.SendMesh(ctx, inner, sdp)
+	return ch.SendExtension(ctx, inner, sdp)
 }
 
 // RecvMeshSDP returns the inbound mesh event stream. The channel is
 // never closed by MeshSignaler — consumers gate on their own context.
 func (ms *MeshSignaler) RecvMeshSDP() <-chan transport.MeshSDPMsg { return ms.incoming }
 
-// Close releases the mesh handler so the underlying signaling.Service
-// no longer fans events into this bridge. In-flight Channels remain
-// open — they are owned by the Service and will be torn down on its
-// Close.
+// Close releases the extension handler so the underlying
+// signaling.Service no longer fans events into this bridge. In-flight
+// Channels remain open — they are owned by the Service and will be
+// torn down on its Close.
 func (ms *MeshSignaler) Close() {
-	ms.svc.SetMeshHandler(nil)
+	ms.svc.SetExtensionHandler(nil)
 }
 
-// handle is the signaling.Service mesh-handler. It records the
+// handle is the signaling.Service extension-handler. It records the
 // channel under the peer key (so the responder side can SendMeshSDP
 // back without opening a duplicate Channel) and forwards the event.
 func (ms *MeshSignaler) handle(ch *signaling.Channel, inner byte, sdp []byte) {
@@ -109,7 +120,7 @@ func (ms *MeshSignaler) handle(ch *signaling.Channel, inner byte, sdp []byte) {
 	ms.channels[peer] = ch
 	ms.mu.Unlock()
 
-	// Copy the slice: signaling.Channel.handleMesh allocates fresh
+	// Copy the slice: signaling.Channel.handleExtension allocates fresh
 	// plaintext via noise.Decrypt, so it is safe to share — but the
 	// handler runs on the dispatcher goroutine, and ms.incoming may
 	// outlive the dispatcher's reference. Avoid the lifetime debate
@@ -159,11 +170,11 @@ func (ms *MeshSignaler) getOrOpen(ctx context.Context, peer identity.Hash) (*sig
 func innerForKind(kind transport.MeshSDPKind) (byte, error) {
 	switch kind {
 	case transport.MeshSDPOffer:
-		return signaling.InnerMeshOffer, nil
+		return meshKindOffer, nil
 	case transport.MeshSDPAnswer:
-		return signaling.InnerMeshAnswer, nil
+		return meshKindAnswer, nil
 	case transport.MeshSDPCandidate:
-		return signaling.InnerMeshCandidate, nil
+		return meshKindCandidate, nil
 	default:
 		return 0, fmt.Errorf("network: unknown MeshSDPKind %d", kind)
 	}
@@ -171,11 +182,11 @@ func innerForKind(kind transport.MeshSDPKind) (byte, error) {
 
 func kindForInner(inner byte) (transport.MeshSDPKind, error) {
 	switch inner {
-	case signaling.InnerMeshOffer:
+	case meshKindOffer:
 		return transport.MeshSDPOffer, nil
-	case signaling.InnerMeshAnswer:
+	case meshKindAnswer:
 		return transport.MeshSDPAnswer, nil
-	case signaling.InnerMeshCandidate:
+	case meshKindCandidate:
 		return transport.MeshSDPCandidate, nil
 	default:
 		return 0, fmt.Errorf("network: unknown inner kind %d", inner)

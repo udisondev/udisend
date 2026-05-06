@@ -63,9 +63,10 @@ const maxFireConcurrency = 32
 
 // MeshSDPKind discriminates the three mesh-handshake message types
 // exchanged between two network nodes to bring up a WebRTC
-// DataChannel. Values mirror the InnerMesh* constants in pkg/signaling
-// at the wire layer; we keep a transport-package-local enum so the
-// pkg/transport API does not depend on pkg/signaling.
+// DataChannel. The wire-level inner-type bytes that carry these
+// frames live in pkg/network (private constants); we keep a
+// transport-package-local enum so the pkg/transport API does not
+// depend on pkg/signaling.
 type MeshSDPKind byte
 
 // MeshSDP* identify the three message kinds.
@@ -107,7 +108,9 @@ type MeshSDPMsg struct {
 //
 // SendMeshSDP is responsible for opening or reusing a signaling
 // Channel to peer, encrypting `sdp` under that Channel's Noise key,
-// and shipping it as an InnerMesh{Offer,Answer,Candidate} envelope.
+// and shipping it as an embedder-range envelope (signaling does not
+// know which inner-type bytes pkg/network uses for offer/answer/
+// candidate; pkg/network owns that mapping internally).
 // It MUST return only after the wire send succeeds (or fails) — the
 // caller treats the post-return state as authoritative for retry.
 //
