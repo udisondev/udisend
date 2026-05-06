@@ -22,9 +22,18 @@ import (
 	"github.com/udisondev/udisend/pkg/ratelimit"
 )
 
-// Realm is the static realm advertised in TURN responses. Clients echo
-// it back when supplying credentials.
-const Realm = "udisend"
+// DefaultRealm is the realm advertised in TURN responses when
+// Config.Realm is empty. Clients echo it back when supplying
+// credentials. Override per-instance via Config.Realm — the constant
+// stays for tests and external consumers that prefer the udisend
+// default.
+const DefaultRealm = "udisend"
+
+// Realm is retained for backward compatibility with code that compared
+// against the package-level constant. Prefer Config.Realm.
+//
+// Deprecated: use Config.Realm + DefaultRealm instead.
+const Realm = DefaultRealm
 
 // Server wraps a pion/turn server with a single UDP listener.
 type Server struct {
@@ -47,6 +56,12 @@ type Config struct {
 	// Clients derive ephemeral credentials from it (username =
 	// "<expiry>:<user>", password = HMAC(secret, username)).
 	SharedSecret string
+
+	// Realm is the long-term-credentials realm advertised in
+	// challenges. Empty defaults to DefaultRealm ("udisend"). External
+	// consumers reusing pkg/turn for their own service set this to
+	// their own realm name.
+	Realm string
 
 	// MaxCredentialLifetime caps how far in the future a client may set
 	// its username's expiry timestamp. 24h by default. Older expiries are
@@ -102,22 +117,26 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.AuthBurst == 0 {
 		cfg.AuthBurst = DefaultAuthBurst
 	}
+	if cfg.Realm == "" {
+		cfg.Realm = DefaultRealm
+	}
+	realm := cfg.Realm
 	limiter := ratelimit.New(cfg.AuthRate, cfg.AuthBurst)
 
 	server, err := pionturn.NewServer(pionturn.ServerConfig{
-		Realm: Realm,
-		AuthHandler: func(username, realm string, srcAddr net.Addr) ([]byte, bool) {
+		Realm: realm,
+		AuthHandler: func(username, requestedRealm string, srcAddr net.Addr) ([]byte, bool) {
 			if !limiter.Allow(authKey(srcAddr)) {
 				return nil, false
 			}
-			if realm != "" && realm != Realm {
+			if requestedRealm != "" && requestedRealm != realm {
 				return nil, false
 			}
 			if !validUsername(username, cfg.MaxCredentialLifetime) {
 				return nil, false
 			}
 			password := computePassword(cfg.SharedSecret, username)
-			return pionturn.GenerateAuthKey(username, Realm, password), true
+			return pionturn.GenerateAuthKey(username, realm, password), true
 		},
 		PacketConnConfigs: []pionturn.PacketConnConfig{
 			{
