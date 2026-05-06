@@ -9,10 +9,10 @@ import (
 const DefaultK = 20
 
 // MaxContactsPerSubnet bounds how many contacts can live in a single
-// k-bucket from the same /24 IPv4 (or /64 IPv6) prefix. Closes the
-// trivial sybil amplifier flagged in the Phase 9 audit: a single
-// attacker-controlled host can otherwise claim arbitrarily many
-// NodeIDs all keyed on its own IP, biasing the local routing table.
+// k-bucket from the same /24 IPv4 (or /64 IPv6) prefix. This defends
+// against a trivial Sybil amplifier: a single attacker-controlled host
+// can otherwise claim arbitrarily many NodeIDs all keyed on its own IP,
+// biasing the local routing table.
 const MaxContactsPerSubnet = 2
 
 // bucket holds up to k contacts ordered most-recently-seen-last.

@@ -3,8 +3,8 @@ package dht
 import (
 	"slices"
 	"sync"
-	"time"
 
+	"github.com/udisondev/udisend/pkg/clock"
 	"github.com/udisondev/udisend/pkg/identity"
 )
 
@@ -49,7 +49,10 @@ func (rt *RoutingTable) Add(c Contact) {
 	}
 	now := c.LastSeen
 	if now.IsZero() {
-		now = time.Now()
+		// Defensive default for callers that build Contact without
+		// LastSeen (mostly tests). Production paths always pass a
+		// clock-derived stamp through Contact.LastSeen.
+		now = clock.Real().Now()
 	}
 	b.add(c, now)
 }
@@ -156,10 +159,10 @@ func (rt *RoutingTable) Closest(target identity.PeerID, n int) []Contact {
 }
 
 // Siblings returns the s contacts with the smallest XOR distance to the
-// local node — the sibling list from S-Kademlia §4.4. Used by PutValue
-// to replicate values onto our own neighbourhood, raising the bar for a
+// local node — the S-Kademlia sibling list. Used by PutValue to
+// replicate values onto our own neighbourhood, raising the bar for a
 // Sybil cluster trying to suppress a record by capturing only the K
-// closest peers to the key. design.md §4.
+// closest peers to the key.
 func (rt *RoutingTable) Siblings(s int) []Contact {
 	return rt.Closest(rt.self, s)
 }

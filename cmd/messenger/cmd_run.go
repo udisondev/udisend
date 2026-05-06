@@ -2,46 +2,26 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"runtime"
-	"sync/atomic"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 
+	"github.com/udisondev/udisend/internal/app"
 	"github.com/udisondev/udisend/internal/config"
-	"github.com/udisondev/udisend/internal/httpui"
-	"github.com/udisondev/udisend/internal/messenger"
-	"github.com/udisondev/udisend/internal/storage"
-	"github.com/udisondev/udisend/pkg/network"
-	tspkg "github.com/udisondev/udisend/pkg/tailscale"
 )
 
-// newRunCommand builds the `udisend run` cobra subcommand. Without flags
-// it reads the persisted profile and starts the server. Flags are
-// available as overrides for ops.
+// newRunCommand builds the `udisend run` cobra subcommand. Without
+// flags it reads the persisted profile and starts the server. Flags
+// are available as overrides for ops.
 func newRunCommand() *cobra.Command {
-	var (
-		bindHTTP    string
-		bindP2P     string
-		publicHost  string
-		tlsCert     string
-		tlsKey      string
-		trustProxy  bool
-		openBrowser bool
-		verbose     bool
-		bootstrap   []string
-	)
+	var ov runOverrides
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Start the messenger (loopback by default)",
@@ -51,34 +31,20 @@ With no profile (i.e. you've never run "udisend public enable"), defaults
 to a loopback bind that prints a token URL — no passphrase, no setup.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			storageDir, _ := cmd.Flags().GetString("storage")
-			overrides := runOverrides{
-				bindHTTP:   bindHTTP,
-				bindP2P:    bindP2P,
-				publicHost: publicHost,
-				tlsCert:    tlsCert,
-				tlsKey:     tlsKey,
-				trustProxy: trustProxy,
-				// Detect whether the user explicitly passed --trust-proxy so
-				// the override can flip the bit in either direction. cobra
-				// surfaces this via Flags().Changed.
-				trustProxySet: cmd.Flags().Changed("trust-proxy"),
-				openBrowser:   openBrowser,
-				verbose:       verbose,
-				bootstrap:     bootstrap,
-			}
+			ov.trustProxySet = cmd.Flags().Changed("trust-proxy")
 
-			return runMessenger(storageDir, overrides)
+			return runMessenger(storageDir, ov)
 		},
 	}
-	cmd.Flags().StringVar(&bindHTTP, "bind-http", "", "override HTTP bind address (e.g. 0.0.0.0:8443)")
-	cmd.Flags().StringVar(&bindP2P, "bind-p2p", "", "override P2P UDP bind address")
-	cmd.Flags().StringVar(&publicHost, "public-host", "", "override externally-visible hostname")
-	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "override TLS cert path")
-	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "override TLS key path")
-	cmd.Flags().BoolVar(&trustProxy, "trust-proxy", false, "honour X-Forwarded-* (override profile)")
-	cmd.Flags().BoolVar(&openBrowser, "open", true, "open the browser UI on start (loopback only)")
-	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "verbose logs")
-	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "additional bootstrap peer (host:port; can be repeated)")
+	cmd.Flags().StringVar(&ov.bindHTTP, "bind-http", "", "override HTTP bind address (e.g. 0.0.0.0:8443)")
+	cmd.Flags().StringVar(&ov.bindP2P, "bind-p2p", "", "override P2P UDP bind address")
+	cmd.Flags().StringVar(&ov.publicHost, "public-host", "", "override externally-visible hostname")
+	cmd.Flags().StringVar(&ov.tlsCert, "tls-cert", "", "override TLS cert path")
+	cmd.Flags().StringVar(&ov.tlsKey, "tls-key", "", "override TLS key path")
+	cmd.Flags().BoolVar(&ov.trustProxy, "trust-proxy", false, "honour X-Forwarded-* (override profile)")
+	cmd.Flags().BoolVar(&ov.openBrowser, "open", true, "open the browser UI on start (loopback only)")
+	cmd.Flags().BoolVarP(&ov.verbose, "verbose", "v", false, "verbose logs")
+	cmd.Flags().StringArrayVar(&ov.bootstrap, "bootstrap", nil, "additional bootstrap peer (host:port; can be repeated)")
 
 	return cmd
 }
@@ -92,8 +58,9 @@ type runOverrides struct {
 	bootstrap                                      []string
 }
 
-// runMessenger does the actual work: load profile, apply overrides, open
-// stack, supervise the run loops via errgroup.
+// runMessenger is the cobra-RunE callback. It owns ONLY: log-level
+// setup, signal-aware ctx, mkdir, and dispatch to internal/app.Run.
+// All orchestration logic lives in internal/app per CLAUDE.md.
 func runMessenger(storageDir string, ov runOverrides) error {
 	logLevel := new(slog.LevelVar)
 	if ov.verbose {
@@ -111,270 +78,31 @@ func runMessenger(storageDir string, ov runOverrides) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	dbPath := filepath.Join(storageDir, "messenger.db")
-	store, err := storage.Open(ctx, dbPath)
-	if err != nil {
-		return err
-	}
-
-	prof, err := loadProfile(ctx, store)
-	if err != nil {
-		return errors.Join(err, store.Close())
-	}
-	// Zero-config path: no profile means the user has never run
-	// `udisend public enable`. Default to loopback — token-in-URL,
-	// no password, no setup ceremony.
-	if prof == nil {
-		prof = &profile{
-			Mode:     modeLoopback,
-			BindHTTP: loopbackHost + ":0",
-			BindP2P:  loopbackHost + ":0",
-		}
-	}
-
-	if ov.bindHTTP != "" {
-		prof.BindHTTP = ov.bindHTTP
-	}
-	if ov.bindP2P != "" {
-		prof.BindP2P = ov.bindP2P
-	}
-	if ov.publicHost != "" {
-		prof.PublicHost = ov.publicHost
-	}
-	if ov.tlsCert != "" {
-		prof.TLSCert = ov.tlsCert
-	}
-	if ov.tlsKey != "" {
-		prof.TLSKey = ov.tlsKey
-	}
-	if ov.trustProxySet {
-		prof.TrustProxy = ov.trustProxy
-	}
-
-	creds, err := store.GetAuthCredentials(ctx)
-	if err != nil {
-		return errors.Join(err, store.Close())
-	}
-	if err := prof.validate(creds != nil); err != nil {
-		return errors.Join(err, store.Close())
-	}
-
-	// Honour persisted log.level unless -v explicitly raised it.
-	if !ov.verbose {
-		if v, ok, _ := store.GetSetting(ctx, "log.level"); ok {
-			switch v {
-			case "debug":
-				logLevel.Set(slog.LevelDebug)
-			case "warn":
-				logLevel.Set(slog.LevelWarn)
-			case "error":
-				logLevel.Set(slog.LevelError)
-			}
-		}
-	}
-
-	identityPath := filepath.Join(storageDir, "messenger.key")
-	id, err := config.LoadOrCreateIdentity(identityPath)
-	if err != nil {
-		return errors.Join(err, store.Close())
-	}
-	logger.Info("udisend messenger",
-		"identity", id.Public().DestinationHash().String(),
-		"fingerprint", id.Public().Fingerprint(),
-		"mode", prof.Mode)
-
-	node, err := network.Open(ctx, network.Config{
-		Identity:               id,
-		Mode:                   network.ModeClient,
-		Listen:                 prof.BindP2P,
-		Bootstrap:              ov.bootstrap,
-		Logger:                 logger,
-		SeenPeerStore:          store,
-		BootstrapOverrideStore: store,
+	return app.Run(ctx, app.RunConfig{
+		StorageDir:    storageDir,
+		BindHTTP:      ov.bindHTTP,
+		BindP2P:       ov.bindP2P,
+		PublicHost:    ov.publicHost,
+		TLSCert:       ov.tlsCert,
+		TLSKey:        ov.tlsKey,
+		TrustProxy:    ov.trustProxy,
+		TrustProxySet: ov.trustProxySet,
+		OpenBrowser:   ov.openBrowser,
+		Bootstrap:     ov.bootstrap,
+		Logger:        logger,
+		LogLevel:      logLevel,
+		OpenBrowserFn: openInBrowser,
+		PrintBanner:   printRunBanner,
 	})
-	if err != nil {
-		return errors.Join(err, store.Close())
-	}
-	logger.Info("listening", "udp", node.LocalAddress())
-
-	mngr := messenger.Open(messenger.Config{
-		Network: node,
-		Storage: store,
-		Logger:  logger,
-	})
-
-	httpCfg := httpui.Config{
-		Messenger:  mngr,
-		Listen:     prof.BindHTTP,
-		Logger:     logger,
-		Public:     prof.publicMode(),
-		PublicHost: prof.PublicHost,
-		TrustProxy: prof.TrustProxy,
-		TLSCert:    prof.TLSCert,
-		TLSKey:     prof.TLSKey,
-		LogLevel:   logLevel,
-		DBPath:     dbPath,
-		// Self-signed cert deployments cause browsers to flip the document
-		// into opaque origin after the cert override, leaving every form
-		// POST with `Origin: null`. Tolerate that only in lan-ip mode.
-		AllowOpaqueOrigin: prof.Mode == modeLANIP,
-	}
-
-	// Mode-specific TLS plumbing.
-	var (
-		acmeServer *acmeChallengeServer
-		tsRefresh  *tailscaleCertRefresher
-	)
-	switch prof.Mode {
-	case modePublicAutocert:
-		acmeDir := filepath.Join(storageDir, "autocert")
-		acmeServer = newACME(prof.PublicHost, acmeDir)
-		httpCfg.TLSConfig = acmeServer.TLSConfig()
-		httpCfg.TLSCert = ""
-		httpCfg.TLSKey = ""
-
-	case modePublicTailscale:
-		tsClient := tspkg.New()
-		if err := tsClient.Detect(ctx); err != nil {
-			return errors.Join(fmt.Errorf("tailscale: %w", err), node.Close(), store.Close())
-		}
-		tsRefresh = newTailscaleCertRefresher(tsClient, prof.PublicHost, logger)
-		// Fail-fast on first cert fetch — if tailscaled or LE has problems,
-		// we want the operator to see it now, not on the first browser hit.
-		if err := tsRefresh.fetch(ctx); err != nil {
-			return errors.Join(fmt.Errorf("tailscale cert: %w", err), node.Close(), store.Close())
-		}
-		httpCfg.TLSConfig = tsRefresh.tlsConfig()
-		httpCfg.TLSCert = ""
-		httpCfg.TLSKey = ""
-	}
-
-	srv, err := httpui.NewServer(httpCfg)
-	if err != nil {
-		mngr.Close()
-		return errors.Join(err, node.Close(), store.Close())
-	}
-
-	url := srv.URL()
-	logger.Info("UI ready", "address", srv.LocalAddress(), "public", prof.publicMode())
-	printRunBanner(prof, url, id.Public().DestinationHash().String(), id.Public().Fingerprint(), node.LocalAddress())
-
-	if ov.openBrowser && !prof.publicMode() {
-		if err := openInBrowser(url); err != nil {
-			logger.Warn("open browser failed (open the URL above manually)", "err", err)
-		}
-	}
-
-	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		if err := node.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
-			return fmt.Errorf("network: %w", err)
-		}
-		return nil
-	})
-	g.Go(func() error {
-		if err := mngr.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
-			return fmt.Errorf("messenger: %w", err)
-		}
-		return nil
-	})
-	g.Go(func() error {
-		if err := srv.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
-			return fmt.Errorf("httpui: %w", err)
-		}
-		return nil
-	})
-	if acmeServer != nil {
-		g.Go(func() error {
-			if err := acmeServer.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
-				return fmt.Errorf("acme: %w", err)
-			}
-			return nil
-		})
-	}
-	if tsRefresh != nil {
-		g.Go(func() error {
-			tsRefresh.run(gctx)
-			return nil
-		})
-	}
-
-	runErr := g.Wait()
-
-	mngr.Close()
-	closeErr := errors.Join(node.Close(), store.Close())
-
-	return errors.Join(runErr, closeErr)
 }
 
-// tailscaleCertRefresher fetches and periodically refreshes a TLS
-// certificate from tailscaled. Tailscale's daemon caches and renews the
-// LE-issued cert under the hood; we just have to call it again every so
-// often to pick up fresh material.
-type tailscaleCertRefresher struct {
-	client *tspkg.Client
-	host   string
-	logger *slog.Logger
-	cert   atomic.Pointer[tls.Certificate]
-}
-
-func newTailscaleCertRefresher(c *tspkg.Client, host string, logger *slog.Logger) *tailscaleCertRefresher {
-	return &tailscaleCertRefresher{client: c, host: host, logger: logger}
-}
-
-// fetch synchronously requests the cert and stashes it. Used for the
-// startup fail-fast and for periodic refresh.
-func (t *tailscaleCertRefresher) fetch(ctx context.Context) error {
-	cert, err := t.client.CertWithDeadline(ctx, t.host, 90*time.Second)
-	if err != nil {
-		return err
-	}
-	t.cert.Store(cert)
-	return nil
-}
-
-// tlsConfig returns a *tls.Config whose GetCertificate reads from the
-// atomic pointer. Old connections holding a previous Certificate keep
-// working; new handshakes pick up the freshest material.
-func (t *tailscaleCertRefresher) tlsConfig() *tls.Config {
-	return &tls.Config{
-		MinVersion:       tls.VersionTLS12,
-		CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384},
-		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			c := t.cert.Load()
-			if c == nil {
-				return nil, errors.New("tailscale cert not available yet")
-			}
-			return c, nil
-		},
-	}
-}
-
-// run loops every 12h calling fetch until ctx is cancelled. LE certs
-// are 90 days; 12h is small enough that the tailscaled-side rotation
-// (which happens at ~T-30d) is reflected within half a day.
-func (t *tailscaleCertRefresher) run(ctx context.Context) {
-	ticker := time.NewTicker(12 * time.Hour)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := t.fetch(ctx); err != nil {
-				t.logger.Warn("tailscale: cert refresh failed (will retry next tick)", "err", err)
-			}
-		}
-	}
-}
-
-func printRunBanner(p *profile, url, idHash, fingerprint, udp string) {
+func printRunBanner(p *config.Profile, url, idHash, fingerprint, udp string) {
 	fmt.Println()
 	fmt.Println("┌─ udisend messenger ──────────────────────────────────────────────")
 	switch p.Mode {
-	case modeLoopback:
+	case config.ModeLoopback:
 		fmt.Println("│  Open this URL in your browser (auth token included):")
-	case modePublicTailscale:
+	case config.ModePublicTailscale:
 		fmt.Println("│  Public mode (Tailscale) — sign in with your passphrase:")
 	default:
 		fmt.Println("│  Public mode — sign in with your passphrase:")
@@ -386,7 +114,7 @@ func printRunBanner(p *profile, url, idHash, fingerprint, udp string) {
 	fmt.Println("│  My UDP address:     ", udp)
 
 	switch p.Mode {
-	case modeLANIP, modePublicAutocert, modePublicProxy:
+	case config.ModeLANIP, config.ModePublicAutocert, config.ModePublicProxy:
 		if ips := localIPsForBanner(); len(ips) > 0 {
 			fmt.Println("│")
 			fmt.Println("│  Reachable on this host's IPs:")
@@ -394,7 +122,7 @@ func printRunBanner(p *profile, url, idHash, fingerprint, udp string) {
 				fmt.Println("│    -", ip)
 			}
 		}
-	case modePublicTailscale:
+	case config.ModePublicTailscale:
 		fmt.Println("│")
 		fmt.Println("│  Reachable from any device on your tailnet (with Tailscale installed).")
 	}

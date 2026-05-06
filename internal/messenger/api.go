@@ -34,10 +34,8 @@ func (m *Messenger) NetworkStats() network.Stats {
 }
 
 // ICEServers discovers volunteer STUN/TURN servers via the network
-// layer and maps them to browser-friendly ICEServer JSON.
-//
-// design.md §6: client picks 3-5 servers and passes them as
-// webrtc.Configuration.ICEServers.
+// layer and maps them to browser-friendly ICEServer JSON. The client
+// picks 3-5 servers and passes them as webrtc.Configuration.ICEServers.
 func (m *Messenger) ICEServers(ctx context.Context) []ICEServer {
 	const maxServers = 5
 
@@ -143,8 +141,8 @@ func (m *Messenger) RenameContact(ctx context.Context, hash identity.Hash, alias
 }
 
 // RemoveContactOptions controls the cascade behaviour of RemoveContact.
-// Outbox is always cleared; only history is opt-in (see ROADMAP decisions
-// log 2026-05-03).
+// Outbox is always cleared (queued sends to a removed contact must
+// never reach the wire); only history wiping is opt-in.
 type RemoveContactOptions struct {
 	WipeHistory bool
 }

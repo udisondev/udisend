@@ -27,12 +27,11 @@ import (
 // reject frames with a different version.
 const CurrentVersion byte = 0x01
 
-// MaxFrameSize caps the size of any single decoded frame. Lowered from
-// 1 MiB (Phase 9 audit) to 64 KiB which is more than enough for any
-// legitimate DHT message — NODES with K=20 contacts is ~1 KiB, STORE
-// is capped at 4 KiB by MaxStoreValue, presence records are ~600 B.
-// 64 KiB is the natural UDP payload ceiling on most systems anyway,
-// so no legitimate frame ever exceeded it.
+// MaxFrameSize caps the size of any single decoded frame. 64 KiB is
+// more than enough for any legitimate DHT message — NODES with K=20
+// contacts is ~1 KiB, STORE is capped at 4 KiB by MaxStoreValue,
+// presence records are ~600 B. 64 KiB is the natural UDP payload
+// ceiling on most systems anyway.
 const MaxFrameSize = 64 * 1024
 
 // Errors returned by the package.
@@ -164,10 +163,16 @@ func (b *Buffer) Bytes() []byte { return b.buf }
 // Remaining reports how many bytes have not yet been read.
 func (b *Buffer) Remaining() int { return len(b.buf) - b.off }
 
-// WriteUint8 / WriteUint16 / WriteUint32 / WriteUint64 append big-endian.
-func (b *Buffer) WriteUint8(v byte)    { b.buf = append(b.buf, v) }
+// WriteUint8 appends a single byte.
+func (b *Buffer) WriteUint8(v byte) { b.buf = append(b.buf, v) }
+
+// WriteUint16 appends v in big-endian byte order.
 func (b *Buffer) WriteUint16(v uint16) { b.buf = binary.BigEndian.AppendUint16(b.buf, v) }
+
+// WriteUint32 appends v in big-endian byte order.
 func (b *Buffer) WriteUint32(v uint32) { b.buf = binary.BigEndian.AppendUint32(b.buf, v) }
+
+// WriteUint64 appends v in big-endian byte order.
 func (b *Buffer) WriteUint64(v uint64) { b.buf = binary.BigEndian.AppendUint64(b.buf, v) }
 
 // WriteUvarint appends a uvarint-encoded integer.
@@ -192,7 +197,8 @@ func (b *Buffer) WriteString(s string) {
 	b.buf = append(b.buf, s...)
 }
 
-// ReadUint8 / ReadUint16 / ReadUint32 / ReadUint64 — big-endian readers.
+// ReadUint8 reads one byte. Returns ErrShortBuffer when the buffer
+// has no remaining bytes.
 func (b *Buffer) ReadUint8() (byte, error) {
 	if b.Remaining() < 1 {
 		return 0, ErrShortBuffer
@@ -202,6 +208,8 @@ func (b *Buffer) ReadUint8() (byte, error) {
 	return v, nil
 }
 
+// ReadUint16 reads two bytes in big-endian order. Returns
+// ErrShortBuffer when fewer than two bytes remain.
 func (b *Buffer) ReadUint16() (uint16, error) {
 	if b.Remaining() < 2 {
 		return 0, ErrShortBuffer
@@ -211,6 +219,8 @@ func (b *Buffer) ReadUint16() (uint16, error) {
 	return v, nil
 }
 
+// ReadUint32 reads four bytes in big-endian order. Returns
+// ErrShortBuffer when fewer than four bytes remain.
 func (b *Buffer) ReadUint32() (uint32, error) {
 	if b.Remaining() < 4 {
 		return 0, ErrShortBuffer
@@ -220,6 +230,8 @@ func (b *Buffer) ReadUint32() (uint32, error) {
 	return v, nil
 }
 
+// ReadUint64 reads eight bytes in big-endian order. Returns
+// ErrShortBuffer when fewer than eight bytes remain.
 func (b *Buffer) ReadUint64() (uint64, error) {
 	if b.Remaining() < 8 {
 		return 0, ErrShortBuffer
@@ -353,10 +365,10 @@ const MaxExtensions = 32
 
 // SkipUnknownTLVs consumes any bytes remaining in the buffer as a sequence
 // of `tag(uvarint) || length(uvarint) || value[length]` extension blocks
-// and discards them. This is the forward-compatibility hook described in
-// p2p-messenger-design.md §7: "extensions (TLV) — опциональные поля в
-// конце; неизвестные пропускаются". Returns ErrShortBuffer / ErrTrailingBytes
-// only if the trailing bytes do not form valid TLVs at all.
+// and discards them. This is the forward-compatibility hook for TLV
+// extensions: unknown extensions are skipped. Returns ErrShortBuffer /
+// ErrTrailingBytes only if the trailing bytes do not form valid TLVs
+// at all.
 //
 // Callers that consume known leading fields and then want to be tolerant
 // of forward-compatible additions should call SkipUnknownTLVs instead of

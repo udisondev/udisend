@@ -77,7 +77,7 @@ func isLoopbackBind(addr string) bool {
 //
 // 421 Misdirected Request is the spec-correct status for a request that
 // arrived at a server that is not configured to produce a response for
-// the combination of scheme + authority — RFC 9110 § 15.5.20.
+// the combination of scheme + authority — see RFC 9110.
 func (s *Server) checkHost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.isAllowedHost(r.Host) {

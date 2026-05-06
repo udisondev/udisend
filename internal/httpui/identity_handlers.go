@@ -150,12 +150,26 @@ func encryptIdentity(seed []byte, passphrase string, randSrc io.Reader) ([]byte,
 	return out, nil
 }
 
+// maxIdentityImportBlob caps the byte budget for an identity import
+// payload. The legitimate blob is on the order of identityExportHeader
+// (10) + params (10) + salt (16) + AEAD-sealed seed (~80 bytes) — i.e.
+// well under 256 bytes. The 4 KiB budget leaves headroom for future
+// versions while refusing to feed an attacker-controlled multi-MB blob
+// into AEAD.Open(), which allocates a plaintext buffer proportional to
+// the ciphertext slice. (argon2's allocation is bound by mCost, which
+// decodeArgon2Params clamps separately — but its CPU work is also
+// proportional to mCost × tCost, so refusing the input early avoids
+// the per-attempt 64 MiB / 3-iteration budget being burned on junk.)
+// Defends a future /api/identity/import endpoint from trivial OOM via
+// crafted upload.
+const maxIdentityImportBlob = 4 << 10
+
 // decryptIdentity is provided for tests and any future "import" flow.
 // Returns ErrIdentityExportFormat for malformed blobs and a generic
 // "decrypt failed" for bad passphrases (no oracle on which one).
 func decryptIdentity(blob []byte, passphrase string) ([]byte, error) {
 	const minLen = 10 /*header*/ + 10 /*params*/ + identityExportSaltSize + crypto.NonceSize
-	if len(blob) < minLen {
+	if len(blob) < minLen || len(blob) > maxIdentityImportBlob {
 		return nil, ErrIdentityExportFormat
 	}
 	for i, b := range identityExportHeader {

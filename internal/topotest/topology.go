@@ -18,7 +18,7 @@ func BuildChain(t *testing.T, c *Cluster) {
 	t.Helper()
 
 	n := c.Len()
-	for i := 0; i < n-1; i++ {
+	for i := range n - 1 {
 		c.Connect(t, i, i+1)
 	}
 }
@@ -132,7 +132,7 @@ func BuildBridgedClusters(t *testing.T, c *Cluster) (left, right []int, bridge E
 		t.Fatalf("topotest: BuildBridgedClusters needs ≥ 4 peers, got %d", n)
 	}
 	mid := n / 2
-	for i := 0; i < mid-1; i++ {
+	for i := range mid - 1 {
 		c.Connect(t, i, i+1)
 	}
 	for i := mid; i < n-1; i++ {

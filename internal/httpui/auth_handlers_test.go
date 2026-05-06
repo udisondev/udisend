@@ -290,6 +290,33 @@ func TestLoginPOST_TOTPCodeNotReusableSameStep(t *testing.T) {
 	}
 }
 
+// TestLoginPOST_TOTPReplayFailsClosedOnMalformedStep verifies the TOTP
+// step gate fails closed when the persisted last-step value cannot be
+// parsed. The previous behaviour silently treated parse errors as
+// "step 0" — the comparison `0 >= step` was always false and the same
+// code re-passed. Documented contract: a transient/malformed replay
+// store must NOT erase the replay window.
+func TestLoginPOST_TOTPReplayFailsClosedOnMalformedStep(t *testing.T) {
+	t.Parallel()
+	f := newLoginFixture(t, loginFixtureOpts{enrollTOTP: true})
+
+	if err := f.store.SetSetting(t.Context(), "auth.last_totp_step", "not-a-number"); err != nil {
+		t.Fatalf("seed malformed setting: %v", err)
+	}
+
+	now := time.Unix(f.clock.Load(), 0).UTC()
+	code := computeTOTPForTest(t, f.totpSecret, now)
+
+	resp := f.post("/login", url.Values{
+		"passphrase": {"hunter2-very-long-passphrase"},
+		"totp":       {code},
+	}, "")
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusSeeOther {
+		t.Fatalf("login accepted with malformed replay store; want fail-closed (401)")
+	}
+}
+
 func TestLoginPOST_RecoveryCodePath(t *testing.T) {
 	t.Parallel()
 	f := newLoginFixture(t, loginFixtureOpts{enrollTOTP: true})

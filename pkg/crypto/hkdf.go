@@ -14,7 +14,7 @@ var ErrEmptyOutput = errors.New("crypto: hkdf: length must be > 0")
 
 // HKDF derives `length` bytes from secret using HKDF-SHA-256 with the given
 // salt and context info. salt may be nil; in that case a zero-byte salt is
-// used per RFC 5869 §3.1.
+// used per RFC 5869.
 func HKDF(secret, salt, info []byte, length int) ([]byte, error) {
 	if length <= 0 {
 		return nil, ErrEmptyOutput

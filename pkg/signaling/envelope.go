@@ -24,14 +24,14 @@ import (
 )
 
 // Wire format version. v2 carries the `hops` byte for hop-by-hop relay
-// loop-prevention. Phase 9 audit: v1 envelopes (no hops counter)
-// previously decoded ok with Hops=0, which let a v1-claiming attacker
-// have us relay indefinitely. v1 is now rejected outright.
+// loop-prevention. v1 envelopes (no hops counter) are rejected outright
+// to prevent attackers from claiming v1 format and having us relay
+// indefinitely.
 const (
 	envelopeVersion byte = 0x02
 
 	// MaxHops bounds how many relay hops an envelope may traverse before
-	// being dropped. design.md §4 (hop-by-hop signaling routing).
+	// being dropped (hop-by-hop signaling routing).
 	MaxHops byte = 8
 )
 
@@ -57,13 +57,13 @@ func NewSessionID() (SessionID, error) {
 
 // Inner-payload type codes.
 //
-// The 0x06–0x08 range carries node-to-node WebRTC mesh handshake
-// (Phase 10). Payloads are encrypted under the same Noise XK session
-// as InnerData — the discriminator is at the envelope layer so the
-// mesh-handler at network.Node can dispatch without peeking inside
-// ciphertext. Adding new InnerType codes is wire-format-additive:
-// older builds either decode them to InnerType=N and surface as
-// "unknown inner type" Debug logs (forward-compatible).
+// The 0x06–0x08 range carries node-to-node WebRTC mesh handshake.
+// Payloads are encrypted under the same Noise XK session as InnerData —
+// the discriminator is at the envelope layer so the mesh-handler at
+// network.Node can dispatch without peeking inside ciphertext. Adding
+// new InnerType codes is wire-format-additive: older builds either
+// decode them to InnerType=N and surface as "unknown inner type" Debug
+// logs (forward-compatible).
 const (
 	InnerHelloInit     byte = 0x01 // Noise XK message 1
 	InnerHelloResp     byte = 0x02 // Noise XK message 2

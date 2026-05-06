@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/udisondev/udisend/pkg/network"
+	"github.com/udisondev/udisend/pkg/transport"
 )
 
 // goRun launches node.Run in a goroutine and reports any unexpected
@@ -37,11 +38,23 @@ func twoNodes(t *testing.T) (*network.Node, *network.Node) {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(t.Context())
+	// t.Cleanup, not defer: cancel must outlive twoNodes (which
+	// returns) and fire at test-end so the spawned Run goroutines see
+	// it. defer here would cancel ctx before the test body even runs.
 	t.Cleanup(cancel)
 
+	// Run the two nodes over a shared MemoryHub. A real UDP socket
+	// would force the test to poll on wall-clock time for DHT
+	// convergence; over MemoryHub all goroutines stay schedulable on
+	// the same Go runtime so observable progress is bounded by GC
+	// and not by network round trips.
+	hub := transport.NewMemoryHub()
+	trA := hub.NewMemoryTransport()
+	trB := hub.NewMemoryTransport()
+
 	a, err := network.Open(ctx, network.Config{
-		Identity: mustIdentity(t),
-		Listen:   "127.0.0.1:0",
+		Identity:  mustIdentity(t),
+		Transport: trA,
 	})
 	if err != nil {
 		t.Fatalf("open A: %v", err)
@@ -56,7 +69,7 @@ func twoNodes(t *testing.T) (*network.Node, *network.Node) {
 
 	b, err := network.Open(ctx, network.Config{
 		Identity:  mustIdentity(t),
-		Listen:    "127.0.0.1:0",
+		Transport: trB,
 		Bootstrap: []string{a.LocalAddress()},
 	})
 	if err != nil {
@@ -239,7 +252,7 @@ func TestNode_SeenPeerStoreConsultedAndUpdated(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+	defer cancel()
 
 	bootstrapNode, err := network.Open(ctx, network.Config{
 		Identity: mustIdentity(t),

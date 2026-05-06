@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/udisondev/udisend/pkg/dht"
@@ -46,49 +47,63 @@ func (f *fakeDHT) LookupValue(_ context.Context, key identity.PeerID) ([]byte, [
 
 func TestPublisher_PublishesAndResolverReads(t *testing.T) {
 	t.Parallel()
-	id, _ := identity.Generate(rand.Reader)
-	dhtFake := &fakeDHT{}
+	synctest.Test(t, func(t *testing.T) {
+		id, _ := identity.Generate(rand.Reader)
+		dhtFake := &fakeDHT{}
 
-	pub := presence.NewPublisher(presence.PublisherConfig{
-		Identity:     id,
-		Address:      "127.0.0.1:9999",
-		Capabilities: presence.CapPublicIP,
-		TTL:          time.Minute,
-		Refresh:      10 * time.Millisecond,
-		DHT:          dhtFake,
-	})
+		pub := presence.NewPublisher(presence.PublisherConfig{
+			Identity:     id,
+			Address:      "127.0.0.1:9999",
+			Capabilities: presence.CapPublicIP,
+			TTL:          time.Minute,
+			Refresh:      10 * time.Millisecond,
+			DHT:          dhtFake,
+		})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancel()
-	go pub.Run(ctx)
-	// Wait until publish has happened.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		defer cancel()
+
+		// Track Run() exit via a done channel so a stuck publisher loop
+		// (e.g. wedged on a future-locked refresh ticker) surfaces as a
+		// test failure instead of vanishing into a bare goroutine.
+		runDone := make(chan struct{})
+		go func() {
+			defer close(runDone)
+			pub.Run(ctx)
+		}()
+		t.Cleanup(func() {
+			select {
+			case <-runDone:
+			case <-time.After(2 * time.Second):
+				t.Errorf("publisher.Run did not exit after ctx cancel")
+			}
+		})
+		// synctest.Wait advances virtual time until every goroutine in
+		// the bubble (the publisher loop included) is durably blocked.
+		// The first refresh tick fires immediately in virtual time, so
+		// the DHT receives the record without a wall-clock poll.
+		synctest.Wait()
 		dhtFake.mu.Lock()
 		_, ok := dhtFake.values[id.Public().DestinationHash()]
 		dhtFake.mu.Unlock()
-		if ok {
-			break
-		}
-		if time.Now().After(deadline) {
+		if !ok {
 			t.Fatal("publisher never wrote to DHT")
 		}
-		time.Sleep(5 * time.Millisecond)
-	}
 
-	resolver := presence.NewResolver(dhtFake, time.Minute)
-	ctx2, cancel2 := context.WithTimeout(t.Context(), time.Second)
-	defer cancel2()
-	rec, err := resolver.Lookup(ctx2, id.Public().DestinationHash())
-	if err != nil {
-		t.Fatalf("resolver lookup: %v", err)
-	}
-	if rec.Address != "127.0.0.1:9999" {
-		t.Fatalf("address = %q", rec.Address)
-	}
-	if !rec.Capabilities.Has(presence.CapPublicIP) {
-		t.Fatal("missing PublicIP capability")
-	}
+		resolver := presence.NewResolver(dhtFake, time.Minute)
+		ctx2, cancel2 := context.WithTimeout(t.Context(), time.Second)
+		defer cancel2()
+		rec, err := resolver.Lookup(ctx2, id.Public().DestinationHash())
+		if err != nil {
+			t.Fatalf("resolver lookup: %v", err)
+		}
+		if rec.Address != "127.0.0.1:9999" {
+			t.Fatalf("address = %q", rec.Address)
+		}
+		if !rec.Capabilities.Has(presence.CapPublicIP) {
+			t.Fatal("missing PublicIP capability")
+		}
+	})
 }
 
 func TestResolver_RejectsForgedRecord(t *testing.T) {

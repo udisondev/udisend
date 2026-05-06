@@ -34,9 +34,9 @@ var (
 	// MaxMessagesPerKey. The session must be torn down and a fresh
 	// handshake established — using the same key past this point would
 	// approach the AEAD nonce-reuse boundary documented in the Noise
-	// spec § 5.1 (NIST SP 800-38D recommends ≤2^32 invocations per
-	// AES-GCM key; ChaCha20-Poly1305 is more forgiving but the same
-	// budget keeps a single bound for both).
+	// spec (NIST SP 800-38D recommends ≤2^32 invocations per AES-GCM
+	// key; ChaCha20-Poly1305 is more forgiving but the same budget
+	// keeps a single bound for both).
 	ErrSessionExhausted = errors.New("noise: session message budget exhausted, rekey or reconnect")
 )
 

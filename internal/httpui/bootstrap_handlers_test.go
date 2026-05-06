@@ -39,6 +39,7 @@ func parseBootstrap(t *testing.T, raw []byte) bootstrapListView {
 }
 
 func TestBootstrapAPI_AddListRemove(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -108,6 +109,7 @@ func TestBootstrapAPI_AddListRemove(t *testing.T) {
 }
 
 func TestBootstrapAPI_AddRejectsBadAddress(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -136,6 +138,7 @@ func TestBootstrapAPI_AddRejectsBadAddress(t *testing.T) {
 }
 
 func TestBootstrapAPI_RemoveCacheEntry(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -180,6 +183,7 @@ func TestBootstrapAPI_RemoveCacheEntry(t *testing.T) {
 }
 
 func TestBootstrapAPI_AddTriggersDial(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -203,6 +207,7 @@ func TestBootstrapAPI_AddTriggersDial(t *testing.T) {
 }
 
 func TestBootstrapAPI_Reconnect(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -252,6 +257,7 @@ func TestBootstrapAPI_Reconnect(t *testing.T) {
 }
 
 func TestBootstrapAPI_AddCSRFRequired(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

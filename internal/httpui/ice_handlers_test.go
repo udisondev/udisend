@@ -18,6 +18,7 @@ type iceListView struct {
 }
 
 func TestICE_AddListRemove(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -69,6 +70,7 @@ func TestICE_AddListRemove(t *testing.T) {
 }
 
 func TestICE_AddRejectsBadURL(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -90,6 +92,7 @@ func TestICE_AddRejectsBadURL(t *testing.T) {
 }
 
 func TestICE_FallbackToggle(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -108,6 +111,7 @@ func TestICE_FallbackToggle(t *testing.T) {
 // same row (PRIMARY KEY collision via lowercased scheme). Both reviewers
 // flagged orphan rows when only one of the operations normalized.
 func TestICE_NormalizesScheme(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -130,6 +134,7 @@ func TestICE_NormalizesScheme(t *testing.T) {
 }
 
 func TestNetworkStatus(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

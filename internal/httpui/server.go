@@ -146,6 +146,14 @@ func NewServer(cfg Config) (*Server, error) {
 	if err := validatePublicModeConfig(cfg); err != nil {
 		return nil, err
 	}
+	// TLS configuration is mutually exclusive: either cert+key files OR
+	// a pre-built tls.Config (autocert path). Allowing both silently
+	// favours one of the two — flagged in code review as a footgun for
+	// callers who set TLSConfig but accidentally leave TLSCert non-empty
+	// in a profile field. Refuse the ambiguity at construction.
+	if (cfg.TLSCert != "" || cfg.TLSKey != "") && cfg.TLSConfig != nil {
+		return nil, errors.New("httpui: TLSCert/TLSKey and TLSConfig are mutually exclusive")
+	}
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return nil, fmt.Errorf("httpui: listen: %w", err)
@@ -278,22 +286,43 @@ func NewServer(cfg Config) (*Server, error) {
 // mode. Unauthenticated visitors are redirected to /login (browser-friendly,
 // unlike the API surface which returns 401).
 func (s *Server) publicAwareStatic(w http.ResponseWriter, r *http.Request) {
+	_, status := s.validateSessionCookie(r)
+	switch status {
+	case sessionAuthOK:
+		s.handleStatic(w, r)
+	case sessionAuthMissing:
+		http.Redirect(w, r, loginPath, http.StatusSeeOther)
+	case sessionAuthError:
+		http.Error(w, "internal", http.StatusInternalServerError)
+	}
+}
+
+type sessionAuthStatus int
+
+const (
+	sessionAuthOK sessionAuthStatus = iota
+	sessionAuthMissing
+	sessionAuthError
+)
+
+// validateSessionCookie inspects the session cookie on r and reports
+// whether it identifies a live session. Status separates "no cookie /
+// expired session" (401 / redirect) from "validation error" (500) so
+// callers can pick the right response.
+func (s *Server) validateSessionCookie(r *http.Request) (*storage.AuthSession, sessionAuthStatus) {
 	c, err := r.Cookie(cookieNameSession)
 	if err != nil {
-		http.Redirect(w, r, loginPath, http.StatusSeeOther)
-		return
+		return nil, sessionAuthMissing
 	}
 	sess, err := s.authH.sessions.Validate(r.Context(), c.Value)
 	if err != nil {
-		http.Error(w, "internal", http.StatusInternalServerError)
-		return
+		return nil, sessionAuthError
 	}
 	if sess == nil {
-		http.Redirect(w, r, loginPath, http.StatusSeeOther)
-		return
+		return nil, sessionAuthMissing
 	}
 
-	s.handleStatic(w, r)
+	return sess, sessionAuthOK
 }
 
 // onPeerOnline broadcasts a peer-online envelope to every connected SSE
@@ -337,6 +366,12 @@ func (s *Server) LocalAddress() string { return s.listener.Addr().String() }
 func (s *Server) Run(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
+		// Detached from ctx on purpose: the parent has already been
+		// cancelled (that is what woke us), so propagating it would
+		// give server.Shutdown an already-dead deadline and skip the
+		// graceful drain of in-flight requests. The 5s window is the
+		// drain budget; SSE keepalives and auth handlers complete
+		// inside it.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.server.Shutdown(shutdownCtx)
@@ -413,24 +448,7 @@ func (s *Server) Close() {
 // reacts by redirecting to /login.
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	if s.publicMode {
-		return func(w http.ResponseWriter, r *http.Request) {
-			c, err := r.Cookie(cookieNameSession)
-			if err != nil {
-				http.Error(w, "auth required", http.StatusUnauthorized)
-				return
-			}
-			sess, err := s.authH.sessions.Validate(r.Context(), c.Value)
-			if err != nil {
-				http.Error(w, "internal", http.StatusInternalServerError)
-				return
-			}
-			if sess == nil {
-				http.Error(w, "auth required", http.StatusUnauthorized)
-				return
-			}
-
-			next(w, r)
-		}
+		return s.requireSessionCookie(next)
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -440,6 +458,20 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		next(w, r)
+	}
+}
+
+func (s *Server) requireSessionCookie(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_, status := s.validateSessionCookie(r)
+		switch status {
+		case sessionAuthOK:
+			next(w, r)
+		case sessionAuthMissing:
+			http.Error(w, "auth required", http.StatusUnauthorized)
+		case sessionAuthError:
+			http.Error(w, "internal", http.StatusInternalServerError)
+		}
 	}
 }
 
@@ -636,14 +668,20 @@ func (s *Server) handleContactRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mngr.RenameContact(r.Context(), h, strings.TrimSpace(req.Alias)); err != nil {
-		if errors.Is(err, storage.ErrContactNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeContactError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// writeContactError renders contact-mutation errors as HTTP responses,
+// mapping ErrContactNotFound to 404 and everything else to 500.
+func writeContactError(w http.ResponseWriter, err error) {
+	if errors.Is(err, storage.ErrContactNotFound) {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
 func (s *Server) handleContactDelete(w http.ResponseWriter, r *http.Request) {
@@ -666,11 +704,7 @@ func (s *Server) handleContactDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mngr.RemoveContact(r.Context(), h, messenger.RemoveContactOptions{WipeHistory: req.WipeHistory}); err != nil {
-		if errors.Is(err, storage.ErrContactNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeContactError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

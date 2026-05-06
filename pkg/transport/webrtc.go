@@ -711,7 +711,7 @@ func (t *WebRTCTransport) pumpInbox(peer identity.Hash, sess *udwebrtc.PeerSessi
 // signaler. Runs on a pion-internal goroutine — must not block.
 // Concurrency is bounded by t.fireSem so an ICE candidate burst
 // across many peers cannot grow the goroutine count linearly with
-// candidate × peer count (Phase 10 review iter-3 finding #2).
+// candidate × peer count.
 func (t *WebRTCTransport) fireSDP(peer identity.Hash, kind udwebrtc.SDPKind, sdp []byte) {
 	var meshKind MeshSDPKind
 	switch kind {

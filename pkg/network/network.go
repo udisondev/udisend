@@ -12,9 +12,9 @@
 // some of the stack — e.g. "kademlia + signaling, no mesh" or "just
 // the WebRTC mesh manager" — should compose pkg/dht, pkg/signaling,
 // pkg/transport, pkg/webrtc directly; they are designed to stand on
-// their own (Phase 11 reusability work). Importing pkg/network pulls
-// in pion/webrtc transitively even when MeshEnabled is false; full
-// mesh-opt-out at the import-graph level is deferred follow-up work.
+// their own. Importing pkg/network pulls in pion/webrtc transitively
+// even when MeshEnabled is false; full mesh-opt-out at the import-graph
+// level is deferred follow-up work.
 //
 // All public boundary types accept identity.PeerID (Suite-agnostic);
 // internal storage stays in identity.Hash since this package owns the
@@ -109,12 +109,12 @@ type Config struct {
 	// in-process. Production callers leave it nil.
 	Transport transport.Transport
 
-	// MeshEnabled, when true, spins up the inter-node WebRTC mesh
-	// (Phase 10): persistent DataChannels between nodes that survive
-	// a coordinated outage of public-IP signaling-relay nodes. The
-	// mesh runs in parallel to the UDP DHT/signaling stack — DHT
-	// RPC and signaling envelopes still ride UDP — so leaving this
-	// off is the safe default for legacy / Phase 9 builds.
+	// MeshEnabled, when true, spins up the inter-node WebRTC mesh:
+	// persistent DataChannels between nodes that survive a coordinated
+	// outage of public-IP signaling-relay nodes. The mesh runs in
+	// parallel to the UDP DHT/signaling stack — DHT RPC and signaling
+	// envelopes still ride UDP — so leaving this off is the safe
+	// default when callers do not need the overlay.
 	MeshEnabled bool
 
 	// MaxMeshLinks caps the live PeerSession count when mesh is
@@ -155,7 +155,7 @@ type Node struct {
 	stunSrv   *stun.Server
 	turnSrv   *turn.Server
 
-	// Mesh stack (Phase 10) — nil unless cfg.MeshEnabled.
+	// Mesh stack — nil unless cfg.MeshEnabled.
 	mesh         *MeshSignaler
 	rtcTransport *transport.WebRTCTransport
 	peerManager  *webrtc.PeerManager
@@ -196,49 +196,13 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 		cfg.Now = time.Now
 	}
 
-	// design.md §7-8: bootstrap source priority — explicit cfg.Bootstrap,
-	// then user-managed overrides (Settings → Bootstrap), then the seen-
-	// peers cache (subnet-diverse to dilute Sybil clusters), then the
-	// curated community list + DNS seeds. The first non-empty source
-	// wins; we do not currently merge across tiers.
-	if len(cfg.Bootstrap) == 0 && cfg.BootstrapOverrideStore != nil {
-		picks, err := cfg.BootstrapOverrideStore.EnabledBootstrapOverrides(ctx)
-		switch {
-		case err != nil:
-			cfg.Logger.Warn("network: bootstrap-overrides lookup failed; falling through", "err", err)
-		case len(picks) > 0:
-			cfg.Bootstrap = picks
-			cfg.Logger.Info("network: bootstrap from user overrides", "n", len(picks))
-		}
-	}
-	if len(cfg.Bootstrap) == 0 && cfg.SeenPeerStore != nil {
-		cached, err := cfg.SeenPeerStore.SeenPeersDiverse(ctx, 50)
-		switch {
-		case err != nil:
-			// Cache lookup is best-effort — proceed to community defaults.
-			// We log so a recurring DB error is visible in operator logs.
-			cfg.Logger.Warn("network: seen-peers cache lookup failed; falling back to defaults", "err", err)
-		case len(cached) > 0:
-			cfg.Bootstrap = cached
-			cfg.Logger.Info("network: bootstrap from cache", "n", len(cached))
-		}
-	}
-	if len(cfg.Bootstrap) == 0 {
-		if defaults := bootstrap.Defaults(ctx, bootstrap.Config{}); len(defaults) > 0 {
-			cfg.Bootstrap = defaults
-			cfg.Logger.Info("network: bootstrap from community defaults", "n", len(defaults))
-		}
+	if err := resolveBootstrap(ctx, &cfg); err != nil {
+		return nil, err
 	}
 
-	var tr transport.Transport
-	if cfg.Transport != nil {
-		tr = cfg.Transport
-	} else {
-		udp, err := transport.ListenUDP(cfg.Listen)
-		if err != nil {
-			return nil, err
-		}
-		tr = udp
+	tr, err := openTransport(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	n := &Node{
@@ -303,42 +267,102 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 	}
 
 	if cfg.PublicIP != "" && cfg.Mode == ModeRelay {
-		stunAddr := cfg.STUNAddr
-		if stunAddr == "" {
-			stunAddr = ":3478"
-		}
-		ssrv, err := stun.Listen(stunAddr)
-		if err != nil {
-			cfg.Logger.Warn("network: STUN listen failed; skipping", "err", err)
-		} else {
-			n.stunSrv = ssrv
-		}
-
-		if cfg.TURNSecret != "" {
-			turnAddr := cfg.TURNAddr
-			if turnAddr == "" {
-				turnAddr = ":3479"
-			}
-			tsrv, err := turn.NewServer(turn.Config{
-				PublicIP:     cfg.PublicIP,
-				ListenAddr:   turnAddr,
-				SharedSecret: cfg.TURNSecret,
-			})
-			if err != nil {
-				cfg.Logger.Warn("network: TURN listen failed; skipping", "err", err)
-			} else {
-				n.turnSrv = tsrv
-			}
-		}
+		n.startSTUN(cfg)
+		n.startTURN(cfg)
 	}
 
 	return n, nil
 }
 
-// buildMesh wires the Phase 10 inter-node mesh stack. It runs as a
-// best-effort layer alongside the UDP DHT/signaling — if any piece
-// fails to construct, the whole node refuses to start so the
-// operator notices rather than silently shipping a half-mesh.
+// resolveBootstrap fills cfg.Bootstrap from a priority chain: explicit
+// Bootstrap → user overrides → seen-peers cache → curated community
+// list + DNS seeds. The first non-empty source wins; we do not
+// currently merge across tiers.
+func resolveBootstrap(ctx context.Context, cfg *Config) error {
+	if len(cfg.Bootstrap) > 0 {
+		return nil
+	}
+
+	if cfg.BootstrapOverrideStore != nil {
+		picks, err := cfg.BootstrapOverrideStore.EnabledBootstrapOverrides(ctx)
+		if err != nil {
+			cfg.Logger.Warn("network: bootstrap-overrides lookup failed; falling through", "err", err)
+		} else if len(picks) > 0 {
+			cfg.Bootstrap = picks
+			cfg.Logger.Info("network: bootstrap from user overrides", "n", len(picks))
+
+			return nil
+		}
+	}
+
+	if cfg.SeenPeerStore != nil {
+		cached, err := cfg.SeenPeerStore.SeenPeersDiverse(ctx, 50)
+		if err != nil {
+			// Cache lookup is best-effort — proceed to community defaults.
+			cfg.Logger.Warn("network: seen-peers cache lookup failed; falling back to defaults", "err", err)
+		} else if len(cached) > 0 {
+			cfg.Bootstrap = cached
+			cfg.Logger.Info("network: bootstrap from cache", "n", len(cached))
+
+			return nil
+		}
+	}
+
+	if defaults := bootstrap.Defaults(ctx, bootstrap.Config{}); len(defaults) > 0 {
+		cfg.Bootstrap = defaults
+		cfg.Logger.Info("network: bootstrap from community defaults", "n", len(defaults))
+	}
+
+	return nil
+}
+
+func openTransport(cfg Config) (transport.Transport, error) {
+	if cfg.Transport != nil {
+		return cfg.Transport, nil
+	}
+
+	return transport.ListenUDP(cfg.Listen)
+}
+
+func (n *Node) startSTUN(cfg Config) {
+	addr := cfg.STUNAddr
+	if addr == "" {
+		addr = ":3478"
+	}
+	srv, err := stun.Listen(addr)
+	if err != nil {
+		cfg.Logger.Warn("network: STUN listen failed; skipping", "err", err)
+
+		return
+	}
+	n.stunSrv = srv
+}
+
+func (n *Node) startTURN(cfg Config) {
+	if cfg.TURNSecret == "" {
+		return
+	}
+	addr := cfg.TURNAddr
+	if addr == "" {
+		addr = ":3479"
+	}
+	srv, err := turn.NewServer(turn.Config{
+		PublicIP:     cfg.PublicIP,
+		ListenAddr:   addr,
+		SharedSecret: cfg.TURNSecret,
+	})
+	if err != nil {
+		cfg.Logger.Warn("network: TURN listen failed; skipping", "err", err)
+
+		return
+	}
+	n.turnSrv = srv
+}
+
+// buildMesh wires the inter-node mesh stack. It runs as a best-effort
+// layer alongside the UDP DHT/signaling — if any piece fails to
+// construct, the whole node refuses to start so the operator notices
+// rather than silently shipping a half-mesh.
 //
 // Order: MeshSignaler bridges signaling.Service → WebRTCTransport
 // → PeerManager (driven by a DHT-backed selector). The composite
@@ -386,8 +410,8 @@ func (n *Node) buildMesh() error {
 }
 
 // MeshTransport returns the underlying WebRTCTransport, or nil if
-// mesh is disabled. Callers that want to peek mesh inbox (e.g.
-// presence-gossip layer in 10.10+) hold this directly.
+// mesh is disabled. Callers that want to peek the mesh inbox (e.g.
+// a presence-gossip layer) hold this directly.
 func (n *Node) MeshTransport() *transport.WebRTCTransport { return n.rtcTransport }
 
 // MeshPeerManager returns the live PeerManager, or nil if mesh is
@@ -524,51 +548,21 @@ func (n *Node) Run(ctx context.Context) error {
 
 		return nil
 	})
-	// STUN/TURN are auxiliary roles for relay nodes — a failure must not
-	// collapse the DHT/signaling loops, so we log and continue rather
-	// than letting errgroup propagate the error. Run() returning early is
-	// tantamount to that role being offline; the rest of the node stays up.
+	// STUN/TURN/mesh are auxiliary roles — a failure must not collapse
+	// the DHT/signaling loops, so we log and continue rather than letting
+	// errgroup propagate the error. Run() returning early is tantamount
+	// to that role being offline; the rest of the node stays up.
 	if n.stunSrv != nil {
-		g.Go(func() error {
-			if err := n.stunSrv.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
-				n.cfg.Logger.Warn("network: STUN server exited with error", "err", err)
-			}
-
-			return nil
-		})
+		n.runAuxiliary(g, gctx, "STUN server", n.stunSrv.Run)
 	}
 	if n.turnSrv != nil {
-		g.Go(func() error {
-			if err := n.turnSrv.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
-				n.cfg.Logger.Warn("network: TURN server exited with error", "err", err)
-			}
-
-			return nil
-		})
+		n.runAuxiliary(g, gctx, "TURN server", n.turnSrv.Run)
 	}
-
-	// Mesh stack (Phase 10): WebRTCTransport pumps inbound mesh
-	// envelopes from the signaling.Channel into per-peer
-	// PeerSessions; PeerManager keeps K live links by polling the
-	// DHT-backed selector. Both are best-effort like STUN/TURN —
-	// a mesh failure must not collapse the DHT/signaling loops.
 	if n.rtcTransport != nil {
-		g.Go(func() error {
-			if err := n.rtcTransport.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
-				n.cfg.Logger.Warn("network: rtc transport exited with error", "err", err)
-			}
-
-			return nil
-		})
+		n.runAuxiliary(g, gctx, "rtc transport", n.rtcTransport.Run)
 	}
 	if n.peerManager != nil {
-		g.Go(func() error {
-			if err := n.peerManager.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
-				n.cfg.Logger.Warn("network: peer manager exited with error", "err", err)
-			}
-
-			return nil
-		})
+		n.runAuxiliary(g, gctx, "peer manager", n.peerManager.Run)
 	}
 
 	err := g.Wait()
@@ -579,6 +573,19 @@ func (n *Node) Run(ctx context.Context) error {
 	n.income.Close()
 
 	return errors.Join(err, closeErr)
+}
+
+// runAuxiliary spawns run inside g, logging non-cancel exits at Warn.
+// Used to share the wrapper around every best-effort role (STUN, TURN,
+// rtc transport, peer manager) that runs alongside DHT/signaling.
+func (n *Node) runAuxiliary(g *errgroup.Group, ctx context.Context, name string, run func(context.Context) error) {
+	g.Go(func() error {
+		if err := run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			n.cfg.Logger.Warn("network: "+name+" exited with error", "err", err)
+		}
+
+		return nil
+	})
 }
 
 func (n *Node) bootstrapAll(ctx context.Context) {
@@ -664,20 +671,22 @@ func (n *Node) Close() error {
 
 func (n *Node) closeServers() error {
 	var joined error
+	closeWith := func(label string, close func() error) {
+		if err := close(); err != nil {
+			joined = errors.Join(joined, fmt.Errorf("network: %s close: %w", label, err))
+		}
+	}
+
 	n.closeOnce.Do(func() {
 		// Mesh stack first: PeerManager owns the dial loop, the
 		// WebRTCTransport owns PeerSessions, MeshSignaler holds the
 		// service-level mesh handler registration. Tear them down
 		// before signaling so in-flight Connects unwind cleanly.
 		if n.peerManager != nil {
-			if err := n.peerManager.Close(); err != nil {
-				joined = errors.Join(joined, fmt.Errorf("network: peer manager close: %w", err))
-			}
+			closeWith("peer manager", n.peerManager.Close)
 		}
 		if n.rtcTransport != nil {
-			if err := n.rtcTransport.Close(); err != nil {
-				joined = errors.Join(joined, fmt.Errorf("network: rtc transport close: %w", err))
-			}
+			closeWith("rtc transport", n.rtcTransport.Close)
 		}
 		if n.mesh != nil {
 			n.mesh.Close()
@@ -686,18 +695,12 @@ func (n *Node) closeServers() error {
 		// channels best-effort and returns nothing to aggregate.
 		n.signaling.Close()
 		if n.stunSrv != nil {
-			if err := n.stunSrv.Close(); err != nil {
-				joined = errors.Join(joined, fmt.Errorf("network: stun close: %w", err))
-			}
+			closeWith("stun", n.stunSrv.Close)
 		}
 		if n.turnSrv != nil {
-			if err := n.turnSrv.Close(); err != nil {
-				joined = errors.Join(joined, fmt.Errorf("network: turn close: %w", err))
-			}
+			closeWith("turn", n.turnSrv.Close)
 		}
-		if err := n.transport.Close(); err != nil {
-			joined = errors.Join(joined, fmt.Errorf("network: transport close: %w", err))
-		}
+		closeWith("transport", n.transport.Close)
 	})
 
 	return joined
@@ -710,8 +713,8 @@ func (n *Node) LocalAddress() string { return n.transport.LocalAddr().String() }
 // webui Settings → Network → Status panel. Cheap to compute — does no
 // IO and holds no locks across boundaries.
 //
-// Phase 10 added the RTC* fields. They are zero when MeshEnabled is
-// false; the webui can hide the WebRTC mesh block via that signal.
+// The RTC* fields are zero when MeshEnabled is false; the webui can
+// hide the WebRTC mesh block via that signal.
 type Stats struct {
 	RoutingTableSize int
 	ActiveSessions   int
@@ -938,19 +941,19 @@ func (n *Node) emitFinal(peer identity.Hash, sid SessionID, peerPub identity.Pub
 	}
 }
 
-// runContext returns the ctx passed to Run, or a closed Background ctx
-// if Run hasn't started yet (defensive — handlers should not fire
-// before Run, but signaling can technically deliver a packet between
-// Open and Run if the transport already saw one).
+// runContext returns the ctx passed to Run, or Background if Run
+// hasn't started yet (defensive — handlers should not fire before Run,
+// but signaling can technically deliver a packet between Open and Run
+// if the transport already saw one).
 func (n *Node) runContext() context.Context {
 	n.runMu.RLock()
-	ctx := n.runCtx
-	n.runMu.RUnlock()
-	if ctx == nil {
+	defer n.runMu.RUnlock()
+
+	if n.runCtx == nil {
 		return context.Background()
 	}
 
-	return ctx
+	return n.runCtx
 }
 
 // resolverDelegate routes signaling's AddressResolver lookups through

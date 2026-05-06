@@ -118,6 +118,15 @@ func (t *UDPTransport) Close() error {
 func (t *UDPTransport) recvLoop() {
 	defer t.wg.Done()
 	defer close(t.in)
+	// Reusable backoff timer for transient-error path. NewTimer + Reset
+	// avoids allocating a Timer per iteration in the case where ICMP
+	// "port unreachable" hits us back-to-back — time.After would create
+	// a fresh Timer each time and pin its slot until natural expiry.
+	backoff := time.NewTimer(0)
+	if !backoff.Stop() {
+		<-backoff.C
+	}
+	defer backoff.Stop()
 	for {
 		// Take a buffer from the pool BEFORE the read so the read fills
 		// it directly — no intermediate copy. The pool guarantees
@@ -141,8 +150,9 @@ func (t *UDPTransport) recvLoop() {
 			// cancellable wait so ctx-cancel does not get stuck behind a
 			// 10 ms sleep.
 			slog.Default().Debug("transport: udp read", "err", err)
+			backoff.Reset(10 * time.Millisecond)
 			select {
-			case <-time.After(10 * time.Millisecond):
+			case <-backoff.C:
 			case <-t.closed:
 				return
 			}

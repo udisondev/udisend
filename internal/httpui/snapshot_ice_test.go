@@ -12,6 +12,7 @@ import (
 // the dead-control bug where the toggle was persisted but ignored when
 // constructing the ice_servers list.
 func TestSnapshot_HonorsDisableFallback(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

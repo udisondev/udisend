@@ -30,6 +30,7 @@ import (
 // and the receiver gets it via SSE. No real WebRTC — the browser side is
 // simulated by REST+SSE so we can run this in plain `go test`.
 func TestSignalingBridge_TwoMessengers(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -102,6 +103,7 @@ func TestSignalingBridge_TwoMessengers(t *testing.T) {
 // a contact that alice just added is removed via REST and disappears from
 // the snapshot. Outbox queued before deletion is also gone.
 func TestContactDelete_HTTPRoute(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -173,6 +175,7 @@ func TestContactDelete_HTTPRoute(t *testing.T) {
 // a cross-origin form POST and would carry the cookie but not a custom
 // header. With the CSRF guard, that attack 403s.
 func TestCSRF_BlocksMutatingPOSTWithoutHeader(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -205,6 +208,7 @@ func TestCSRF_BlocksMutatingPOSTWithoutHeader(t *testing.T) {
 // headers that are not in the allowlist (loopback names + configured
 // public host).
 func TestHostHeader_RejectsForeignHost(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -405,6 +409,10 @@ type sseStream struct {
 	resp   *http.Response
 	mu     sync.Mutex
 	events []map[string]any
+	// notify wakes any expect() waiter as soon as a new event lands so
+	// the test does not poll on a 50 ms sleep. Buffered to 1 so the
+	// reader never blocks if no waiter is currently parked.
+	notify chan struct{}
 	stop   chan struct{}
 }
 
@@ -421,7 +429,7 @@ func openSSE(t *testing.T, ctx context.Context, p *peer) *sseStream {
 		t.Fatalf("SSE status %d", resp.StatusCode)
 	}
 
-	s := &sseStream{resp: resp, stop: make(chan struct{})}
+	s := &sseStream{resp: resp, stop: make(chan struct{}), notify: make(chan struct{}, 1)}
 	go s.read()
 
 	// The SSE handler now registers the client BEFORE flushing headers
@@ -471,6 +479,10 @@ func (s *sseStream) read() {
 		s.mu.Lock()
 		s.events = append(s.events, ev)
 		s.mu.Unlock()
+		select {
+		case s.notify <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -480,8 +492,12 @@ func (s *sseStream) Close() error {
 }
 
 func (s *sseStream) expect(_ *testing.T, typ string, timeout time.Duration) map[string]any {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	// Event-driven wait instead of 50 ms polling: read() signals every
+	// new event over s.notify, so a matching event wakes us within the
+	// scheduler latency. The deadline timer puts a hard upper bound.
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
 		s.mu.Lock()
 		for _, ev := range s.events {
 			if ev["type"] == typ {
@@ -490,7 +506,10 @@ func (s *sseStream) expect(_ *testing.T, typ string, timeout time.Duration) map[
 			}
 		}
 		s.mu.Unlock()
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-s.notify:
+		case <-deadline.C:
+			return nil
+		}
 	}
-	return nil
 }

@@ -20,7 +20,7 @@ import (
 const (
 	TOTPPeriodSeconds = 30
 	TOTPDigits        = 6
-	TOTPSecretBytes   = 20 // 160 bits, RFC 4226 §4 recommendation
+	TOTPSecretBytes   = 20 // 160 bits, RFC 4226 recommendation
 	TOTPSkewSteps     = 1  // accept ±1 step (±30s) for clock skew
 )
 
@@ -108,7 +108,7 @@ func computeTOTP(secret []byte, counter uint64, digits int) string {
 	mac.Write(buf[:])
 	sum := mac.Sum(nil)
 
-	// Dynamic truncation per RFC 4226 §5.3.
+	// Dynamic truncation per RFC 4226.
 	offset := sum[len(sum)-1] & 0x0F
 	value := (uint32(sum[offset])&0x7F)<<24 |
 		uint32(sum[offset+1])<<16 |

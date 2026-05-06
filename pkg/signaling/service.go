@@ -28,8 +28,8 @@ const DefaultHandshakeTimeout = 6 * time.Second
 
 // noiseStaticFromIdentity bridges *identity.Identity (Suite0x01) into
 // the noise.StaticKeypair shape flynn/noise needs. pkg/noise itself
-// no longer imports pkg/identity (Phase 11.4 decoupling), so the
-// conversion lives at the call site.
+// does not import pkg/identity, so the conversion lives at the call
+// site.
 func noiseStaticFromIdentity(id *identity.Identity) noise.StaticKeypair {
 	priv := id.XPriv()
 
@@ -58,8 +58,8 @@ type AddressResolver interface {
 // originated by a remote peer (relay). A cache miss here MUST drop
 // rather than trigger iterative-find — otherwise a hostile peer could
 // send a stream of envelopes for unknown recipients and burn our
-// outbound bandwidth (Phase 9 audit: relay → iterative-lookup
-// amplification, ~24 outbound DHT FIND_NODEs per inbound envelope).
+// outbound bandwidth through relay-to-lookup amplification (one
+// inbound envelope can otherwise spawn ~24 outbound DHT FIND_NODEs).
 type Router interface {
 	NextHop(ctx context.Context, target identity.Hash) (net.Addr, bool)
 	LocalNextHop(target identity.Hash) (net.Addr, bool)
@@ -115,8 +115,12 @@ type Service struct {
 	relayMu   sync.Mutex
 	relayHits map[string][]time.Time
 
-	closeOnce sync.Once
-	closed    chan struct{}
+	// lifecycleCtx scopes async work spawned outside the dispatcher
+	// goroutine (verifyAndAdmit, BYE-on-Close) to the Service's own
+	// lifetime. lifecycleCancel fires from Close.
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
+	closeOnce       sync.Once
 }
 
 type sessionKey struct {
@@ -150,6 +154,7 @@ func NewService(cfg Config) *Service {
 	if cfg.HandshakeTimeout <= 0 {
 		cfg.HandshakeTimeout = DefaultHandshakeTimeout
 	}
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	s := &Service{
 		id:               cfg.Identity,
 		selfDH:           cfg.Identity.Public().DestinationHash(),
@@ -159,7 +164,8 @@ func NewService(cfg Config) *Service {
 		handshakeTimeout: cfg.HandshakeTimeout,
 		sessions:         make(map[sessionKey]*Channel),
 		halfOpenByIP:     make(map[string]int),
-		closed:           make(chan struct{}),
+		lifecycleCtx:     lifecycleCtx,
+		lifecycleCancel:  lifecycleCancel,
 	}
 	if cfg.Router != nil {
 		r := cfg.Router
@@ -209,7 +215,7 @@ func (s *Service) SetRouter(r Router) {
 // pattern as Messenger.Close documents.
 func (s *Service) Close() {
 	s.closeOnce.Do(func() {
-		close(s.closed)
+		s.lifecycleCancel()
 
 		s.mu.Lock()
 		toShutdown := make([]*Channel, 0, len(s.sessions))
@@ -231,7 +237,7 @@ func (s *Service) HandlePacket(ctx context.Context, pkt transport.Packet, typ by
 		return false
 	}
 	select {
-	case <-s.closed:
+	case <-s.lifecycleCtx.Done():
 		return true // service shut down — don't insert into a cleared map
 	default:
 	}
@@ -253,14 +259,14 @@ func (s *Service) HandlePacket(ctx context.Context, pkt transport.Packet, typ by
 // from making us its outbound bandwidth amplifier.
 const relayBudgetPerMinute = 60
 
-// relay forwards an envelope whose recipient is not us. Phase 9 audit:
+// relay forwards an envelope whose recipient is not us. Defences:
 //
 //   - Drops on cache-miss (no iterative DHT lookup) — relayed envelopes
 //     for unknown recipients cannot drive us into ~24 outbound
 //     FIND_NODEs each.
 //   - Per-source-IP token bucket limits how often a single peer can
 //     have us forward.
-//   - Hop-count enforcement (was already present) caps trip length.
+//   - Hop-count enforcement caps trip length.
 func (s *Service) relay(ctx context.Context, from net.Addr, env *Envelope) {
 	rp := s.router.Load()
 	if rp == nil {
@@ -297,8 +303,7 @@ func (s *Service) relay(ctx context.Context, from net.Addr, env *Envelope) {
 // relaySweepThreshold is the map size at which allowRelayFrom does a
 // full GC pass. Below it we only trim the per-IP list of the IP we
 // just observed — O(1) amortised. Above it we sweep the full table
-// once and reset the counter. Bounds the worst-case-per-call cost
-// flagged in the Phase 9 review.
+// once and reset the counter. Bounds the worst-case per-call cost.
 const relaySweepThreshold = 256
 
 // allowRelayFrom is the per-source-IP gate. Sliding-window counter on
@@ -508,10 +513,10 @@ func (s *Service) acceptInit(ctx context.Context, from net.Addr, env *Envelope) 
 	s.mu.Unlock()
 	committed = true
 
-	// Half-open responder DoS guard (design.md §8): if the initiator
-	// never sends HELLO_FINAL the channel sits forever consuming memory
-	// (pending buffer, slot in s.sessions). Schedule eviction after the
-	// same window Connect honours; a real peer always finishes within it.
+	// Half-open responder DoS guard: if the initiator never sends
+	// HELLO_FINAL the channel sits forever consuming memory (pending
+	// buffer, slot in s.sessions). Schedule eviction after the same
+	// window Connect honours; a real peer always finishes within it.
 	// Stored on the Channel so handleFinal can Stop the timer once the
 	// handshake completes successfully.
 	ch.handshakeTimer = time.AfterFunc(s.handshakeTimeout, func() {
@@ -628,7 +633,7 @@ func (s *Service) Connect(ctx context.Context, peer identity.Hash) (*Channel, er
 	case <-ctx.Done():
 		s.removeSession(sessionKey{peer: peer, sid: sid})
 		return nil, ctx.Err()
-	case <-s.closed:
+	case <-s.lifecycleCtx.Done():
 		return nil, errors.New("signaling: service closed")
 	}
 }

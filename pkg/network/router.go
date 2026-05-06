@@ -19,7 +19,7 @@ type routingBackend interface {
 const defaultPathLookupTimeout = 1500 * time.Millisecond
 
 // dhtRouter satisfies signaling.Router via routingBackend, with a bounded
-// iterative-lookup fallback (design.md §4 path requests).
+// iterative-lookup fallback for path discovery.
 type dhtRouter struct {
 	backend routingBackend
 	timeout time.Duration

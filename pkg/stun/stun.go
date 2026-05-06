@@ -72,10 +72,15 @@ func (s *Server) LocalAddr() net.Addr { return s.conn.LocalAddr() }
 
 // Run blocks while serving. Returns once ctx is cancelled or Close is called.
 func (s *Server) Run(ctx context.Context) error {
-	go func() {
-		<-ctx.Done()
+	// On ctx cancellation kick the blocking Read out of its deadline.
+	// AfterFunc replaces a long-lived watcher goroutine: the runtime
+	// schedules the callback only if/when ctx is cancelled, and stop()
+	// races cleanly with normal Close so we never leak the timer.
+	stop := context.AfterFunc(ctx, func() {
 		_ = s.conn.SetReadDeadline(timeBeforeNow())
-	}()
+	})
+	defer stop()
+
 	buf := make([]byte, 1500)
 	for {
 		select {

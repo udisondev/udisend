@@ -6,21 +6,17 @@ import (
 	"io"
 )
 
-// Crypto-suite abstractions for Phase 11 reusability + crypto-agility.
+// Crypto-suite abstractions for reusability and crypto-agility.
 //
 // A Suite bundles a signature scheme, key-agreement scheme, AEAD, and
 // hash function under a single algorithm-id byte. The id maps to the
-// wire-format version-byte every signed payload carries (see
-// p2p-messenger-design §"Crypto agility through identifiers"). Decoders
+// wire-format version-byte every signed payload carries. Decoders
 // look the suite up via LookupSuite at parse time, so a future
 // Suite0x02 can be added without rewriting consumers.
 //
 // Suite0x01 is the reference implementation: Ed25519 + X25519 +
 // ChaCha20-Poly1305 + BLAKE2b. It wraps the existing Identity /
-// PublicIdentity types behind the abstract interfaces. Subsequent
-// sub-stages (11.2-11.6) make pkg/{dht,noise,presence,signaling,webrtc}
-// accept these interfaces in their public API so external consumers
-// can plug in their own Suite implementation.
+// PublicIdentity types behind the abstract interfaces.
 
 // PeerID is a stable, comparable network address. Implementations
 // expose a fixed-size byte representation (16 bytes for Suite0x01)

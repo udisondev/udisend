@@ -17,6 +17,12 @@ import (
 // history. modernc.org/sqlite creates with the umask default (typically
 // 0o644), exposing all of that to every local user. Open() MUST tighten
 // to 0o600 before returning a usable handle.
+//
+// `journal_mode=WAL` triggers creation of `<path>-wal` and `<path>-shm`
+// alongside the main file. Both inherit the same default mode and
+// historically were left world-readable while the main file was
+// chmodded — buffered transactions and shared-memory metadata leaked
+// regardless. The lockdown must cover all three artefacts.
 func TestOpen_ChmodsDBFile_OwnerOnly(t *testing.T) {
 	t.Parallel()
 
@@ -27,12 +33,18 @@ func TestOpen_ChmodsDBFile_OwnerOnly(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	st, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := st.Mode().Perm(); perm != 0o600 {
-		t.Errorf("DB file mode = %#o, want 0o600 (owner-only)", perm)
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		p := path + suffix
+		st, err := os.Stat(p)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if perm := st.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s mode = %#o, want 0o600 (owner-only)", p, perm)
+		}
 	}
 }
 

@@ -259,7 +259,20 @@ func (h *authHandlers) verifyTOTPWithReplay(ctx context.Context, secret []byte, 
 		return false
 	}
 	if exists {
-		if u, perr := strconv.ParseInt(used, 10, 64); perr == nil && u >= step {
+		// Fail closed on parse error: a malformed persisted step must not
+		// silently degrade to "step 0" (which would always pass the
+		// `u >= step` test as false and re-accept the code). Mirrors the
+		// step-up gate in `requireSecondFactor`. Log the malformed value
+		// so the audit trail records the corruption — the step-up gate's
+		// caller would otherwise see only a generic "TOTP code rejected".
+		u, perr := strconv.ParseInt(used, 10, 64)
+		if perr != nil {
+			slog.Warn("login: malformed last_totp_step setting (replay store corruption)",
+				slog.Any("err", perr))
+
+			return false
+		}
+		if u >= step {
 			return false
 		}
 	}

@@ -5,14 +5,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/udisondev/udisend/pkg/clock"
 	"github.com/udisondev/udisend/pkg/dht"
 	"github.com/udisondev/udisend/pkg/identity"
 )
 
 // DefaultMaxRecordsPerIP caps how many presence records a single source
-// IP may have stored simultaneously on a relay/network node. design.md
-// §8 ("Sybil на presence — лимит на записи с одного IP"). Tunable via
-// RateLimitedStore.MaxPerIP.
+// IP may have stored simultaneously on a relay/network node. This
+// defends against Sybil attacks via rate-limited presence records.
+// Tunable via RateLimitedStore.MaxPerIP.
 const DefaultMaxRecordsPerIP = 16
 
 // DefaultMaxTrackedIPs caps the cardinality of the per-IP bookkeeping
@@ -52,9 +53,10 @@ type RateLimitedStore struct {
 	// signature only.
 	VerifyTTL time.Duration
 
-	// Clock returns the wall-clock used for verification freshness.
-	// Defaults to time.Now.
-	Clock func() time.Time
+	// Clock supplies the wall-clock used for verification freshness.
+	// nil falls back to clock.Real(); tests inject clock.NewFake to
+	// step time deterministically across Sweep / Verify boundaries.
+	Clock clock.Clock
 
 	mu      sync.Mutex
 	keyByIP map[string]map[dht.NodeID]struct{} // ip → set of keys it owns
@@ -195,10 +197,10 @@ func (s *RateLimitedStore) Sweep(now time.Time) {
 
 func (s *RateLimitedStore) now() time.Time {
 	if s.Clock != nil {
-		return s.Clock()
+		return s.Clock.Now()
 	}
 
-	return time.Now().UTC()
+	return clock.Real().Now()
 }
 
 // addrIP extracts the host portion of a net.Addr so the rate-limiter

@@ -42,9 +42,8 @@ const DefaultMemoryStoreEntries = 16384
 // validation on Put — every write is accepted. For production use the
 // caller MUST wrap this (or any other plain Store) in a validator
 // such as `presence.NewRateLimitedStore` which rejects unsigned
-// records and rate-limits per source. The Phase 9 audit flagged that
-// a bare MemoryStore on the network was indistinguishable from a
-// public bulletin-board.
+// records and rate-limits per source. A bare MemoryStore on the network
+// is indistinguishable from a public bulletin-board.
 //
 // MaxEntries hard-caps the number of stored keys. When the cap is hit
 // and a new key arrives, the entry with the soonest expiry is evicted

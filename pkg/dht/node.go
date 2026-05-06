@@ -10,6 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
+	"github.com/udisondev/udisend/pkg/clock"
 	"github.com/udisondev/udisend/pkg/identity"
 	"github.com/udisondev/udisend/pkg/ratelimit"
 	"github.com/udisondev/udisend/pkg/transport"
@@ -27,10 +30,10 @@ const (
 	// and pass it through Config / API.
 	DefaultStoreTTL = 90 * time.Second
 	// DefaultDisjoint is the number of independent lookup paths run in
-	// parallel during iterativeFind. design.md §4 / S-Kademlia §4.2:
-	// d=3 is the canonical paper recommendation — it caps the cost
-	// of a Sybil cluster on any one lookup at 1/d, since paths are
-	// disjoint by a shared visited-set guard.
+	// parallel during iterativeFind. d=3 is the canonical S-Kademlia
+	// recommendation — it caps the cost of a Sybil cluster on any one
+	// lookup at 1/d, since paths are disjoint by a shared visited-set
+	// guard.
 	DefaultDisjoint = 3
 )
 
@@ -52,20 +55,23 @@ type Config struct {
 	// MsgRelay frames over the same socket.
 	ExtraHandler PacketHandler
 	// InboundRate / InboundBurst configure the per-source-IP DoS limiter on
-	// inbound packets (design.md §8). Zero rate disables limiting.
+	// inbound packets. Zero rate disables limiting.
 	InboundRate  float64
 	InboundBurst float64
 	// Disjoint is the number of independent paths run in parallel during
-	// an iterative lookup (S-Kademlia §4.2 disjoint-paths). Initial
-	// shortlist contacts are partitioned round-robin between paths, and
-	// a shared visited-set guarantees that a peer touched by one path
-	// is never queried by another. Zero means DefaultDisjoint.
-	// design.md §4.
+	// an iterative lookup (S-Kademlia disjoint-paths). Initial shortlist
+	// contacts are partitioned round-robin between paths, and a shared
+	// visited-set guarantees that a peer touched by one path is never
+	// queried by another. Zero means DefaultDisjoint.
 	Disjoint int
 	// Siblings is the size of the sibling list — the s contacts closest
 	// to the local node, used as additional replication targets in
-	// PutValue (S-Kademlia §4.4). Zero means K. design.md §4.
+	// PutValue (S-Kademlia sibling replication). Zero means K.
 	Siblings int
+	// Clock supplies wall-clock time for contact LastSeen stamps. nil
+	// falls back to clock.Real(); tests substitute clock.NewFake to
+	// drive bucket freshness deterministically.
+	Clock clock.Clock
 }
 
 // DefaultInboundRate / DefaultInboundBurst are conservative caps suitable
@@ -105,6 +111,9 @@ func (c *Config) defaults() {
 	if c.Siblings <= 0 {
 		c.Siblings = c.K
 	}
+	if c.Clock == nil {
+		c.Clock = clock.Real()
+	}
 }
 
 // Node is a participant in the Kademlia DHT. It owns a routing table, a
@@ -121,20 +130,24 @@ type Node struct {
 	pendingMu sync.Mutex
 	pending   map[TxID]chan any
 
-	probeMu      sync.Mutex
+	probeMu        sync.Mutex
 	probesInFlight map[NodeID]struct{}
 
-	closeOnce sync.Once
-	closed    chan struct{}
+	// lifecycleCtx is the node-lifetime context; lifecycleCancel fires
+	// from Close. Asynchronous workers rooted in this context (probe
+	// pings, iterative-find fan-out) inherit shutdown automatically —
+	// no separate watcher goroutine per call.
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
+	closeOnce       sync.Once
 }
 
 // NewNode wires up a node but does not start the receive loop — call Run
 // for that. Store, when nil, falls back to a bare MemoryStore which
 // performs NO write validation — only suitable for tests / in-process
 // experiments. Production callers in pkg/network wrap the store with
-// presence.NewRateLimitedStore to reject unsigned records. The Phase 9
-// audit flagged the silent default as a foot-gun; the warning makes
-// the trade-off visible in operator logs.
+// presence.NewRateLimitedStore to reject unsigned records. A warning
+// is logged so the silent-default foot-gun is visible in operator logs.
 func NewNode(id *identity.Identity, t transport.Transport, store Store, cfg Config) *Node {
 	cfg.defaults()
 	if store == nil {
@@ -143,16 +156,18 @@ func NewNode(id *identity.Identity, t transport.Transport, store Store, cfg Conf
 		}
 		store = NewMemoryStore(nil)
 	}
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	return &Node{
-		id:             id,
-		transport:      t,
-		table:          NewRoutingTable(id.Public().DestinationHash(), cfg.K),
-		store:          store,
-		cfg:            cfg,
-		limiter:        ratelimit.New(cfg.InboundRate, cfg.InboundBurst),
-		pending:        make(map[TxID]chan any),
-		probesInFlight: make(map[NodeID]struct{}),
-		closed:         make(chan struct{}),
+		id:              id,
+		transport:       t,
+		table:           NewRoutingTable(id.Public().DestinationHash(), cfg.K),
+		store:           store,
+		cfg:             cfg,
+		limiter:         ratelimit.New(cfg.InboundRate, cfg.InboundBurst),
+		pending:         make(map[TxID]chan any),
+		probesInFlight:  make(map[NodeID]struct{}),
+		lifecycleCtx:    lifecycleCtx,
+		lifecycleCancel: lifecycleCancel,
 	}
 }
 
@@ -180,7 +195,7 @@ func (n *Node) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-n.closed:
+		case <-n.lifecycleCtx.Done():
 			return
 		case pkt, ok := <-n.transport.Inbox():
 			if !ok {
@@ -198,9 +213,11 @@ func (n *Node) Run(ctx context.Context) {
 	}
 }
 
-// Close stops the node and refuses subsequent RPCs.
+// Close stops the node and refuses subsequent RPCs. Cancels the
+// lifecycle context so any in-flight async workers (probes, fan-out)
+// observe shutdown via ctx.Done().
 func (n *Node) Close() {
-	n.closeOnce.Do(func() { close(n.closed) })
+	n.closeOnce.Do(n.lifecycleCancel)
 }
 
 func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
@@ -218,9 +235,10 @@ func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
 	case MsgPing, MsgPong, MsgFindNode, MsgNodes,
 		MsgStore, MsgStoreOK, MsgFindValue, MsgValue:
 	default:
-		if n.cfg.ExtraHandler != nil && n.cfg.ExtraHandler(ctx, pkt, typ, body) {
-			return
+		if n.cfg.ExtraHandler != nil {
+			n.cfg.ExtraHandler(ctx, pkt, typ, body)
 		}
+
 		return
 	}
 
@@ -257,35 +275,31 @@ func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
 		n.refreshContact(m.Header, pkt.From)
 		n.deliver(m.Header.TxID, m)
 	case *StoreMsg:
-		if ss, ok := n.store.(SourcedStore); ok {
-			ss.PutFromSource(m.Key, m.Value, DefaultStoreTTL, pkt.From)
-		} else {
-			n.store.Put(m.Key, m.Value, DefaultStoreTTL)
-		}
+		n.applyStore(m.Key, m.Value, pkt.From)
 		_ = n.sendMsg(ctx, pkt.From, &StoreOKMsg{Header: n.replyHeader(m.Header.TxID)})
 		n.maybeProbe(m.Header.SrcID, pkt.From)
 	case *StoreOKMsg:
 		n.refreshContact(m.Header, pkt.From)
 		n.deliver(m.Header.TxID, m)
 	case *FindValueMsg:
-		if val, ok := n.store.Get(m.Key); ok {
-			_ = n.sendMsg(ctx, pkt.From, &ValueMsg{
-				Header: n.replyHeader(m.Header.TxID),
-				Value:  val,
-			})
-		} else {
-			closest := n.table.Closest(m.Key, n.cfg.K)
-			_ = n.sendMsg(ctx, pkt.From, &NodesMsg{
-				Header:   n.replyHeader(m.Header.TxID),
-				Contacts: encodeContacts(closest),
-			})
-		}
+		_ = n.sendMsg(ctx, pkt.From, n.findValueReply(m))
 		n.maybeProbe(m.Header.SrcID, pkt.From)
 	case *ValueMsg:
 		n.refreshContact(m.Header, pkt.From)
 		n.deliver(m.Header.TxID, m)
 	}
 }
+
+// MaxProbesInFlight caps the global cardinality of the per-NodeID
+// probe-deduplication set. Each entry is paired with a goroutine that
+// runs Ping for `RequestTimeout`. Without a cap, an attacker rotating
+// SrcID (NodeID is attacker-chosen in unsolicited requests) across
+// many spoof IPs grows both the map and the goroutine population
+// linearly with packet rate × RequestTimeout. The per-IP rate limiter
+// bounds the per-source admission, but cross-IP an IPv6-budgeted
+// attacker can still inflate state. Cap matches MemoryStore default
+// scale (16K).
+const MaxProbesInFlight = 16384
 
 // maybeProbe schedules an asynchronous PING to verify a contact that
 // just hit us with a request. The contact is added to the routing
@@ -297,41 +311,88 @@ func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
 // completes (success or timeout) the entry is cleared and a future
 // request from the same peer can re-probe.
 //
-// Skipped when the SrcID is the local node (loop) or when an in-flight
-// probe is already pending for that NodeID.
+// Skipped when the SrcID is the local node (loop), when an in-flight
+// probe is already pending for that NodeID, or when the global probe
+// budget (MaxProbesInFlight) is exhausted — bounded shed.
 func (n *Node) maybeProbe(id NodeID, from net.Addr) {
-	if id == n.ID() {
+	if id == n.ID() || from == nil {
 		return
 	}
-	if from == nil {
-		return
-	}
-	// Already in routing table → no need to re-probe.
 	if known, ok := n.table.Contact(id); ok && known.Addr != nil {
 		return
 	}
-
-	n.probeMu.Lock()
-	if _, busy := n.probesInFlight[id]; busy {
-		n.probeMu.Unlock()
+	if !n.claimProbe(id) {
 		return
 	}
-	n.probesInFlight[id] = struct{}{}
-	n.probeMu.Unlock()
 
-	go func() {
-		defer func() {
-			n.probeMu.Lock()
-			delete(n.probesInFlight, id)
-			n.probeMu.Unlock()
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), n.cfg.RequestTimeout)
-		defer cancel()
-		// Ping success path causes our PongMsg handler to refreshContact
-		// and Add to the routing table. Failure (timeout, unreachable)
-		// is a silent drop — the peer will simply not be added.
-		_ = n.Ping(ctx, from)
-	}()
+	go n.runProbe(id, from)
+}
+
+// claimProbe reserves a per-NodeID probe slot. Returns false if a
+// probe is already in flight for id or the global budget is exhausted.
+func (n *Node) claimProbe(id NodeID) bool {
+	n.probeMu.Lock()
+	defer n.probeMu.Unlock()
+
+	if _, busy := n.probesInFlight[id]; busy {
+		return false
+	}
+	if len(n.probesInFlight) >= MaxProbesInFlight {
+		return false
+	}
+	n.probesInFlight[id] = struct{}{}
+
+	return true
+}
+
+func (n *Node) releaseProbe(id NodeID) {
+	n.probeMu.Lock()
+	delete(n.probesInFlight, id)
+	n.probeMu.Unlock()
+}
+
+// runProbe pings from on the local probe budget. Probe context is
+// derived from the node's lifecycle context — no caller ctx exists
+// (maybeProbe is fired from the inbound packet path), and rooting in
+// lifecycleCtx means Close() cancels in-flight probes for free without
+// a watcher goroutine per call. Ping success drives refreshContact
+// via the PongMsg handler; failure is a silent drop.
+func (n *Node) runProbe(id NodeID, from net.Addr) {
+	defer n.releaseProbe(id)
+
+	ctx, cancel := context.WithTimeout(n.lifecycleCtx, n.cfg.RequestTimeout)
+	defer cancel()
+
+	_ = n.Ping(ctx, from)
+}
+
+// findValueReply builds a ValueMsg if the key is held locally, else a
+// NodesMsg with the K closest known contacts.
+func (n *Node) findValueReply(m *FindValueMsg) any {
+	if val, ok := n.store.Get(m.Key); ok {
+		return &ValueMsg{
+			Header: n.replyHeader(m.Header.TxID),
+			Value:  val,
+		}
+	}
+
+	return &NodesMsg{
+		Header:   n.replyHeader(m.Header.TxID),
+		Contacts: encodeContacts(n.table.Closest(m.Key, n.cfg.K)),
+	}
+}
+
+// applyStore writes the (key, value) pair via the store's source-aware
+// API when available (so the store can rate-limit by origin), falling
+// back to the bare Put otherwise.
+func (n *Node) applyStore(key NodeID, value []byte, from net.Addr) {
+	if ss, ok := n.store.(SourcedStore); ok {
+		ss.PutFromSource(key, value, DefaultStoreTTL, from)
+
+		return
+	}
+
+	n.store.Put(key, value, DefaultStoreTTL)
 }
 
 func (n *Node) refreshContact(h Header, from net.Addr) {
@@ -350,7 +411,7 @@ func (n *Node) refreshContact(h Header, from net.Addr) {
 	if addr == nil {
 		return
 	}
-	n.table.Add(Contact{ID: h.SrcID, Addr: addr, LastSeen: time.Now()})
+	n.table.Add(Contact{ID: h.SrcID, Addr: addr, LastSeen: n.cfg.Clock.Now()})
 }
 
 func (n *Node) replyHeader(tx TxID) Header {
@@ -508,7 +569,7 @@ func (n *Node) waitFor(ctx context.Context, ch <-chan any, timeout time.Duration
 		return nil, errRequestTimeout
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-n.closed:
+	case <-n.lifecycleCtx.Done():
 		return nil, errors.New("dht: node closed")
 	}
 }
@@ -538,11 +599,10 @@ func (n *Node) LookupValue(ctx context.Context, key identity.PeerID) ([]byte, []
 }
 
 // PutValue stores key=value on the K closest known peers AND on the
-// local sibling list, in parallel. design.md §4 / S-Kademlia §4.4: the
-// sibling replicas keep the record alive even if a Sybil cluster
-// captures the K closest peers to key — their data is duplicated
-// onto our own neighbourhood, which the attacker would have to capture
-// independently.
+// local sibling list, in parallel. The S-Kademlia sibling replicas
+// keep the record alive even if a Sybil cluster captures the K closest
+// peers to key — their data is duplicated onto our own neighbourhood,
+// which the attacker would have to capture independently.
 func (n *Node) PutValue(ctx context.Context, key identity.PeerID, value []byte) error {
 	closest, err := n.LookupNode(ctx, key)
 	if err != nil {
@@ -617,11 +677,11 @@ func mergeContacts(a, b []Contact) []Contact {
 }
 
 // iterativeFind runs a Kademlia FIND_NODE / FIND_VALUE lookup over
-// Config.Disjoint independent paths in parallel (S-Kademlia §4.2): a
-// single shared visited-set ensures no peer is queried by more than
-// one path, and the initial shortlist is partitioned round-robin
-// between paths so every path explores a disjoint slice of the
-// network.
+// Config.Disjoint independent paths in parallel (S-Kademlia
+// disjoint-paths): a single shared visited-set ensures no peer is
+// queried by more than one path, and the initial shortlist is
+// partitioned round-robin between paths so every path explores a
+// disjoint slice of the network.
 //
 // Result is the union of all paths' shortlists, sorted by XOR distance,
 // truncated to K.
@@ -703,6 +763,14 @@ type valueHit struct {
 	value []byte
 }
 
+// pathResult carries the outcome of a single FindNode/FindValue probe
+// inside a disjoint lookup path. Empty fields mean "probe failed" —
+// runPath treats that as no-op rather than terminating the path.
+type pathResult struct {
+	contacts []Contact
+	value    []byte
+}
+
 // runPath drives a single disjoint lookup path until it can make no
 // further progress (no unqueried contacts in its private shortlist that
 // the global visited-set has not already claimed).
@@ -724,53 +792,84 @@ func (n *Node) runPath(
 			return
 		}
 
-		type result struct {
-			contacts []Contact
-			value    []byte
-		}
-		results := make(chan result, len(batch))
-		for _, c := range batch {
-			go func() {
-				if wantValue {
-					val, contacts, err := n.FindValue(ctx, c.Addr, target)
-					if err != nil {
-						results <- result{}
-						return
-					}
-					results <- result{contacts: contacts, value: val}
-					return
-				}
-				contacts, err := n.FindNode(ctx, c.Addr, target)
-				if err != nil {
-					results <- result{}
-					return
-				}
-				results <- result{contacts: contacts}
-			}()
-		}
-
-		for range batch {
-			r := <-results
-			if r.value != nil {
-				select {
-				case valueCh <- valueHit{value: r.value}:
-				default:
-				}
-				return
-			}
-			p.mu.Lock()
-			for _, nc := range r.contacts {
-				p.shortlist = mergeShortlist(p.shortlist, nc, target, n.cfg.K)
-			}
-			p.mu.Unlock()
+		results := n.fanOutBatch(ctx, target, wantValue, batch)
+		if !n.collectBatch(target, p, results, valueCh, len(batch)) {
+			return
 		}
 	}
+}
+
+// fanOutBatch dispatches one FindValue (wantValue) or FindNode probe per
+// contact in batch. Failures are recorded as a zero pathResult so the
+// receiver always reads exactly len(batch) values.
+//
+// Concurrency is bounded by errgroup.SetLimit(Alpha) — defensive cap
+// matching claimBatch's slice budget. Today batch ≤ Alpha so the limit
+// never binds; documenting it here keeps the bound explicit if future
+// refactors enlarge claimBatch's output.
+func (n *Node) fanOutBatch(ctx context.Context, target NodeID, wantValue bool, batch []Contact) <-chan pathResult {
+	results := make(chan pathResult, len(batch))
+
+	var g errgroup.Group
+	g.SetLimit(n.cfg.Alpha)
+	for _, c := range batch {
+		g.Go(func() error {
+			results <- n.probeContact(ctx, target, wantValue, c)
+
+			return nil
+		})
+	}
+
+	return results
+}
+
+func (n *Node) probeContact(ctx context.Context, target NodeID, wantValue bool, c Contact) pathResult {
+	if wantValue {
+		val, contacts, err := n.FindValue(ctx, c.Addr, target)
+		if err != nil {
+			return pathResult{}
+		}
+
+		return pathResult{contacts: contacts, value: val}
+	}
+
+	contacts, err := n.FindNode(ctx, c.Addr, target)
+	if err != nil {
+		return pathResult{}
+	}
+
+	return pathResult{contacts: contacts}
+}
+
+// collectBatch drains n results from the path's fan-out, merging
+// returned contacts into the path shortlist. If any probe yields a
+// value, it publishes once to valueCh (non-blocking) and returns false
+// so runPath terminates the path. Otherwise returns true.
+func (n *Node) collectBatch(target NodeID, p *pathState, results <-chan pathResult, valueCh chan<- valueHit, count int) bool {
+	for range count {
+		r := <-results
+		if r.value != nil {
+			select {
+			case valueCh <- valueHit{value: r.value}:
+			default:
+			}
+
+			return false
+		}
+		p.mu.Lock()
+		for _, nc := range r.contacts {
+			p.shortlist = mergeShortlist(p.shortlist, nc, target, n.cfg.K)
+		}
+		p.mu.Unlock()
+	}
+
+	return true
 }
 
 // claimBatch atomically picks up to alpha contacts from the path's
 // shortlist that are neither queried by this path nor visited by any
 // other path, and marks them claimed in both sets. The visited-set
-// guard is what enforces disjointness (S-Kademlia §4.2): two paths can
+// guard is what enforces disjointness (S-Kademlia): two paths can
 // never query the same peer.
 func (n *Node) claimBatch(p *pathState, visitedMu *sync.Mutex, visited map[NodeID]bool) []Contact {
 	p.mu.Lock()
@@ -883,13 +982,13 @@ func encodeContacts(cs []Contact) []EncodedContact {
 
 // decodeContacts turns wire EncodedContacts into runtime Contacts.
 //
-// Phase 9 audit fix: the per-/24 cap is applied to the RETURNED slice
-// as well as the routing table. Without this, a hostile peer can put
-// 20 attacker-chosen NodeIDs all on one /24 into a single NODES
-// response and force iterativeFind to fan out 20 outbound FIND_NODEs
-// — closing the routing-table-insert side without closing the
-// iterative-driver amplifier. Returning at most MaxContactsPerSubnet
-// per /24 group bounds the fan-out symmetrically with bucket.add.
+// The per-/24 cap is applied to the RETURNED slice as well as the
+// routing table. Without this, a hostile peer can put 20 attacker-
+// chosen NodeIDs all on one /24 into a single NODES response and force
+// iterativeFind to fan out 20 outbound FIND_NODEs — closing the
+// routing-table-insert side without closing the iterative-driver
+// amplifier. Returning at most MaxContactsPerSubnet per /24 group
+// bounds the fan-out symmetrically with bucket.add.
 func (n *Node) decodeContacts(cs []EncodedContact) []Contact {
 	out := make([]Contact, 0, len(cs))
 	subnetCount := make(map[string]int, len(cs))
@@ -898,16 +997,16 @@ func (n *Node) decodeContacts(cs []EncodedContact) []Contact {
 		if err != nil {
 			continue
 		}
-		key := addrSubnet(addr)
-		if key != "" && subnetCount[key] >= MaxContactsPerSubnet {
-			continue
-		}
-		if key != "" {
+		if key := addrSubnet(addr); key != "" {
+			if subnetCount[key] >= MaxContactsPerSubnet {
+				continue
+			}
 			subnetCount[key]++
 		}
-		c := Contact{ID: ec.ID, Addr: addr, LastSeen: time.Now()}
+		c := Contact{ID: ec.ID, Addr: addr, LastSeen: n.cfg.Clock.Now()}
 		out = append(out, c)
 		n.table.Add(c)
 	}
+
 	return out
 }

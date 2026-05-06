@@ -48,8 +48,9 @@ type Channel struct {
 	// verified is true once the responder's identity check (peer-static
 	// vs presence record) has succeeded. Frames received in the
 	// post-handshake-pre-verification window are buffered in `pending`
-	// and only released to inbox after this flips. Closes the silent-
-	// admission window flagged in the Phase 9 review.
+	// and only released to inbox after this flips. This prevents a
+	// silent-admission window where frames could leak to the application
+	// before identity verification completes.
 	verified atomic.Bool
 
 	closeOnce sync.Once
@@ -143,7 +144,10 @@ func (c *Channel) Recv(ctx context.Context) ([]byte, error) {
 // as a replay. Best-effort: failure to send does not block teardown.
 func (c *Channel) Close() error {
 	c.closeOnce.Do(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		// Bounded teardown timeout rooted in service lifetime — if the
+		// service is already shutting down we skip the BYE rather than
+		// race the underlying transport.
+		ctx, cancel := context.WithTimeout(c.service.lifecycleCtx, 250*time.Millisecond)
 		defer cancel()
 
 		c.sendMu.Lock()
@@ -207,9 +211,8 @@ func (c *Channel) handleResp(ctx context.Context, env *Envelope) {
 // installed but no DATA frames reach the application: handleData
 // buffers them in `pending` (capped) and flushPending releases them
 // only after `verified` flips true. Mismatch / lookup-budget
-// exhaustion -> the channel is shut down before any frame leaks. This
-// closes the recv-goroutine block AND the silent-admission window
-// flagged in the Phase 9 review.
+// exhaustion causes the channel to be shut down before any frame leaks
+// to the application.
 func (c *Channel) handleFinal(env *Envelope) {
 	if _, err := c.noise.ReadMessage(env.Payload); err != nil {
 		c.service.logger.Warn("signaling: HELLO_FINAL read", "err", err)
@@ -234,7 +237,11 @@ func (c *Channel) handleFinal(env *Envelope) {
 // resolver budget exhaustion: the channel is removed and shut down
 // before any DATA frame is decoded into the application inbox.
 func (c *Channel) verifyAndAdmit() {
-	if !c.service.verifySenderIdentity(context.Background(), c.peer, c.noise) {
+	// Root the (potentially several-second) presence-resolver round-trip
+	// in the Service lifecycle context so a Service.Close cancels stuck
+	// verifications instead of leaking the goroutine until natural
+	// timeout.
+	if !c.service.verifySenderIdentity(c.service.lifecycleCtx, c.peer, c.noise) {
 		c.service.logger.Warn("signaling: HELLO_FINAL identity mismatch", "claimed", c.peer)
 		c.service.removeSession(sessionKey{peer: c.peer, sid: c.sid})
 		c.shutdown()
@@ -253,7 +260,7 @@ func (c *Channel) verifyAndAdmit() {
 // buffer while the handshake is still in flight. Real reordering on a
 // single UDP socket is bounded; the cap is there so an attacker who
 // floods DATA before HELLO_FINAL cannot grow the per-channel slice
-// without limit (design.md §8 DoS).
+// without limit (DoS hardening).
 const MaxPendingDataFrames = 8
 
 // MaxPendingMeshFrames mirrors MaxPendingDataFrames for the mesh
@@ -336,10 +343,9 @@ func (c *Channel) flushPending() {
 				"peer", c.peer, "err", err)
 			continue
 		}
-		// Reload meshHandler per frame: review iter-1 finding #9.
-		// If SetMeshHandler runs between flushPending start and
-		// here, a single-load-before-loop would drop early frames
-		// despite the handler now being live.
+		// Reload meshHandler per frame: if SetMeshHandler runs
+		// between flushPending start and here, a single-load-before-loop
+		// would drop early frames despite the handler now being live.
 		hp := c.service.meshHandler.Load()
 		if hp == nil {
 			continue

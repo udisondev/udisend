@@ -183,5 +183,5 @@ func kindForInner(inner byte) (transport.MeshSDPKind, error) {
 }
 
 // Compile-time assertion that MeshSignaler satisfies the Signaler
-// contract WebRTCTransport will consume in Phase 10.5.
+// contract WebRTCTransport consumes.
 var _ transport.Signaler = (*MeshSignaler)(nil)

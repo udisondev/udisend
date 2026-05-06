@@ -10,6 +10,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"slices"
@@ -39,8 +40,8 @@ type Store struct {
 // the hardening apply globally we pin the database/sql pool to a
 // single connection (single-user messenger doesn't need parallel
 // writers, and WAL gives readers concurrency without extra
-// connections). Phase 9 audit caught the previous behaviour where
-// any pool-spawned second connection started with SQLite defaults.
+// connections); without the pin, any pool-spawned second connection
+// would start with SQLite defaults and silently sidestep the hardening.
 func Open(ctx context.Context, path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -68,16 +69,21 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("storage: schema: %w", err)
 	}
-	// Tighten file mode to owner-only. SQLite (modernc) creates the file
-	// with the umask-default mode (typically 0o644), exposing identity
-	// keys, TOTP secrets, Argon2 hashes and chat history to every local
-	// user on a multi-tenant box. Best-effort: a Chmod failure is logged
-	// at the call site (db is already opened) — refuse to continue would
-	// be more destructive than the leak we're closing.
+	// Tighten file mode to owner-only. SQLite (modernc) creates the
+	// main DB *and* the WAL/SHM sidecars with the umask-default mode
+	// (typically 0o644), exposing identity keys, TOTP secrets, Argon2
+	// hashes, chat-history excerpts buffered in the journal, and
+	// shared-memory metadata to every local user on a multi-tenant box.
+	// `journal_mode=WAL` above is what triggers `<path>-wal` and
+	// `<path>-shm` creation, so we MUST chmod those alongside the main
+	// file or the WAL leak survives the main-file lockdown.
 	if path != "" && path != ":memory:" {
-		if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
-			_ = db.Close()
-			return nil, fmt.Errorf("storage: chmod: %w", err)
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			p := path + suffix
+			if err := os.Chmod(p, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+				_ = db.Close()
+				return nil, fmt.Errorf("storage: chmod %s: %w", p, err)
+			}
 		}
 	}
 	return &Store{db: db}, nil
@@ -213,6 +219,8 @@ func (s *Store) ListContacts(ctx context.Context) ([]Contact, error) {
 		}
 		h, err := identity.ParseHash(hashStr)
 		if err != nil {
+			slog.Debug("storage: skip row with malformed destination_hash", "hash", hashStr, "err", err)
+
 			continue
 		}
 		c.Hash = h
@@ -234,8 +242,8 @@ func (s *Store) SetContactVerified(ctx context.Context, h identity.Hash, verifie
 // DeleteContactOptions controls cascade behaviour for DeleteContact.
 type DeleteContactOptions struct {
 	// WipeHistory also removes every message whose peer matches the
-	// deleted contact. Outbox is always cleared regardless of this flag —
-	// see ROADMAP decisions log 2026-05-03.
+	// deleted contact. Outbox is always cleared regardless of this flag
+	// (queued sends to a deleted contact must never reach the wire).
 	WipeHistory bool
 }
 
@@ -327,6 +335,8 @@ func (s *Store) LoadHistory(ctx context.Context, peer identity.Hash, limit int) 
 		}
 		h, err := identity.ParseHash(hashStr)
 		if err != nil {
+			slog.Debug("storage: skip row with malformed destination_hash", "hash", hashStr, "err", err)
+
 			continue
 		}
 		e.Peer = h
@@ -428,6 +438,8 @@ func (s *Store) PendingForPeer(ctx context.Context, peer identity.Hash) ([]Outbo
 		}
 		h, err := identity.ParseHash(hashStr)
 		if err != nil {
+			slog.Debug("storage: skip row with malformed destination_hash", "hash", hashStr, "err", err)
+
 			continue
 		}
 		it.Peer = h
@@ -453,6 +465,8 @@ func (s *Store) AllOutboxPeers(ctx context.Context) ([]identity.Hash, error) {
 		}
 		h, err := identity.ParseHash(hashStr)
 		if err != nil {
+			slog.Debug("storage: skip row with malformed destination_hash", "hash", hashStr, "err", err)
+
 			continue
 		}
 		out = append(out, h)
@@ -476,8 +490,8 @@ func (s *Store) IncrementOutboxAttempts(ctx context.Context, id int64) error {
 
 // RecordSeenPeer remembers that we successfully reached `address`. Used by
 // the bootstrap layer to seed itself on subsequent runs without a CLI
-// --bootstrap flag (design.md §7). Timestamp is stored as unix nanos so
-// adjacent inserts within the same second can still be ordered.
+// --bootstrap flag. Timestamp is stored as unix nanos so adjacent
+// inserts within the same second can still be ordered.
 func (s *Store) RecordSeenPeer(ctx context.Context, address string) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO seen_peers (address, last_seen, success_count) VALUES (?, ?, 1)
@@ -523,8 +537,8 @@ func (s *Store) ForgetSeenPeer(ctx context.Context, address string) error {
 // SeenPeersDiverse returns up to `limit` cached bootstrap addresses,
 // preferring diverse /24 IPv4 (and full IPv6) prefixes so the next
 // startup is harder to eclipse with a Sybil cluster colocated in one
-// subnet (design.md §8). Within each prefix the most-recent address
-// wins; prefixes are ordered by their freshest entry's last_seen.
+// subnet. Within each prefix the most-recent address wins; prefixes
+// are ordered by their freshest entry's last_seen.
 func (s *Store) SeenPeersDiverse(ctx context.Context, limit int) ([]string, error) {
 	all, err := s.SeenPeers(ctx, 0)
 	if err != nil {

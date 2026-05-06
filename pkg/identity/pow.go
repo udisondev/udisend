@@ -8,10 +8,10 @@ import (
 )
 
 // PoWBits returns the number of leading zero bits in the destination
-// hash. S/Kademlia (design.md §4) uses this as a cheap Sybil-resistance
-// validator: a node claiming a NodeID with `n` leading zeros must have
-// performed ~2^n hash operations on average to find such a seed,
-// raising the cost of generating many identities to surround a victim.
+// hash. S/Kademlia uses this as a cheap Sybil-resistance validator:
+// a node claiming a NodeID with `n` leading zeros must have performed
+// ~2^n hash operations on average to find such a seed, raising the
+// cost of generating many identities to surround a victim.
 func (p PublicIdentity) PoWBits() int {
 	h := p.DestinationHash()
 	leading := 0
@@ -40,9 +40,9 @@ const MaxPoWBits = 32
 
 // GenerateWithPoW samples seeds from `r` until one yields a public
 // identity with at least `bits` leading zeros in its destination hash.
-// `bits == 0` makes this equivalent to Generate. design.md §4 calls for
-// PoW on nodeID generation as an opt-in S/Kademlia hardening; deployers
-// pick a difficulty that rejects mass-Sybil attacks while keeping fresh
+// `bits == 0` makes this equivalent to Generate. PoW on nodeID
+// generation is an opt-in S/Kademlia hardening; deployers pick a
+// difficulty that rejects mass-Sybil attacks while keeping fresh
 // account creation tolerable on the target hardware.
 func GenerateWithPoW(r io.Reader, bits int) (*Identity, error) {
 	if bits < 0 || bits > MaxPoWBits {

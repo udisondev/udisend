@@ -1,9 +1,9 @@
 // Package ratelimit provides a tiny per-key token-bucket limiter used by
-// DHT and signaling layers to dampen DoS storms (design.md §8). One
-// bucket per "key" (typically a source IP); each Allow consumes a token
-// or returns false. Buckets refill at `rate` tokens per second and cap
-// at `burst`. Idle keys older than 5 minutes are forgotten so attackers
-// can't grow the map without bound.
+// DHT and signaling layers to dampen DoS storms. One bucket per "key"
+// (typically a source IP); each Allow consumes a token or returns false.
+// Buckets refill at `rate` tokens per second and cap at `burst`. Idle
+// keys older than 5 minutes are forgotten so attackers can't grow the
+// map without bound.
 package ratelimit
 
 import (

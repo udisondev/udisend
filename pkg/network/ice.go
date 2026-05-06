@@ -11,6 +11,7 @@ import (
 
 	pionstun "github.com/pion/stun/v3"
 
+	"github.com/udisondev/udisend/pkg/identity"
 	"github.com/udisondev/udisend/pkg/presence"
 )
 
@@ -38,16 +39,13 @@ type ICECandidate struct {
 // ICEServers discovers STUN/TURN volunteers in the routing table by
 // resolving each known contact's presence record and filtering by
 // Capability bits. Best-effort: peers that fail to resolve within
-// the per-peer lookup TTL are skipped silently.
-//
-// design.md §6: client picks 3-5 servers and passes them as ICEServers
-// to the browser's RTCPeerConnection.
+// the per-peer lookup TTL are skipped silently. The client picks
+// 3-5 servers and passes them as ICEServers to the browser's
+// RTCPeerConnection.
 func (n *Node) ICEServers(ctx context.Context, max int) []ICECandidate {
 	if max <= 0 {
 		return nil
 	}
-
-	const lookupTTL = 1500 * time.Millisecond
 
 	contacts := n.dht.Table().All()
 	if len(contacts) == 0 {
@@ -60,69 +58,22 @@ func (n *Node) ICEServers(ctx context.Context, max int) []ICECandidate {
 	gather, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	type result struct {
-		cand ICECandidate
-	}
-	results := make(chan result, len(contacts))
-
+	results := make(chan ICECandidate, len(contacts))
 	var wg sync.WaitGroup
 	for _, c := range contacts {
 		wg.Go(func() {
-			rctx, rcancel := context.WithTimeout(gather, lookupTTL)
-			defer rcancel()
-
-			rec, err := n.resolver.Lookup(rctx, c.ID)
-			if err != nil {
-				// Per-peer lookup misses are expected (cold cache,
-				// peer offline). We log at Debug so a flood of
-				// unreachable contacts is observable but not noisy.
-				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, presence.ErrNotFound) {
-					n.cfg.Logger.Debug("network: ICE candidate lookup failed", "peer", c.ID, "err", err)
-				}
-
+			cand, ok := n.probeICECandidate(gather, c.ID)
+			if !ok {
 				return
 			}
-			if rec == nil {
-				return
-			}
-			if !rec.Capabilities.Has(presence.CapCanSTUN) {
-				return
-			}
-
-			host, _, splitErr := net.SplitHostPort(rec.Address)
-			if splitErr != nil {
-				// Address was advertised without a port — fall back to
-				// the bare host. We still log at Debug because the
-				// presence record format is supposed to include a port.
-				n.cfg.Logger.Debug("network: ICE candidate address parse", "peer", c.ID, "addr", rec.Address, "err", splitErr)
-				host = rec.Address
-			}
-
-			// Capability-spoofing defence: a peer behind NAT can publish
-			// a presence record with `CapCanSTUN` and a victim's IP,
-			// directing every client's RTCPeerConnection to probe the
-			// victim. The signature only proves *who* set the bit, not
-			// that the address is actually a working STUN responder.
-			// Probe before trusting: send a STUN binding request and
-			// require a matching response within stunProbeTimeout.
-			probeAddr := net.JoinHostPort(host, DefaultSTUNPort)
-			pctx, pcancel := context.WithTimeout(rctx, stunProbeTimeout)
-			err = probeSTUNReachable(pctx, probeAddr)
-			pcancel()
-			if err != nil {
-				n.cfg.Logger.Debug("network: ICE STUN probe failed",
-					"peer", c.ID, "addr", probeAddr, "err", err)
-				return
-			}
-
-			results <- result{cand: ICECandidate{Host: host, Port: DefaultSTUNPort, Kind: "stun"}}
+			results <- cand
 		})
 	}
 	go func() { wg.Wait(); close(results) }()
 
 	out := make([]ICECandidate, 0, max)
-	for r := range results {
-		out = append(out, r.cand)
+	for cand := range results {
+		out = append(out, cand)
 		if len(out) >= max {
 			cancel()
 			break
@@ -130,6 +81,59 @@ func (n *Node) ICEServers(ctx context.Context, max int) []ICECandidate {
 	}
 
 	return out
+}
+
+// iceLookupTTL caps how long resolver.Lookup may run for a single peer
+// during ICE discovery; cancelled early once `max` candidates land.
+const iceLookupTTL = 1500 * time.Millisecond
+
+// probeICECandidate resolves peer's presence record and verifies it
+// runs a working STUN responder. Returns (zero, false) on any failure
+// (lookup miss, missing capability, unreachable probe).
+func (n *Node) probeICECandidate(ctx context.Context, peer identity.PeerID) (ICECandidate, bool) {
+	rctx, cancel := context.WithTimeout(ctx, iceLookupTTL)
+	defer cancel()
+
+	rec, err := n.resolver.Lookup(rctx, peer)
+	if err != nil {
+		// Per-peer lookup misses are expected (cold cache, peer offline).
+		// We log at Debug so a flood of unreachable contacts is observable
+		// but not noisy.
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, presence.ErrNotFound) {
+			n.cfg.Logger.Debug("network: ICE candidate lookup failed", "peer", peer, "err", err)
+		}
+
+		return ICECandidate{}, false
+	}
+	if rec == nil || !rec.Capabilities.Has(presence.CapCanSTUN) {
+		return ICECandidate{}, false
+	}
+
+	host, _, splitErr := net.SplitHostPort(rec.Address)
+	if splitErr != nil {
+		// Address was advertised without a port — fall back to the bare
+		// host. Logged at Debug because the presence record format is
+		// supposed to include a port.
+		n.cfg.Logger.Debug("network: ICE candidate address parse", "peer", peer, "addr", rec.Address, "err", splitErr)
+		host = rec.Address
+	}
+
+	// Capability-spoofing defence: a peer behind NAT can publish a
+	// presence record with CapCanSTUN and a victim's IP, directing
+	// every client's RTCPeerConnection to probe the victim. The
+	// signature only proves *who* set the bit, not that the address
+	// is actually a working STUN responder. Probe before trusting.
+	probeAddr := net.JoinHostPort(host, DefaultSTUNPort)
+	pctx, pcancel := context.WithTimeout(rctx, stunProbeTimeout)
+	err = probeSTUNReachable(pctx, probeAddr)
+	pcancel()
+	if err != nil {
+		n.cfg.Logger.Debug("network: ICE STUN probe failed", "peer", peer, "addr", probeAddr, "err", err)
+
+		return ICECandidate{}, false
+	}
+
+	return ICECandidate{Host: host, Port: DefaultSTUNPort, Kind: "stun"}, true
 }
 
 // probeSTUNReachable sends a STUN binding request to addr and returns

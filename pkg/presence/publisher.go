@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/udisondev/udisend/pkg/clock"
 	"github.com/udisondev/udisend/pkg/dht"
 	"github.com/udisondev/udisend/pkg/identity"
 )
@@ -15,9 +16,9 @@ import (
 const DefaultRecordTTL = 90 * time.Second
 
 // DHT is the subset of *dht.Node used by the publisher / resolver. Defined
-// as an interface so tests can substitute a fake. Phase 11.5 boundary
-// types are identity.PeerID — *dht.Node satisfies this interface
-// directly without an adapter.
+// as an interface so tests can substitute a fake. Boundary types are
+// identity.PeerID — *dht.Node satisfies this interface directly without
+// an adapter.
 type DHT interface {
 	PutValue(ctx context.Context, key identity.PeerID, value []byte) error
 	LookupValue(ctx context.Context, key identity.PeerID) ([]byte, []dht.Contact, error)
@@ -32,6 +33,7 @@ type Publisher struct {
 	refresh      time.Duration
 	dht          DHT
 	log          *slog.Logger
+	clock        clock.Clock
 }
 
 // PublisherConfig configures NewPublisher.
@@ -43,6 +45,10 @@ type PublisherConfig struct {
 	Refresh      time.Duration // re-publish interval; defaults to TTL/2
 	DHT          DHT
 	Logger       *slog.Logger
+	// Clock supplies the wall-clock used to stamp record IssuedAt. nil
+	// falls back to clock.Real(); tests inject clock.NewFake to drive
+	// republish behaviour deterministically.
+	Clock clock.Clock
 }
 
 // NewPublisher returns a Publisher ready to be Run.
@@ -56,6 +62,9 @@ func NewPublisher(cfg PublisherConfig) *Publisher {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	if cfg.Clock == nil {
+		cfg.Clock = clock.Real()
+	}
 	return &Publisher{
 		id:           cfg.Identity,
 		addr:         cfg.Address,
@@ -64,6 +73,7 @@ func NewPublisher(cfg PublisherConfig) *Publisher {
 		refresh:      cfg.Refresh,
 		dht:          cfg.DHT,
 		log:          cfg.Logger,
+		clock:        cfg.Clock,
 	}
 }
 
@@ -92,7 +102,7 @@ func (p *Publisher) publishOnce(ctx context.Context) error {
 	rec := Record{
 		Address:      p.addr,
 		Capabilities: p.capabilities,
-		IssuedAt:     time.Now().UTC(),
+		IssuedAt:     p.clock.Now(),
 	}
 	if err := rec.Sign(p.id); err != nil {
 		return fmt.Errorf("presence: sign: %w", err)
@@ -110,7 +120,9 @@ type Resolver struct {
 	cache *Cache
 	dht   DHT
 	ttl   time.Duration
-	now   func() time.Time
+	// Clock is the wall-clock used for cache freshness checks. Defaults
+	// to clock.Real(); tests substitute clock.NewFake.
+	Clock clock.Clock
 }
 
 // NewResolver returns a resolver backed by the given DHT.
@@ -119,7 +131,7 @@ func NewResolver(d DHT, ttl time.Duration) *Resolver {
 		cache: NewCache(ttl),
 		dht:   d,
 		ttl:   ttl,
-		now:   func() time.Time { return time.Now().UTC() },
+		Clock: clock.Real(),
 	}
 }
 
@@ -136,7 +148,8 @@ func (r *Resolver) Cache() *Cache { return r.cache }
 // (still signature-valid) record can pin a victim at a stale address
 // indefinitely.
 func (r *Resolver) Lookup(ctx context.Context, peer identity.PeerID) (*Record, error) {
-	if rec, ok := r.cache.Get(r.now(), peer); ok {
+	now := r.Clock.Now()
+	if rec, ok := r.cache.Get(now, peer); ok {
 		return rec, nil
 	}
 	val, _, err := r.dht.LookupValue(ctx, peer)
@@ -153,12 +166,12 @@ func (r *Resolver) Lookup(ctx context.Context, peer identity.PeerID) (*Record, e
 	if rec.DestinationHash() != peer {
 		return nil, ErrIdentityMismatch
 	}
-	accepted, err := r.cache.Put(r.now(), &rec)
+	accepted, err := r.cache.Put(now, &rec)
 	if err != nil {
 		return nil, err
 	}
 	if !accepted {
-		if cached, ok := r.cache.Get(r.now(), peer); ok {
+		if cached, ok := r.cache.Get(now, peer); ok {
 			return cached, nil
 		}
 

@@ -164,7 +164,7 @@ func TestProfileValidate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := tt.p.validate(tt.hasCreds)
+			err := tt.p.Validate(tt.hasCreds)
 			switch {
 			case tt.wantErr == "" && err != nil:
 				t.Fatalf("unexpected error: %v", err)
@@ -248,7 +248,7 @@ func TestProfilePublicMode(t *testing.T) {
 	}
 	for _, c := range cases {
 		p := profile{Mode: c.mode}
-		if got := p.publicMode(); got != c.want {
+		if got := p.PublicMode(); got != c.want {
 			t.Errorf("mode %s publicMode = %v, want %v", c.mode, got, c.want)
 		}
 	}

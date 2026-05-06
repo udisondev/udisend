@@ -32,6 +32,13 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		full = "assets/index.html"
 	}
 	w.Header().Set("Content-Type", contentTypeFor(full))
+	// SPA assets are tied to the running binary — once the operator
+	// upgrades, the new index.html / app.js MUST be fetched. Without
+	// `no-store` the browser can pin a stale (potentially-vulnerable)
+	// version against the operator's intent. Embedded assets are tiny;
+	// the bandwidth cost is negligible compared to the serve-stale-XSS
+	// risk on a binary that never advertises a versioned URL.
+	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)
 }
 

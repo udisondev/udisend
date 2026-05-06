@@ -2,11 +2,10 @@
 // cmd/messenger and cmd/network when the operator did not pass an
 // explicit --bootstrap flag and the local seen-peers cache is empty.
 //
-// The package solves design.md §7 ("Bootstrap-список / DNS-seeds /
-// сеть самовоспроизводится"): it keeps a curated community list of
-// host:port endpoints and resolves an additional set of well-known
-// DNS-seed names whose A/AAAA records point to currently-up nodes.
-// Both inputs are merged and deduplicated.
+// The package keeps a curated community list of host:port endpoints
+// and resolves an additional set of well-known DNS-seed names whose
+// A/AAAA records point to currently-up nodes. Both inputs are merged
+// and deduplicated.
 //
 // The defaults are intentionally empty in this open-source release —
 // publishing fake addresses would harden nothing. Operators of a public
@@ -23,9 +22,10 @@ import (
 )
 
 // CommunityList is the curated, in-binary list of host:port endpoints
-// shipped with the build. design.md §7 calls for "20-30 bootstrap-адресов
-// от разных людей в разных юрисдикциях"; this slice is the place to put
-// them. Empty in upstream — populate in your fork or build pipeline.
+// shipped with the build. Operators populate this with 20-30 bootstrap
+// addresses from different operators across different jurisdictions for
+// censorship resistance. Empty in upstream — populate in your fork or
+// build pipeline.
 //
 // var ldflag overrides are intentional: a release pipeline can splice
 // addresses in without recompiling sources by passing
@@ -127,28 +127,36 @@ func Defaults(ctx context.Context, cfg Config) []string {
 	}
 
 	for _, host := range seeds {
-		host = strings.TrimSpace(host)
-		if host == "" {
-			continue
-		}
-		lctx, cancel := context.WithTimeout(ctx, timeout)
-		ips, err := resolver.LookupHost(lctx, host)
-		cancel()
-		if err != nil {
-			continue
-		}
-		for _, ip := range ips {
-			if !isRoutableSeedIP(ip) {
-				// DNS-spoof / poison defence: refuse loopback, link-local,
-				// private, or otherwise unspecified addresses returned by
-				// a DNS-seed lookup. An attacker on the local network can
-				// otherwise force the client to probe internal services
-				// (loopback APIs, RFC1918 ranges) by poisoning the
-				// resolver. Real bootstrap nodes always live on globally
-				// routable IPs.
-				continue
-			}
+		for _, ip := range resolveSeed(ctx, resolver, host, timeout) {
 			add(net.JoinHostPort(ip, strconv.Itoa(port)))
+		}
+	}
+
+	return out
+}
+
+// resolveSeed performs one bounded DNS lookup and returns only those IPs
+// safe to probe. DNS-spoof / poison defence: an attacker on the local
+// network can otherwise force the client to probe internal services
+// (loopback APIs, RFC1918 ranges) by poisoning the resolver. Real
+// bootstrap nodes always live on globally routable IPs.
+func resolveSeed(ctx context.Context, resolver Resolver, host string, timeout time.Duration) []string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return nil
+	}
+
+	lctx, cancel := context.WithTimeout(ctx, timeout)
+	ips, err := resolver.LookupHost(lctx, host)
+	cancel()
+	if err != nil {
+		return nil
+	}
+
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if isRoutableSeedIP(ip) {
+			out = append(out, ip)
 		}
 	}
 

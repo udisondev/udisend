@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/udisondev/udisend/internal/config"
 	"github.com/udisondev/udisend/internal/httpui/auth"
 	"github.com/udisondev/udisend/internal/storage"
 	tspkg "github.com/udisondev/udisend/pkg/tailscale"
@@ -119,30 +120,21 @@ func newPublicResetCommand() *cobra.Command {
 	}
 }
 
-// disablePublic wipes the deployment profile so the next `udisend run`
-// falls back to loopback. Auth credentials remain.
+// disablePublic is a thin UI wrapper around config.DisablePublic that
+// adds the operator-facing confirmation line. State mutation lives in
+// internal/config per CLAUDE.md cmd/-minimality rule.
 func disablePublic(ctx context.Context, store *storage.Store) error {
-	for _, k := range []string{
-		settingDeployMode,
-		settingDeployBindHTTP,
-		settingDeployBindP2P,
-		settingDeployPublicHost,
-		settingDeployTLSCert,
-		settingDeployTLSKey,
-		settingDeployTrustProxy,
-	} {
-		if err := store.DeleteSetting(ctx, k); err != nil {
-			return err
-		}
+	if err := config.DisablePublic(ctx, store); err != nil {
+		return err
 	}
 	fmt.Println("✓ public mode disabled — `udisend run` will start in loopback")
 
 	return nil
 }
 
-// resetEverything is the "I lost my passphrase / TOTP" escape hatch:
-// clears auth credentials AND the profile so the next `enable` runs
-// from scratch. Identity (the Ed25519 keypair) is preserved.
+// resetEverything is the "I lost my passphrase / TOTP" escape hatch.
+// The interactive confirmation prompt stays here (UI concern); the
+// destructive state cleanup is delegated to config.ResetState.
 func resetEverything(ctx context.Context, store *storage.Store, storageDir string) error {
 	fmt.Println("This will:")
 	fmt.Println("  - clear the webui passphrase")
@@ -161,24 +153,9 @@ func resetEverything(ctx context.Context, store *storage.Store, storageDir strin
 		return errors.New("cancelled")
 	}
 
-	prof, _ := loadProfile(ctx, store)
-	if prof != nil {
-		if prof.TLSCert != "" {
-			_ = os.Remove(prof.TLSCert)
-		}
-		if prof.TLSKey != "" {
-			_ = os.Remove(prof.TLSKey)
-		}
-	}
-	_ = os.RemoveAll(filepath.Join(storageDir, "autocert"))
-
-	if err := disablePublic(ctx, store); err != nil {
+	if err := config.ResetState(ctx, store, storageDir); err != nil {
 		return err
 	}
-	if err := store.DeleteAuthCredentials(ctx); err != nil {
-		return err
-	}
-	_ = os.Remove(filepath.Join(storageDir, "recovery-codes.txt"))
 
 	fmt.Println("✓ everything cleared. Run `udisend public enable [addr]` to set up again.")
 
@@ -284,7 +261,7 @@ func runEnable(storageDir, addr string, viaProxy, viaTailscale bool, httpPort, p
 		fmt.Println()
 	}
 
-	if err := prof.validate(true); err != nil {
+	if err := prof.Validate(true); err != nil {
 		return err
 	}
 	if err := saveProfile(ctx, store, prof); err != nil {

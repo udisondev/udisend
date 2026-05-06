@@ -82,6 +82,21 @@ const (
 	DefaultAuthBurst             = 10
 )
 
+func (c *Config) applyDefaults() {
+	if c.MaxCredentialLifetime <= 0 {
+		c.MaxCredentialLifetime = DefaultMaxCredentialLifetime
+	}
+	if c.AuthRate == 0 {
+		c.AuthRate = DefaultAuthRate
+	}
+	if c.AuthBurst == 0 {
+		c.AuthBurst = DefaultAuthBurst
+	}
+	if c.Realm == "" {
+		c.Realm = DefaultRealm
+	}
+}
+
 // NewServer binds the TURN listener and registers the auth handler. Call
 // Close to release resources.
 func NewServer(cfg Config) (*Server, error) {
@@ -108,18 +123,7 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("turn: invalid public IP %q", cfg.PublicIP)
 	}
 
-	if cfg.MaxCredentialLifetime <= 0 {
-		cfg.MaxCredentialLifetime = DefaultMaxCredentialLifetime
-	}
-	if cfg.AuthRate == 0 {
-		cfg.AuthRate = DefaultAuthRate
-	}
-	if cfg.AuthBurst == 0 {
-		cfg.AuthBurst = DefaultAuthBurst
-	}
-	if cfg.Realm == "" {
-		cfg.Realm = DefaultRealm
-	}
+	cfg.applyDefaults()
 	realm := cfg.Realm
 	limiter := ratelimit.New(cfg.AuthRate, cfg.AuthBurst)
 
@@ -175,27 +179,19 @@ func (s *Server) Close() error { return s.server.Close() }
 // with `123:` collisions.
 func validUsername(username string, maxLifetime time.Duration) bool {
 	colon := strings.IndexByte(username, ':')
-	if colon <= 0 {
+	if colon <= 0 || colon+1 >= len(username) || len(username) > 256 {
 		return false
 	}
-	if colon+1 >= len(username) {
-		return false
-	}
-	if len(username) > 256 {
-		return false
-	}
+
 	exp, err := strconv.ParseInt(username[:colon], 10, 64)
 	if err != nil {
 		return false
 	}
+
 	now := time.Now().Unix()
-	if exp <= now {
-		return false
-	}
-	if exp > now+int64(maxLifetime/time.Second) {
-		return false
-	}
-	return true
+	maxExp := now + int64(maxLifetime/time.Second)
+
+	return exp > now && exp <= maxExp
 }
 
 // authKey extracts the rate-limit bucket key from a source address.
@@ -228,7 +224,7 @@ func computePassword(secret, username string) string {
 // raw `Password` string, and pion will internally key-derive it the
 // same way the server does in AuthHandler.
 func EphemeralCredential(secret, user string, expiry time.Time) (username, password string) {
-	username = fmt.Sprintf("%d:%s", expiry.Unix(), user)
+	username = strconv.FormatInt(expiry.Unix(), 10) + ":" + user
 	password = computePassword(secret, username)
 	return
 }

@@ -7,6 +7,7 @@ import (
 )
 
 func TestStorageUsage(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -32,6 +33,7 @@ func TestStorageUsage(t *testing.T) {
 }
 
 func TestStorageVacuum(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -42,6 +44,7 @@ func TestStorageVacuum(t *testing.T) {
 }
 
 func TestSettings_LogLevelRoundtrip(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -60,6 +63,7 @@ func TestSettings_LogLevelRoundtrip(t *testing.T) {
 }
 
 func TestSettings_HistoryRetentionValidation(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

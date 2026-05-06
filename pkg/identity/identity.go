@@ -24,9 +24,7 @@
 //     not yet registered in suiteRegistry.
 //  3. registerSuite(YourSuite) in init(). LookupSuite picks it up.
 //  4. Wire-format decoders that want to dispatch by suite-id call
-//     LookupSuite(version-byte). Currently no decoder embeds a
-//     separate suite-id; suite-aware wire formats are a future
-//     extension (see ROADMAP Phase 11.5 scope-cut + Phase 12+).
+//     LookupSuite(version-byte).
 package identity
 
 import (
@@ -123,7 +121,7 @@ func FromSeed(seed [SeedSize]byte) (*Identity, error) {
 	}
 	sum := h.Sum(nil)
 	copy(id.xPriv[:], sum[:curve25519.ScalarSize])
-	// X25519 clamping per RFC 7748 §5.
+	// X25519 clamping per RFC 7748.
 	id.xPriv[0] &= 248
 	id.xPriv[31] &= 127
 	id.xPriv[31] |= 64

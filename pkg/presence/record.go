@@ -22,12 +22,11 @@ type Capability uint32
 
 // Capability bits.
 //
-// Bit 5 (CapCanWebRTCMesh) is the Phase 10 marker: the node will
-// accept mesh-handshake envelopes (InnerMeshOffer/Answer/Candidate)
-// and runs a PeerManager filling K live DataChannels. Legacy
-// builds (Phase ≤ 9) do not set this bit; they continue to work
-// alongside Phase 10 nodes — the selector skips them, and a stray
-// mesh-handshake envelope that reaches a legacy node decodes as
+// Bit 5 (CapCanWebRTCMesh) marks a node willing to accept mesh-handshake
+// envelopes (InnerMeshOffer/Answer/Candidate) and run a PeerManager
+// filling K live DataChannels. Nodes that do not set this bit continue
+// to work alongside mesh-capable nodes — the selector skips them, and a
+// stray mesh-handshake envelope that reaches a non-mesh node decodes as
 // "unknown inner type" and is dropped at debug-log level.
 const (
 	CapPublicIP      Capability = 1 << 0
@@ -67,9 +66,9 @@ func (c Capability) String() string {
 // Record is a single presence advertisement, signed by the publisher.
 //
 // UptimeHint is a hint to clients about the publisher's continuous
-// uptime in seconds; used by ICE-server selection (design.md §5/§6) to
-// prefer stable volunteers. Advisory only — the publisher is trusted to
-// report honestly; clients should bound expectations.
+// uptime in seconds; used by ICE-server selection to prefer stable
+// volunteers. Advisory only — the publisher is trusted to report
+// honestly; clients should bound expectations.
 //
 // MaxRelaySlots advertises how many concurrent signaling-relay sessions
 // the publisher is willing to serve. 0 means "unlimited / not advertised".

@@ -107,21 +107,7 @@ func run() error {
 	// loop exits on ctx cancel — n.income is intentionally never
 	// closed (multi-sender + close panics on late writers).
 	drainDone := make(chan struct{})
-	go func() {
-		defer close(drainDone)
-		income := node.Income()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case inc, ok := <-income:
-				if !ok {
-					return
-				}
-				inc.Release()
-			}
-		}
-	}()
+	go drainIncome(ctx, node.Income(), drainDone)
 
 	runErr := node.Run(ctx)
 	<-drainDone
@@ -131,6 +117,22 @@ func run() error {
 	}
 
 	return nil
+}
+
+func drainIncome(ctx context.Context, income <-chan *network.Income, done chan<- struct{}) {
+	defer close(done)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case inc, ok := <-income:
+			if !ok {
+				return
+			}
+			inc.Release()
+		}
+	}
 }
 
 // turnSecretEnvVar is the environment variable consulted for the TURN

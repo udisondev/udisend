@@ -109,7 +109,7 @@ func TestAdversarial_GarbageContactsInResponse(t *testing.T) {
 
 	// Goroutine: decode incoming FIND_NODE / PING, reply with junk.
 	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+	defer cancel()
 	go runMaliciousResponder(ctx, mal, malNodeID)
 
 	// Honest peer pings malicious peer first, learns of it. Use a
@@ -233,7 +233,7 @@ func TestAdversarial_HonestPathSurvives(t *testing.T) {
 	t.Cleanup(func() { _ = mal.Close() })
 	malID, _ := identity.Generate(crand.Reader)
 	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+	defer cancel()
 	go runMaliciousResponder(ctx, mal, malID.Public().DestinationHash())
 
 	pctx, pcancel := context.WithTimeout(t.Context(), 1*time.Second)

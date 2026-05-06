@@ -350,7 +350,7 @@ func (c *Cluster) LookupAcross(t *testing.T) time.Duration {
 
 // LookupSuccessRate runs a single lookup from src for each target
 // (excluding src itself) and reports the fraction that found the
-// target's ID in the result set. Used by §7 lookup-correctness tests
+// target's ID in the result set. Used by lookup-correctness tests
 // where we expect <100% success (e.g. partial topologies, lossy
 // transports).
 func (c *Cluster) LookupSuccessRate(t *testing.T, src int, targets []int) float64 {

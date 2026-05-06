@@ -324,7 +324,16 @@ func (s *Server) requireSecondFactor(ctx context.Context, creds *storage.AuthCre
 			return fmt.Errorf("step-up: replay store unavailable: %w", err)
 		}
 		if ok {
-			if u, _ := strconv.ParseInt(used, 10, 64); u >= step {
+			// Fail closed on parse error: the documented contract for this
+			// gate is "a transient outage MUST NOT erase the replay window".
+			// Treating an unparseable persisted step as "step 0" silently
+			// turns the comparison into 0 >= step (always false), accepting
+			// the same code on repeat. Refuse instead.
+			u, perr := strconv.ParseInt(used, 10, 64)
+			if perr != nil {
+				return fmt.Errorf("step-up: replay store malformed: %w", perr)
+			}
+			if u >= step {
 				return errors.New("TOTP code already used")
 			}
 		}

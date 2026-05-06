@@ -76,10 +76,10 @@ func (sc *SigCluster) Service(i int) *signaling.Service {
 }
 
 // OverrideAddress redirects the resolver's record for peer dst to
-// point at peer via's transport address. Models the «A only knows B
-// through a relay» configuration described in design.md §4: A's
-// Connect(B) dials via's address, and via's signaling.Service must
-// have a Router that forwards the inbound envelope on to B.
+// point at peer via's transport address. Models the case where A only
+// knows B through a relay: A's Connect(B) dials via's address, and
+// via's signaling.Service must have a Router that forwards the inbound
+// envelope on to B.
 func (sc *SigCluster) OverrideAddress(t *testing.T, dst, via int) {
 	t.Helper()
 

@@ -1,11 +1,6 @@
 # Binaries
 /bin/
 /dist/
-/cmd/network/network
-/cmd/messenger/messenger
-/messenger
-/network
-/udisend
 
 # Task build cache
 /.task/

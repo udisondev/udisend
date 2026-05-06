@@ -45,3 +45,16 @@ func TestIdentityDecrypt_BadFormat(t *testing.T) {
 		}
 	}
 }
+
+// TestIdentityDecrypt_RejectsOversizedBlob guards against a future
+// import endpoint hooking decryptIdentity to attacker-controlled body
+// without enforcing its own size cap. argon2 + AEAD.Open both allocate
+// proportional to the payload — an unbounded blob is a trivial OOM.
+func TestIdentityDecrypt_RejectsOversizedBlob(t *testing.T) {
+	t.Parallel()
+	blob := make([]byte, maxIdentityImportBlob+1)
+	copy(blob, identityExportHeader)
+	if _, err := decryptIdentity(blob, "x"); err == nil {
+		t.Fatalf("oversized blob accepted; want ErrIdentityExportFormat")
+	}
+}
