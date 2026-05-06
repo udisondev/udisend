@@ -118,9 +118,9 @@ type PeerManagerConfig struct {
 type peerState int
 
 const (
-	stateDisconnected peerState = 0
-	stateConnecting   peerState = 1
-	stateConnected    peerState = 2
+	stateDisconnected peerState = iota
+	stateConnecting
+	stateConnected
 )
 
 func (s peerState) String() string {

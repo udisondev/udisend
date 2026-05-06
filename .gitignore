@@ -20,6 +20,9 @@ coverage.html
 *.swo
 .DS_Store
 
+# Claude Code local state
+.claude/
+
 # Local config / secrets
 .env
 .env.local
