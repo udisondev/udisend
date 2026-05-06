@@ -1,7 +1,13 @@
-// Package noise wraps github.com/flynn/noise with a pinned XK handshake
-// matching the design doc: ChaCha20-Poly1305 AEAD, BLAKE2b hashing, X25519
-// DH. Identity is supplied via pkg/identity — the static keypair maps
-// directly to the X25519 half of the udisend identity.
+// Package noise wraps github.com/flynn/noise with a pinned XK handshake:
+// ChaCha20-Poly1305 AEAD, BLAKE2b hashing, X25519 DH. The cipher-suite
+// pin is intentional — XK with a different DH curve is a different
+// handshake.
+//
+// The package does NOT import pkg/identity. Callers supply a
+// noise.StaticKeypair (re-export of flynn/noise's DHKey: raw 32-byte
+// private + public bytes); pkg/signaling bridges *identity.Identity
+// into this shape. External consumers using their own Suite0x01-
+// equivalent keypair material plug in the same way.
 //
 // XK is the right pattern for this project:
 //   - Initiator authenticates the responder via a known static key.

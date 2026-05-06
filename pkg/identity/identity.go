@@ -1,8 +1,32 @@
-// Package identity provides the cryptographic identity of a udisend user:
-// an Ed25519 signing key paired with an X25519 key-exchange key, derived
-// deterministically from a 32-byte master seed. The destination hash —
-// the user's network address — is the first 16 bytes of SHA-256 over the
-// concatenation of the two public keys.
+// Package identity provides the cryptographic identity of a udisend user
+// AND the Suite abstraction that lets external consumers plug in
+// alternative crypto-suites (post-quantum, different DH curve, etc.).
+//
+// The reference Suite0x01 bundles Ed25519 (signing) + X25519 (key
+// agreement) + ChaCha20-Poly1305 (AEAD, used by pkg/noise) +
+// BLAKE2b (hashing). Identity is the concrete Suite0x01 keypair:
+// derived deterministically from a 32-byte master seed; destination
+// hash is the first 16 bytes of SHA-256(ed_pub‖x_pub).
+//
+// Suite-agnostic boundary types (pkg/dht, pkg/presence, pkg/signaling,
+// pkg/webrtc) accept identity.PeerID instead of identity.Hash, and
+// identity.Local / identity.Remote instead of *identity.Identity /
+// identity.PublicIdentity. *identity.Identity satisfies Local;
+// identity.PublicIdentity satisfies Remote; identity.Hash satisfies
+// PeerID — so existing call sites using the concrete types continue
+// to compile.
+//
+// Adding a new Suite (e.g. Suite0x02 with PQ-hybrid keys):
+//
+//  1. Implement the abstract interfaces (PeerID, Signer, Verifier,
+//     KeyAgreement, Local, Remote).
+//  2. Provide a Suite implementation with ID() returning a fresh byte
+//     not yet registered in suiteRegistry.
+//  3. registerSuite(YourSuite) in init(). LookupSuite picks it up.
+//  4. Wire-format decoders that want to dispatch by suite-id call
+//     LookupSuite(version-byte). Currently no decoder embeds a
+//     separate suite-id; suite-aware wire formats are a future
+//     extension (see ROADMAP Phase 11.5 scope-cut + Phase 12+).
 package identity
 
 import (

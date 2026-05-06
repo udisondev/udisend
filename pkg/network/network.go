@@ -1,10 +1,24 @@
 // Package network is a reusable runtime that joins a DHT, runs a
 // signaling-relay (passive: shares the same UDP socket as the DHT so
 // peers can route through it while looking up other peers), optionally
-// serves embedded STUN/TURN volunteers, and exposes an opaque session
-// API for higher layers (e.g. internal/messenger). It encapsulates the
-// composition of pkg/transport, pkg/dht, pkg/signaling, pkg/presence,
-// pkg/stun and pkg/turn so consumers depend on this single package.
+// serves embedded STUN/TURN volunteers and a WebRTC mesh overlay, and
+// exposes an opaque session API for higher layers (e.g.
+// internal/messenger). It encapsulates the composition of
+// pkg/transport, pkg/dht, pkg/signaling, pkg/presence, pkg/stun,
+// pkg/turn, pkg/webrtc.
+//
+// Reusability boundary: this package is the udisend-specific assembly
+// of the lower-level pkg/* components. External consumers wanting only
+// some of the stack — e.g. "kademlia + signaling, no mesh" or "just
+// the WebRTC mesh manager" — should compose pkg/dht, pkg/signaling,
+// pkg/transport, pkg/webrtc directly; they are designed to stand on
+// their own (Phase 11 reusability work). Importing pkg/network pulls
+// in pion/webrtc transitively even when MeshEnabled is false; full
+// mesh-opt-out at the import-graph level is deferred follow-up work.
+//
+// All public boundary types accept identity.PeerID (Suite-agnostic);
+// internal storage stays in identity.Hash since this package owns the
+// peer-id values it tracks.
 package network
 
 import (
