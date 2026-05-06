@@ -1,0 +1,595 @@
+// Package storage is the SQLite layer for the messenger client. It owns
+// contacts (TOFU + verification), message history and the outbox. Pure-Go
+// driver (modernc.org/sqlite) keeps the messenger binary CGO-free.
+package storage
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	_ "embed"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"slices"
+	"time"
+
+	_ "modernc.org/sqlite"
+
+	"github.com/udisondev/udisend/pkg/identity"
+)
+
+//go:embed schema.sql
+var schema string
+
+// Store is the high-level wrapper around a *sql.DB that the application
+// layers see.
+type Store struct {
+	db *sql.DB
+}
+
+// Open opens (or creates) the database at path and ensures the schema.
+// PRAGMA hardening: WAL journal mode for concurrent readers + crash-safe
+// writers; synchronous=NORMAL for crash-durable writes without the FULL
+// fsync cost; foreign_keys=ON; busy_timeout=5000ms so concurrent writers
+// (Vacuum, history-prune, message append) wait rather than fail loud.
+//
+// SQLite PRAGMAs other than journal_mode are PER-CONNECTION. To make
+// the hardening apply globally we pin the database/sql pool to a
+// single connection (single-user messenger doesn't need parallel
+// writers, and WAL gives readers concurrency without extra
+// connections); without the pin, any pool-spawned second connection
+// would start with SQLite defaults and silently sidestep the hardening.
+func Open(ctx context.Context, path string) (*Store, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("storage: open: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("storage: ping: %w", err)
+	}
+	pragmas := []string{
+		`PRAGMA journal_mode=WAL`,
+		`PRAGMA synchronous=NORMAL`,
+		`PRAGMA foreign_keys=ON`,
+		`PRAGMA busy_timeout=5000`,
+	}
+	for _, p := range pragmas {
+		if _, err := db.ExecContext(ctx, p); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("storage: %s: %w", p, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("storage: schema: %w", err)
+	}
+	// Tighten file mode to owner-only. SQLite (modernc) creates the
+	// main DB *and* the WAL/SHM sidecars with the umask-default mode
+	// (typically 0o644), exposing identity keys, TOTP secrets, Argon2
+	// hashes, chat-history excerpts buffered in the journal, and
+	// shared-memory metadata to every local user on a multi-tenant box.
+	// `journal_mode=WAL` above is what triggers `<path>-wal` and
+	// `<path>-shm` creation, so we MUST chmod those alongside the main
+	// file or the WAL leak survives the main-file lockdown.
+	if path != "" && path != ":memory:" {
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			p := path + suffix
+			if err := os.Chmod(p, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+				_ = db.Close()
+				return nil, fmt.Errorf("storage: chmod %s: %w", p, err)
+			}
+		}
+	}
+	return &Store{db: db}, nil
+}
+
+// Close releases the underlying database handle.
+func (s *Store) Close() error { return s.db.Close() }
+
+// Contact is the persisted view of a peer.
+type Contact struct {
+	Hash        identity.Hash
+	Public      identity.PublicIdentity
+	Alias       string
+	Fingerprint string
+	Verified    bool
+	AddedAt     time.Time
+}
+
+// UpsertContact creates or updates a contact. If the contact already
+// exists with a different ed_pub/x_pub, returns ErrFingerprintChanged —
+// the caller (TOFU layer) decides what to do.
+func (s *Store) UpsertContact(ctx context.Context, c Contact) error {
+	row := s.db.QueryRowContext(ctx, "SELECT ed_pub, x_pub FROM contacts WHERE destination_hash = ?", c.Hash.String())
+	var existingEd, existingX []byte
+	err := row.Scan(&existingEd, &existingX)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		_, err := s.db.ExecContext(ctx, `
+			INSERT INTO contacts (destination_hash, ed_pub, x_pub, alias, fingerprint, verified, added_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, c.Hash.String(), []byte(c.Public.EdPub), c.Public.XPub[:], c.Alias, c.Fingerprint, boolInt(c.Verified), c.AddedAt.Unix())
+		return err
+	case err != nil:
+		return err
+	}
+	// Existing — fingerprint check.
+	xSlice := c.Public.XPub
+	if !bytes.Equal(existingEd, []byte(c.Public.EdPub)) || !bytes.Equal(existingX, xSlice[:]) {
+		return ErrFingerprintChanged
+	}
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE contacts SET alias = ?, fingerprint = ?, verified = ? WHERE destination_hash = ?
+	`, c.Alias, c.Fingerprint, boolInt(c.Verified), c.Hash.String())
+	return err
+}
+
+// ErrFingerprintChanged is returned when the stored ed_pub/x_pub differs
+// from the supplied ones.
+var ErrFingerprintChanged = errors.New("storage: fingerprint changed for known contact")
+
+// EnsureContact inserts a contact row only if no row exists for the hash.
+// Existing rows are left untouched — alias, verified flag and any other
+// user-edited state are not overwritten. Used by the runtime when an
+// unknown peer initiates a session toward us, so the contact survives a
+// page reload while waiting for the user to assign a local alias.
+func (s *Store) EnsureContact(ctx context.Context, c Contact) error {
+	row := s.db.QueryRowContext(ctx, "SELECT 1 FROM contacts WHERE destination_hash = ?", c.Hash.String())
+	var dummy int
+	err := row.Scan(&dummy)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO contacts (destination_hash, ed_pub, x_pub, alias, fingerprint, verified, added_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, c.Hash.String(), []byte(c.Public.EdPub), c.Public.XPub[:], c.Alias, c.Fingerprint, boolInt(c.Verified), c.AddedAt.Unix())
+
+	return err
+}
+
+// SetContactAlias updates the local alias of an existing contact. The
+// alias is purely a local label — it never crosses the wire — so this
+// touches the alias column and nothing else.
+func (s *Store) SetContactAlias(ctx context.Context, h identity.Hash, alias string) error {
+	res, err := s.db.ExecContext(ctx, "UPDATE contacts SET alias = ? WHERE destination_hash = ?", alias, h.String())
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrContactNotFound
+	}
+
+	return nil
+}
+
+// GetContact loads a contact by destination hash.
+func (s *Store) GetContact(ctx context.Context, h identity.Hash) (Contact, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT ed_pub, x_pub, alias, fingerprint, verified, added_at
+		FROM contacts WHERE destination_hash = ?
+	`, h.String())
+	var c Contact
+	c.Hash = h
+	var edPub, xPub []byte
+	var added int64
+	var verified int
+	if err := row.Scan(&edPub, &xPub, &c.Alias, &c.Fingerprint, &verified, &added); err != nil {
+		return Contact{}, err
+	}
+	c.Public.EdPub = edPub
+	copy(c.Public.XPub[:], xPub)
+	c.Verified = verified == 1
+	c.AddedAt = time.Unix(added, 0).UTC()
+	return c, nil
+}
+
+// ListContacts returns every contact, ordered by alias then hash.
+func (s *Store) ListContacts(ctx context.Context) ([]Contact, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT destination_hash, ed_pub, x_pub, alias, fingerprint, verified, added_at
+		FROM contacts ORDER BY alias, destination_hash
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Contact
+	for rows.Next() {
+		var c Contact
+		var hashStr string
+		var edPub, xPub []byte
+		var added int64
+		var verified int
+		if err := rows.Scan(&hashStr, &edPub, &xPub, &c.Alias, &c.Fingerprint, &verified, &added); err != nil {
+			return nil, err
+		}
+		h, err := identity.ParseHash(hashStr)
+		if err != nil {
+			slog.Debug("storage: skip row with malformed destination_hash", "hash", hashStr, "err", err)
+
+			continue
+		}
+		c.Hash = h
+		c.Public.EdPub = edPub
+		copy(c.Public.XPub[:], xPub)
+		c.Verified = verified == 1
+		c.AddedAt = time.Unix(added, 0).UTC()
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// SetContactVerified flips the verified flag (after out-of-band fingerprint check).
+func (s *Store) SetContactVerified(ctx context.Context, h identity.Hash, verified bool) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE contacts SET verified = ? WHERE destination_hash = ?", boolInt(verified), h.String())
+	return err
+}
+
+// DeleteContactOptions controls cascade behaviour for DeleteContact.
+type DeleteContactOptions struct {
+	// WipeHistory also removes every message whose peer matches the
+	// deleted contact. Outbox is always cleared regardless of this flag
+	// (queued sends to a deleted contact must never reach the wire).
+	WipeHistory bool
+}
+
+// ErrContactNotFound is returned by DeleteContact when no row matches the
+// supplied hash.
+var ErrContactNotFound = errors.New("storage: contact not found")
+
+// DeleteContact removes a contact along with its outbox items (always)
+// and, if opts.WipeHistory is set, its message history. Runs in a single
+// transaction so a partial failure leaves the store untouched.
+func (s *Store) DeleteContact(ctx context.Context, h identity.Hash, opts DeleteContactOptions) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, "DELETE FROM contacts WHERE destination_hash = ?", h.String())
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrContactNotFound
+	}
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM outbox WHERE peer_hash = ?", h.String()); err != nil {
+		return err
+	}
+
+	if opts.WipeHistory {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM messages WHERE peer_hash = ?", h.String()); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// MessageKind mirrors chat.MessageKind to avoid an import cycle. Defined
+// here as raw int8 so the schema can store it as integer.
+type MessageKind int
+
+// HistoryEntry is a row in the messages table.
+type HistoryEntry struct {
+	ID        int64
+	Peer      identity.Hash
+	Direction string // "in" / "out"
+	Kind      MessageKind
+	Body      []byte
+	Status    int
+	When      time.Time
+}
+
+// AppendMessage stores a chat message.
+func (s *Store) AppendMessage(ctx context.Context, e HistoryEntry) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO messages (peer_hash, direction, kind, body, status, ts)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, e.Peer.String(), e.Direction, int(e.Kind), e.Body, e.Status, e.When.UnixNano())
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// LoadHistory returns the most recent `limit` messages with peer, oldest first.
+func (s *Store) LoadHistory(ctx context.Context, peer identity.Hash, limit int) ([]HistoryEntry, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, peer_hash, direction, kind, body, status, ts
+		FROM messages WHERE peer_hash = ?
+		ORDER BY ts DESC LIMIT ?
+	`, peer.String(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []HistoryEntry
+	for rows.Next() {
+		var e HistoryEntry
+		var hashStr string
+		var ts int64
+		var kind int
+		if err := rows.Scan(&e.ID, &hashStr, &e.Direction, &kind, &e.Body, &e.Status, &ts); err != nil {
+			return nil, err
+		}
+		h, err := identity.ParseHash(hashStr)
+		if err != nil {
+			slog.Debug("storage: skip row with malformed destination_hash", "hash", hashStr, "err", err)
+
+			continue
+		}
+		e.Peer = h
+		e.Kind = MessageKind(kind)
+		e.When = time.Unix(0, ts).UTC()
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// SQL ordered DESC for "most recent N"; flip so the caller receives
+	// oldest-first which matches normal chat-history rendering.
+	slices.Reverse(entries)
+
+	return entries, nil
+}
+
+// MarkMessageStatus updates the delivery status field.
+func (s *Store) MarkMessageStatus(ctx context.Context, id int64, status int) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE messages SET status = ? WHERE id = ?", status, id)
+	return err
+}
+
+// OutboxItem is a queued message waiting for the peer to come back online.
+type OutboxItem struct {
+	ID          int64
+	Peer        identity.Hash
+	Payload     []byte
+	Attempts    int
+	LastAttempt time.Time
+	CreatedAt   time.Time
+}
+
+// MaxOutboxItemsPerPeer bounds how many pending items we will queue for
+// a single recipient. An offline contact accumulates messages here
+// while waiting for FlushOutboxOnce to find them online; without a cap
+// a chatty UI could grow the table without bound.
+const MaxOutboxItemsPerPeer = 1000
+
+// ErrOutboxFull is returned by AddOutboxItem when the cap is reached.
+var ErrOutboxFull = errors.New("storage: outbox full for peer")
+
+// AddOutboxItem queues a payload for `peer`. Refuses when the per-peer
+// cap is reached — the caller should surface the error so the sender
+// knows the message was not persisted.
+//
+// The cap is enforced atomically via INSERT ... SELECT ... WHERE
+// (SELECT COUNT < cap), so two concurrent QueueOutbox calls cannot
+// both observe count=N-1 and both insert. RowsAffected==0 indicates
+// the cap was hit.
+func (s *Store) AddOutboxItem(ctx context.Context, peer identity.Hash, payload []byte) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO outbox (peer_hash, payload, created_at)
+		SELECT ?, ?, ?
+		WHERE (SELECT COUNT(*) FROM outbox WHERE peer_hash = ?) < ?
+	`, peer.String(), payload, time.Now().Unix(), peer.String(), MaxOutboxItemsPerPeer)
+	if err != nil {
+		return 0, fmt.Errorf("storage: add outbox item: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return 0, ErrOutboxFull
+	}
+
+	return res.LastInsertId()
+}
+
+// PruneOutboxOlderThan deletes outbox rows with created_at older than
+// cutoff (unix seconds). Returns rows deleted. Used by messenger's
+// background pump to drop forever-pending items.
+func (s *Store) PruneOutboxOlderThan(ctx context.Context, cutoffUnix int64) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM outbox WHERE created_at < ?`, cutoffUnix)
+	if err != nil {
+		return 0, fmt.Errorf("storage: prune outbox: %w", err)
+	}
+	n, _ := res.RowsAffected()
+
+	return int(n), nil
+}
+
+// PendingForPeer lists outbox items for a single peer in FIFO order.
+func (s *Store) PendingForPeer(ctx context.Context, peer identity.Hash) ([]OutboxItem, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, peer_hash, payload, attempts, last_attempt, created_at
+		FROM outbox WHERE peer_hash = ? ORDER BY id ASC
+	`, peer.String())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OutboxItem
+	for rows.Next() {
+		var it OutboxItem
+		var hashStr string
+		var lastAttempt, created int64
+		if err := rows.Scan(&it.ID, &hashStr, &it.Payload, &it.Attempts, &lastAttempt, &created); err != nil {
+			return nil, err
+		}
+		h, err := identity.ParseHash(hashStr)
+		if err != nil {
+			slog.Debug("storage: skip row with malformed destination_hash", "hash", hashStr, "err", err)
+
+			continue
+		}
+		it.Peer = h
+		it.LastAttempt = time.Unix(lastAttempt, 0).UTC()
+		it.CreatedAt = time.Unix(created, 0).UTC()
+		items = append(items, it)
+	}
+	return items, rows.Err()
+}
+
+// AllOutboxPeers returns the list of peers that have queued outbox items.
+func (s *Store) AllOutboxPeers(ctx context.Context) ([]identity.Hash, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT DISTINCT peer_hash FROM outbox")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []identity.Hash
+	for rows.Next() {
+		var hashStr string
+		if err := rows.Scan(&hashStr); err != nil {
+			return nil, err
+		}
+		h, err := identity.ParseHash(hashStr)
+		if err != nil {
+			slog.Debug("storage: skip row with malformed destination_hash", "hash", hashStr, "err", err)
+
+			continue
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// DeleteOutboxItem removes an item once it has been successfully sent.
+func (s *Store) DeleteOutboxItem(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM outbox WHERE id = ?", id)
+	return err
+}
+
+// IncrementOutboxAttempts bumps the attempt counter and records the time.
+func (s *Store) IncrementOutboxAttempts(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE outbox SET attempts = attempts + 1, last_attempt = ? WHERE id = ?
+	`, time.Now().Unix(), id)
+	return err
+}
+
+// RecordSeenPeer remembers that we successfully reached `address`. Used by
+// the bootstrap layer to seed itself on subsequent runs without a CLI
+// --bootstrap flag. Timestamp is stored as unix nanos so adjacent
+// inserts within the same second can still be ordered.
+func (s *Store) RecordSeenPeer(ctx context.Context, address string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO seen_peers (address, last_seen, success_count) VALUES (?, ?, 1)
+		ON CONFLICT(address) DO UPDATE SET
+			last_seen = excluded.last_seen,
+			success_count = success_count + 1
+	`, address, time.Now().UnixNano())
+	return err
+}
+
+// SeenPeers returns up to `limit` cached bootstrap addresses, most recent
+// first. limit<=0 returns all.
+func (s *Store) SeenPeers(ctx context.Context, limit int) ([]string, error) {
+	q := "SELECT address FROM seen_peers ORDER BY last_seen DESC"
+	args := []any{}
+	if limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			return nil, err
+		}
+		out = append(out, addr)
+	}
+	return out, rows.Err()
+}
+
+// ForgetSeenPeer removes a cached bootstrap entry — used after repeated
+// dial failures so we stop wasting startup time on a dead address.
+func (s *Store) ForgetSeenPeer(ctx context.Context, address string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM seen_peers WHERE address = ?", address)
+	return err
+}
+
+// SeenPeersDiverse returns up to `limit` cached bootstrap addresses,
+// preferring diverse /24 IPv4 (and full IPv6) prefixes so the next
+// startup is harder to eclipse with a Sybil cluster colocated in one
+// subnet. Within each prefix the most-recent address wins; prefixes
+// are ordered by their freshest entry's last_seen.
+func (s *Store) SeenPeersDiverse(ctx context.Context, limit int) ([]string, error) {
+	all, err := s.SeenPeers(ctx, 0)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, limit)
+	for _, addr := range all {
+		key := subnetKey(addr)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, addr)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// subnetKey reduces an "ip:port" / "host:port" address to the prefix the
+// diverse-bootstrap filter should treat as a single neighbourhood. For
+// IPv4 — first three octets ("/24") rendered as "10.0.0". For IPv6 —
+// first 64 bits ("/64") rendered as "2001:db8::/64"-style hex. For
+// non-IP / unparsable addresses the host field itself is used.
+//
+// The returned string is only used as a map key, so any deterministic
+// representation works — but a readable one is friendlier when these
+// land in debug logs.
+func subnetKey(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return host
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return fmt.Sprintf("%d.%d.%d", v4[0], v4[1], v4[2])
+	}
+	v6 := ip.To16()
+
+	return fmt.Sprintf("%x:%x:%x:%x", v6[0:2], v6[2:4], v6[4:6], v6[6:8])
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}

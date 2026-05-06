@@ -1,67 +1,89 @@
 version: '3'
 
-# udisend dev tasks. Run `task --list` to see available targets.
-# https://taskfile.dev
+# udisend dev tasks. `task --list` shows everything; `task --summary <name>`
+# prints the full description. https://taskfile.dev
+#
+# Idioms used here:
+#   - colon-namespacing for related tasks (test:race, test:integration,
+#     run:alice, …) so `task --list` groups them.
+#   - wildcard tasks (run:*, reset:*) for parameterised invocations:
+#     one definition handles all peer names.
+#   - sources/generates on `build` so unchanged source skips the rebuild.
+#   - sh-evaluated vars derive deterministic UDP/HTTP ports from the
+#     peer name, so `task run:alice` and `task run:bob` map to stable
+#     addresses without hard-coding three near-identical tasks.
 
 vars:
   PKG: ./...
   BIN_DIR: ./bin
+  CONFIG_DIR: '{{.HOME}}/.config/udisend'
+  RENDEZVOUS_NAME: alice
+  RENDEZVOUS_PORT: 9100
 
 tasks:
   default:
     desc: Run vet + race tests + lint
-    deps: [vet, test-race, lint]
+    deps: [vet, test:race, lint]
+
+  # ─── Build / lint / hygiene ──────────────────────────────────────
 
   build:
-    desc: Build all binaries into ./bin
+    desc: Build all binaries into ./bin (incremental — skipped if sources unchanged)
+    sources:
+      - 'cmd/**/*.go'
+      - 'internal/**/*'
+      - 'pkg/**/*.go'
+      - go.mod
+      - go.sum
+    generates:
+      - '{{.BIN_DIR}}/messenger'
+      - '{{.BIN_DIR}}/network'
     cmds:
       - mkdir -p {{.BIN_DIR}}
-      - go build -o {{.BIN_DIR}}/network ./cmd/network
       - go build -o {{.BIN_DIR}}/messenger ./cmd/messenger
+      - go build -o {{.BIN_DIR}}/network   ./cmd/network
+
+  build:reproducible:
+    desc: |
+      Reproducible release build. Strips per-build paths (-trimpath), drops
+      the embedded VCS stamp (-buildvcs=false) and pins ldflags so two
+      checkouts of the same commit produce byte-identical binaries.
+      Optional VERSION variable is baked into the linker via -X main.version.
+    vars:
+      OS: '{{.OS | default "linux"}}'
+      ARCH: '{{.ARCH | default "amd64"}}'
+      VERSION: '{{.VERSION | default "dev"}}'
+      OUT: '{{.BIN_DIR}}/{{.OS}}_{{.ARCH}}'
+    cmds:
+      - mkdir -p {{.OUT}}
+      - GOOS={{.OS}} GOARCH={{.ARCH}} CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version={{.VERSION}}" -o {{.OUT}}/messenger ./cmd/messenger
+      - sha256sum {{.OUT}}/messenger > {{.OUT}}/SHA256SUMS
+
+  release:sign:
+    desc: |
+      Sign the SHA256SUMS file in {{.BIN_DIR}}/{{.OS}}_{{.ARCH}}/ using
+      `minisign -Sm`. Requires a minisign secret key at $MINISIGN_KEY (or
+      the default ~/.minisign/minisign.key). Two flows: minisign (default,
+      simple, no infra) or cosign (set COSIGN=1). Run after build:reproducible.
+    vars:
+      OS: '{{.OS | default "linux"}}'
+      ARCH: '{{.ARCH | default "amd64"}}'
+      OUT: '{{.BIN_DIR}}/{{.OS}}_{{.ARCH}}'
+    cmds:
+      - |
+        if [ "{{.COSIGN}}" = "1" ]; then
+          cosign sign-blob --yes {{.OUT}}/SHA256SUMS > {{.OUT}}/SHA256SUMS.cosig
+        else
+          minisign -Sm {{.OUT}}/SHA256SUMS ${MINISIGN_KEY:+-s "$MINISIGN_KEY"}
+        fi
 
   vet:
     desc: go vet
     cmds:
       - go vet {{.PKG}}
 
-  test:
-    desc: Run unit tests (default build, no integration/e2e)
-    cmds:
-      - go test {{.PKG}}
-
-  test-race:
-    desc: Run unit tests with race detector
-    cmds:
-      - go test -race {{.PKG}}
-
-  test-integration:
-    desc: Run integration tests (build tag `integration`)
-    cmds:
-      - go test -race -tags=integration {{.PKG}}
-
-  test-e2e:
-    desc: Run end-to-end tests (build tag `e2e`)
-    cmds:
-      - go test -race -tags=e2e {{.PKG}}
-
-  test-fuzz:
-    desc: Run fuzz tests for the given package (use `task test-fuzz -- ./pkg/identity`)
-    cmds:
-      - go test -run=^$ -fuzz=. -fuzztime=30s {{.CLI_ARGS}}
-
-  cover:
-    desc: Run tests with coverage and write coverage.out
-    cmds:
-      - go test -race -coverprofile=coverage.out {{.PKG}}
-      - go tool cover -func=coverage.out | tail -n 1
-
-  bench:
-    desc: Run all benchmarks
-    cmds:
-      - go test -run=^$ -bench=. -benchmem {{.PKG}}
-
   lint:
-    desc: Run golangci-lint (must be installed separately — see https://golangci-lint.run)
+    desc: golangci-lint (install separately — https://golangci-lint.run)
     cmds:
       - golangci-lint run {{.PKG}}
 
@@ -74,3 +96,139 @@ tasks:
     desc: Remove build artefacts and coverage
     cmds:
       - rm -rf {{.BIN_DIR}} coverage.out coverage.html
+
+  # ─── Tests ───────────────────────────────────────────────────────
+
+  test:
+    desc: Unit tests (default build tag set, no integration/e2e)
+    cmds:
+      - go test {{.PKG}}
+
+  test:race:
+    desc: Unit tests with -race
+    cmds:
+      - go test -race {{.PKG}}
+
+  test:integration:
+    desc: Integration tests (build tag `integration`)
+    cmds:
+      - go test -race -tags=integration {{.PKG}}
+
+  test:e2e:
+    desc: End-to-end tests (build tag `e2e`)
+    cmds:
+      - go test -race -tags=e2e {{.PKG}}
+
+  test:fuzz:
+    desc: 'Fuzz a package — usage: task test:fuzz -- ./pkg/identity'
+    cmds:
+      - go test -run=^$ -fuzz=. -fuzztime=30s {{.CLI_ARGS}}
+
+  cover:
+    desc: Coverage report (writes coverage.out, prints total)
+    cmds:
+      - go test -race -coverprofile=coverage.out {{.PKG}}
+      - go tool cover -func=coverage.out | tail -n 1
+
+  bench:
+    desc: All benchmarks
+    cmds:
+      - go test -run=^$ -bench=. -benchmem {{.PKG}}
+
+  # ─── Demo: spawn a named messenger ───────────────────────────────
+  #
+  # Each `task run:<name>` boots one messenger that participates in the
+  # DHT, publishes presence and serves the browser UI on its own loopback
+  # port. Three-window demo:
+  #
+  #     task run:alice          # rendezvous on 9100/7100
+  #     task run:bob            # bootstraps from alice; 9101/7101
+  #     task run:carol          # bootstraps from alice; 9102/7102
+  #
+  # Names other than alice/bob/carol get a deterministic port derived
+  # from the name (`cksum`-based hash) and bootstrap from alice by
+  # default. Override anything via task vars:
+  #
+  #     task run:eve UDP_PORT=9200 HTTP_PORT=7200 BOOTSTRAP=127.0.0.1:9101
+
+  run:*:
+    desc: 'Run a messenger by name (e.g. `task run:alice`). See header for the convention.'
+    deps: [build]
+    vars:
+      NAME: '{{index .MATCH 0}}'
+      HOME_DIR: '{{.CONFIG_DIR}}/{{.NAME}}'
+      UDP_PORT:
+        sh: |
+          case '{{.NAME}}' in
+            {{.RENDEZVOUS_NAME}}) echo {{.RENDEZVOUS_PORT}} ;;
+            bob)   echo 9101 ;;
+            carol) echo 9102 ;;
+            *)     printf '%s' '{{.NAME}}' | cksum | awk '{ print 9200 + ($1 % 700) }' ;;
+          esac
+      HTTP_PORT:
+        sh: |
+          case '{{.NAME}}' in
+            {{.RENDEZVOUS_NAME}}) echo 7100 ;;
+            bob)   echo 7101 ;;
+            carol) echo 7102 ;;
+            *)     printf '%s' '{{.NAME}}' | cksum | awk '{ print 7200 + ($1 % 700) }' ;;
+          esac
+      # Default: bootstrap from the rendezvous unless I AM the rendezvous,
+      # or the caller passed BOOTSTRAP=… explicitly.
+      BOOTSTRAP_FLAG: '{{ if .BOOTSTRAP }}--bootstrap {{.BOOTSTRAP}}{{ else if ne .NAME .RENDEZVOUS_NAME }}--bootstrap 127.0.0.1:{{.RENDEZVOUS_PORT}}{{ end }}'
+    cmds:
+      - mkdir -p {{.HOME_DIR}}
+      - >-
+        {{.BIN_DIR}}/messenger
+        --identity {{.HOME_DIR}}.key
+        --storage  {{.HOME_DIR}}
+        --listen 127.0.0.1:{{.UDP_PORT}}
+        --http   127.0.0.1:{{.HTTP_PORT}}
+        {{.BOOTSTRAP_FLAG}}
+        -v
+
+  run:network:
+    desc: |
+      Run a public udisend node (relay + bootstrap, optional STUN/TURN).
+      Intended for VPS deployments — no browser UI, no chat history,
+      just DHT participation and signaling relay.
+
+      Optional vars:
+        LISTEN      UDP listen address (default :9000)
+        PUBLIC_IP   advertise STUN/TURN on this IP (omit to skip)
+        TURN_SECRET shared secret for TURN long-term credentials (omit to disable TURN)
+        BOOTSTRAP   comma-separated peers to seed the routing table (host:port,…); DNS names work
+        IDENTITY    path to identity seed file (default ~/.config/udisend/network.key)
+
+      Example:
+        task run:network LISTEN=:9000 PUBLIC_IP=203.0.113.7 TURN_SECRET=$(openssl rand -hex 32)
+    deps: [build]
+    vars:
+      LISTEN: '{{.LISTEN | default ":9000"}}'
+      IDENTITY: '{{.IDENTITY | default (printf "%s/network.key" .CONFIG_DIR)}}'
+      PUBLIC_IP_FLAG: '{{ if .PUBLIC_IP }}--public-ip {{.PUBLIC_IP}}{{ end }}'
+      TURN_FLAG:      '{{ if .TURN_SECRET }}--turn-secret {{.TURN_SECRET}}{{ end }}'
+      BOOTSTRAP_FLAG: '{{ if .BOOTSTRAP }}{{ range $a := splitList "," .BOOTSTRAP }} --bootstrap {{$a}}{{ end }}{{ end }}'
+    cmds:
+      - >-
+        {{.BIN_DIR}}/network
+        --identity {{.IDENTITY}}
+        --listen {{.LISTEN}}
+        {{.PUBLIC_IP_FLAG}}
+        {{.TURN_FLAG}}
+        {{.BOOTSTRAP_FLAG}}
+        -v
+
+  reset:*:
+    desc: 'Wipe a peer''s identity + storage (e.g. `task reset:bob`)'
+    vars:
+      NAME: '{{index .MATCH 0}}'
+    prompt: 'This deletes {{.CONFIG_DIR}}/{{.NAME}}{,.key}. Continue?'
+    cmds:
+      - rm -rf '{{.CONFIG_DIR}}/{{.NAME}}' '{{.CONFIG_DIR}}/{{.NAME}}.key'
+
+  reset:all:
+    desc: Wipe ALL local messenger identities and storage
+    prompt: 'This deletes everything under {{.CONFIG_DIR}}. Continue?'
+    cmds:
+      - rm -rf '{{.CONFIG_DIR}}'

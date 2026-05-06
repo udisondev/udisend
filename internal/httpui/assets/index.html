@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>udisend</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body class="theme-dark">
+  <div class="app" id="app">
+    <!-- ─────────────── SIDEBAR ─────────────── -->
+    <aside class="sidebar" id="sidebar">
+      <header class="sidebar-top">
+        <button class="icon-btn ghost" id="menu-btn" title="Menu" aria-label="Menu">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+            <path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <div class="search-wrap">
+          <svg class="search-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/>
+            <path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          <input class="search" id="search-input" type="text" placeholder="Search" autocomplete="off" />
+          <button class="search-clear" id="search-clear" hidden aria-label="Clear">×</button>
+        </div>
+      </header>
+
+      <div class="me-card" id="me-card">
+        <div class="avatar avatar-me" id="my-avatar">·</div>
+        <div class="me-info">
+          <div class="me-row">
+            <span class="me-name" id="my-alias">Loading…</span>
+            <span class="status-dot" id="conn-status" data-state="connecting" title="connecting…"></span>
+          </div>
+          <div class="me-sub">
+            <code class="me-hash" id="my-hash" title="My destination hash"></code>
+          </div>
+          <div class="me-fp">
+            <span id="my-fingerprint" title="Safety number"></span>
+            <span class="me-addr" id="my-address" title="Network address"></span>
+          </div>
+        </div>
+        <button class="icon-btn ghost" id="logout-btn" hidden title="Sign out" aria-label="Sign out">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <button class="icon-btn ghost" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z" fill="currentColor"/>
+          </svg>
+        </button>
+      </div>
+
+      <ul id="contacts" class="chat-list" role="list"></ul>
+
+      <div class="chat-list-empty" id="chat-list-empty" hidden>
+        <div class="chat-list-empty-icon">📭</div>
+        <p>No chats yet</p>
+        <span>Tap the button below to add a contact.</span>
+      </div>
+
+      <button class="fab" id="add-contact-btn" title="Add contact" aria-label="Add contact">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+          <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </aside>
+
+    <!-- ─────────────── MAIN ─────────────── -->
+    <main class="main">
+      <section id="empty-state" class="empty-state">
+        <div class="empty-bubble">
+          <div class="empty-illustration" aria-hidden="true">
+            <svg viewBox="0 0 64 64" width="64" height="64">
+              <circle cx="32" cy="32" r="30" fill="currentColor" opacity="0.12"/>
+              <path d="M20 24h24a4 4 0 0 1 4 4v12a4 4 0 0 1-4 4H30l-7 6v-6h-3a4 4 0 0 1-4-4V28a4 4 0 0 1 4-4Z"
+                    fill="currentColor" opacity="0.85"/>
+            </svg>
+          </div>
+          <h2>Select a chat to start messaging</h2>
+          <p>Choose a contact from the sidebar — or add a new one with the <strong>+</strong> button below it.</p>
+        </div>
+      </section>
+
+      <section id="chat-pane" class="chat" hidden>
+        <header class="chat-header">
+          <button class="icon-btn ghost back-btn" id="chat-back" title="Back" aria-label="Back to chat list">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+              <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <button class="chat-peer-btn" id="chat-peer-btn" title="Peer info">
+            <div class="avatar" id="chat-peer-avatar">·</div>
+            <div class="chat-peer">
+              <div class="chat-peer-name" id="chat-peer-alias">peer</div>
+              <div class="chat-peer-status" id="chat-peer-status">offline</div>
+            </div>
+          </button>
+          <div class="chat-actions">
+            <button class="icon-btn" id="call-btn" title="Start a call" aria-label="Start a call">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                <path d="M5 4h3l2 5-2 1a12 12 0 0 0 6 6l1-2 5 2v3a2 2 0 0 1-2 2A17 17 0 0 1 3 6a2 2 0 0 1 2-2Z" fill="currentColor"/>
+              </svg>
+            </button>
+            <button class="icon-btn" id="verify-btn" title="Verify safety number" aria-label="Verify safety number">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                <path d="M12 2 4 5v6c0 5 3.5 9.5 8 11 4.5-1.5 8-6 8-11V5l-8-3Z" fill="currentColor" opacity="0.9"/>
+                <path d="m9 12 2 2 4-4" stroke="var(--bg-chat)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+              </svg>
+            </button>
+            <button class="icon-btn danger" id="delete-btn" title="Remove contact" aria-label="Remove contact">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                <path d="M5 7h14M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M7 7l1 12a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2l1-12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="chat-peer-hash-row" id="chat-peer-hash" hidden></div>
+
+        <div id="chat-history" class="chat-history"></div>
+
+        <div class="chat-composer">
+          <label class="icon-btn ghost file-btn" id="file-btn" title="Attach a file" aria-label="Attach a file">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+              <path d="M21 12.5 12.5 21a5.5 5.5 0 0 1-7.78-7.78l9-9a3.5 3.5 0 1 1 4.95 4.95l-9 9a1.5 1.5 0 0 1-2.12-2.12l8.3-8.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <input id="file-input" type="file" hidden />
+          </label>
+          <div class="composer-textarea-wrap">
+            <textarea id="msg-input" class="msg-input" placeholder="Message" rows="1" autocomplete="off"></textarea>
+          </div>
+          <button class="icon-btn ghost emoji-btn" id="emoji-btn" title="Emoji" aria-label="Emoji">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>
+              <circle cx="9" cy="10" r="1.2" fill="currentColor"/>
+              <circle cx="15" cy="10" r="1.2" fill="currentColor"/>
+              <path d="M8.5 14.5a4 4 0 0 0 7 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button id="send-btn" class="send-btn" title="Send" aria-label="Send">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+              <path d="m3 11 18-8-8 18-2-7-8-3Z" fill="currentColor"/>
+            </svg>
+          </button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ─────────────── CALL MODAL ─────────────── -->
+  <div id="call-root" data-state="idle" data-mode="floating">
+    <div class="call-backdrop"></div>
+    <div class="call-window" role="dialog" aria-modal="true" aria-label="Call">
+      <div class="call-header">
+        <button class="call-icon" id="call-minimize" title="Minimize" aria-label="Minimize">▁</button>
+        <div class="call-peer">
+          <div class="call-peer-name" id="call-peer-name">peer</div>
+          <div class="call-peer-status" id="call-peer-status">Calling…</div>
+        </div>
+        <button class="call-icon" id="call-fullscreen" title="Fullscreen" aria-label="Fullscreen">⛶</button>
+      </div>
+      <div class="call-stage">
+        <video id="call-remote-video" autoplay playsinline></video>
+        <video id="call-local-video" class="call-local-pip" autoplay muted playsinline></video>
+        <div class="call-prering" id="call-prering">
+          <div class="call-pulse"></div>
+          <div class="call-prering-label" id="call-prering-label">Calling…</div>
+        </div>
+      </div>
+      <div class="call-actions">
+        <button class="call-btn danger"  id="call-cancel"  data-show="outgoing">Cancel</button>
+        <button class="call-btn danger"  id="call-decline" data-show="incoming">Decline</button>
+        <button class="call-btn primary" id="call-accept"  data-show="incoming">Accept</button>
+        <button class="call-btn neutral" id="call-mute"    data-show="active" title="Mute mic">🎙</button>
+        <button class="call-btn neutral" id="call-cam"     data-show="active" title="Toggle camera">📷</button>
+        <button class="call-btn danger"  id="call-hangup"  data-show="active">End</button>
+      </div>
+    </div>
+
+    <button class="call-pip" id="call-pip-restore" title="Restore">
+      <video id="call-pip-video" autoplay muted playsinline></video>
+      <span class="call-pip-label">in call</span>
+    </button>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast-root" aria-live="polite"></div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

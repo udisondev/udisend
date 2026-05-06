@@ -1,13 +1,11 @@
-# golangci-lint configuration for udisend.
-# Install: https://golangci-lint.run/usage/install/
-# Run: task lint  (or `golangci-lint run ./...`)
+version: "2"
 
 run:
   timeout: 5m
   go: "1.26"
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - govet
     - staticcheck
@@ -17,51 +15,55 @@ linters:
     - ineffassign
     - unused
     - misspell
+  settings:
+    govet:
+      enable-all: true
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-declaration
+        - name: var-naming
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+    gosec:
+      excludes:
+        - G104
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+      - path: cmd/.*/main\.go
+        linters:
+          - revive
+
+formatters:
+  enable:
     - gofmt
     - goimports
-
-linters-settings:
-  govet:
-    enable-all: true
-  revive:
-    rules:
-      - name: blank-imports
-      - name: context-as-argument
-      - name: context-keys-type
-      - name: error-return
-      - name: error-strings
-      - name: error-naming
-      - name: exported
-      - name: if-return
-      - name: increment-decrement
-      - name: var-declaration
-      - name: var-naming
-      - name: package-comments
-      - name: range
-      - name: receiver-naming
-      - name: time-naming
-      - name: unexported-return
-      - name: indent-error-flow
-      - name: errorf
-      - name: empty-block
-      - name: superfluous-else
-      - name: unused-parameter
-      - name: unreachable-code
-      - name: redefines-builtin-id
-  gosec:
-    excludes:
-      - G104 # we wrap with errors.Join / %w; let errcheck enforce checks
-  goimports:
-    local-prefixes: github.com/udisondev/udisend
+  settings:
+    goimports:
+      local-prefixes: github.com/udisondev/udisend
 
 issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - gosec
-        - errcheck
-    - path: cmd/.*/main\.go
-      linters:
-        - revive
   max-issues-per-linter: 0
   max-same-issues: 0

@@ -1,8 +1,9 @@
 # Binaries
 /bin/
 /dist/
-/cmd/network/network
-/cmd/messenger/messenger
+
+# Task build cache
+/.task/
 
 # Test / coverage / profiling
 coverage.out
