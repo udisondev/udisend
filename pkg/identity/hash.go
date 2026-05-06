@@ -13,6 +13,11 @@ var ErrInvalidHash = errors.New("identity: invalid destination hash")
 // String renders the hash as lowercase hex (32 chars).
 func (h Hash) String() string { return hex.EncodeToString(h[:]) }
 
+// Bytes returns h as a fixed-size array. This satisfies the PeerID
+// interface declared in suite.go and lets callers use Hash wherever a
+// suite-agnostic peer identifier is expected.
+func (h Hash) Bytes() [HashSize]byte { return h }
+
 // MarshalText implements encoding.TextMarshaler so Hash values round-trip
 // through JSON / TOML / SQLite text columns without a custom codec at the
 // call site.

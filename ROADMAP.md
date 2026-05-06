@@ -28,6 +28,7 @@
 | 8 | Hardening & MVP release | 🌙 partial | 2026-05-02 | — |
 | 9 | Threat-model audit (protocol-slice) | ✅ done | 2026-05-04 | 2026-05-05 |
 | 10 | Inter-node WebRTC mesh | ✅ done | 2026-05-05 | 2026-05-05 |
+| 11 | `pkg/` reusability refactor | 🚧 in progress | 2026-05-06 | — |
 
 ---
 
@@ -510,6 +511,76 @@ Acceptance: `udisend run` без preconditions работает (loopback); `udi
 
 ---
 
+## Phase 11 — `pkg/` reusability refactor (cipher-suite extensibility)
+
+**Контекст и мотивация.** Reusability-аудит pkg/ показал: 7/15 пакетов уже drop-in (`bootstrap`, `crypto`, `ratelimit`, `stun`, `tailscale`, `transport`, `wire`), 8 остальных (`identity`, `dht`, `noise`, `presence`, `signaling`, `turn`, `webrtc`, `network`) тащат udisend-specific coupling: hardcoded тип `identity.Hash` как PeerID, `*identity.Identity` как обязательный DH/Signer, hardcoded строки (`"udisend-x25519-key"` в KDF, `"udisend"` realm в TURN). Параллельно — **уже задокументированная**, но не реализованная в коде модель crypto-agility (`p2p-messenger-design.md` §"Crypto agility через identifiers"): wire-форматы несут version-byte (`wire.CurrentVersion=0x01`, `presence.Record v2`, `signaling.Envelope v2`, `webrtc.SignedSDP v1`), который должен мапиться на `algorithm_id` криптосуиты. Сейчас каждый декодер просто проверяет `version == 0x01` и идёт по hardcoded ветке — расширения суиты невозможны без переписывания всех декодеров.
+
+**Цель:** ввести единое понятие **`Suite`** — combinator (Signer + KeyAgreement + AEAD + Hash + PeerID-format) с `algorithm_id byte`, мапящимся в существующие wire version-byte. `Suite0x01 = Ed25519 + X25519 + ChaCha20-Poly1305 + BLAKE2b` (текущий стек) становится одной из реализаций; интерфейс позволяет добавить `Suite0x02` (например, Ed25519+Kyber для post-quantum hybrid) без изменения кода консьюмеров. Это **одновременно** решает обе задачи:
+- разблокирует crypto-agility для дальнейших фаз;
+- разблокирует переиспользование `pkg/*` (внешний консьюмер передаёт свой Suite или PeerID — не вынужден принимать udisend-specific типы).
+
+**Deliverable:**
+- `pkg/identity` экспортирует интерфейсы `Suite`, `Signer`/`Verifier`, `KeyAgreement`, `PeerID`. `Suite0x01` — reference implementation; `*identity.Identity` имплементирует `Signer`+`KeyAgreement` для `Suite0x01`, `identity.Hash` имплементирует `PeerID`.
+- `pkg/{dht,noise,presence,signaling,webrtc}` в публичном API оперируют интерфейсами `PeerID` / `Suite`, не конкретными типами.
+- Wire-уровневый registry: `suite.Registry` мапит `algorithm_id byte ↔ Suite`. Декодеры (`presence.UnmarshalRecord`, `signaling.DecodeEnvelope`, `webrtc.UnmarshalSignedSDP`) выбирают суиту по version-byte; неизвестный version → `ErrUnknownSuite` (расширение существующего `ErrUnknownVersion`).
+- Hardcoded строки (`"udisend-x25519-key"` KDF context, TURN `Realm`) — в Config / Suite-конструкторе с дефолтами для backward compat.
+- `pkg/network.Config` — mesh/webrtc/presence как опциональные подсистемы через factory-интерфейсы (не транзитивные импорты, если фича выключена).
+- Каждый `pkg/*/doc.go` описывает контракт + мини-пример.
+
+**Scope guard:** это **рефакторинг без изменения функциональности и wire-формата**. Wire version-byte = `0x01` остаётся единственным используемым (Suite0x02 не добавляем — это будущая фаза). Все существующие тесты (unit + e2e + topotest) зелёные после каждого sub-stage. Существующие identity-файлы и DHT-records читаются как раньше.
+
+### Sub-stages (TDD: failing test → minimal code → refactor)
+
+- [x] **11.1 `Suite` интерфейс + Suite0x01 reference impl** — `pkg/identity/suite.go`: интерфейсы `PeerID` (`Bytes() [16]byte; String() string`), `Signer`/`Verifier` (`[]byte` сигнатуры — abstract over Suite0x01's fixed-size types), `KeyAgreement` (`AgreementPublic() []byte`; `Agree(remote []byte) ([]byte, error)`), bundle-интерфейсы `Local` (`Signer + KeyAgreement + Remote() Remote`) и `Remote` (`Verifier + PeerID() PeerID + AgreementPublic() []byte + Marshal() []byte`), `Suite` (`ID() byte; Generate(rand io.Reader) (Local, error); ParseRemote(blob []byte) (Remote, error)`). Registry `LookupSuite(byte)` + `ErrUnknownSuite`. **`pkg/identity/suite01.go`**: `Suite0x01` через init() регистрируется под id=0x01 (=`PublicMarshalVersion`); адаптеры `localV1`/`remoteV1` оборачивают существующие `*Identity`/`PublicIdentity` без изменения их API (escape-hatch методы `.Identity()`/`.PublicIdentity()` для миграции в 11.2+). `Hash.Bytes()` добавлен в `hash.go`. **`pkg/identity/suite_test.go`** (16 тест-кейсов, все `-race` зелёные): Sign/Verify roundtrip через интерфейсы, ECDH-симметрия, deterministic-from-seed, **PeerID via Suite ≡ legacy DestinationHash** (wire-compat доказательство), `ParseRemote` round-trip + 4 reject-кейса, `Agree` отказывается от remote≠32 байт, `AgreementPublic` defensive-copy не алиасится, `LookupSuite(0x01)` known + 4 unknown-кейса. Existing identity tests/bench/fuzz не затронуты — purely additive change. Commit `phase 11.1: Suite interface + Suite0x01 reference implementation`.
+
+- [ ] **11.2 `pkg/identity` — `Identity` как Suite0x01-implementation** — `*identity.Identity` явно implements `Signer`+`KeyAgreement` (compile-time assertions). `identity.Hash` реализует `PeerID`. `Generate`/`FromSeed` теперь expressible через `Suite0x01.NewIdentity`. Старые конструкторы (`identity.Generate`, `identity.FromSeed`, `(*Identity).Sign`, etc.) **остаются** как convenience-обёртки над Suite0x01 — backward compat для текущего internal/-кода. Тесты: roundtrip identity файлов из старых тестовых данных читается без изменений; `Suite0x01.NewIdentity(rand) → (Signer, KA)` даёт идентичный wire-формат с `Identity.MarshalBinary`.
+
+- [ ] **11.3 `pkg/dht` — параметризация по `PeerID`** — публичный API (`RoutingTable`, `Store`, `Client`, `FindNode`, `FindValue`, `NodeID`) принимает `PeerID` вместо `identity.Hash`. Внутренние ключи k-buckets — `[16]byte` (KadID), извлекаются через `PeerID.Bytes()`. Тесты `pkg/dht/...` адаптируем; новый тест: `dht.New` собирается с fake-PeerID (произвольная реализация интерфейса). Acceptance: `go test -race ./pkg/dht/... ./internal/...` зелёный.
+
+- [ ] **11.4 `pkg/noise` — параметризация по `Signer`/`KeyAgreement`** — `NewSession(local Signer + KA, remote Verifier + KA, ...)` вместо `*identity.Identity`. Cipher-suite внутри Noise (ChaCha20-Poly1305 + BLAKE2b) тоже берётся из `Suite` (для Suite0x01 — те же значения). Acceptance: `pkg/noise` тесты зелёные; `signaling.Channel` (главный потребитель noise) пересобран на новый API без поведенческих изменений.
+
+- [ ] **11.5 `pkg/presence` + `pkg/signaling` — параметризация + Suite registry** — `presence.Cache`/`Publisher`/`Observer` оперируют `PeerID`; storage backend через интерфейс (не hard-import `pkg/dht`). `signaling.Service` принимает `Router` interface (минимальный contract: `LookupClosest(target [16]byte) []PeerID`). **Главное:** `presence.UnmarshalRecord` и `signaling.DecodeEnvelope` теперь читают version-byte и достают Suite через `suite.Registry.Get(version) (Suite, error)`. Сейчас registry знает только `0x01 → Suite0x01`; неизвестный version → `ErrUnknownSuite` (wraps `ErrUnknownVersion` для existing assertions). Тесты: existing payloads с version=0x01 читаются как раньше; payload с version=0xFF → `ErrUnknownSuite`. Acceptance: `pkg/presence`, `pkg/signaling` тесты зелёные; `pkg/network` собирается с новыми сигнатурами.
+
+- [ ] **11.6 `pkg/webrtc` — параметризация + SignedSDP через Suite** — `MeshTransport.Connect(ctx, peer PeerID)`, `PeerSelector.SelectPeers() []PeerID`. `SignedSDP.Sign/Verify` берёт Signer/Verifier из Suite (через version-byte SignedSDP). `PeerSession.peerHash` → `peer PeerID`. Acceptance: `pkg/webrtc` тесты зелёные; `pkg/network/composite.go` + `dhtMeshSelector` адаптированы.
+
+- [ ] **11.7 Configurable strings** — `Suite0x01.Config{ KDFContext: "udisend-x25519-key" }` с backward-compat дефолтом (existing identity-файлы продолжают парситься байт-в-байт). `pkg/turn.Config.Realm` (default `"udisend"`). Тесты: Suite0x01 с custom KDF context даёт **другой** ECDH/peer-derived secret (доказательство domain separation); default — bit-exact с существующим поведением. **Note:** KDF context — это не просто строка, а часть BLAKE2b personalisation; смена меняет криптографические outputs, поэтому "сменить можно только при создании нового Suite-варианта", не для Suite0x01. Это документируется в `Suite0x01.Config` godoc.
+
+- [ ] **11.8 `pkg/network.Config` — opt-in subsystems** — `Config` принимает опциональные интерфейсы / factories:
+  - `MeshFactory func(deps) (MeshTransport, error)` (nil = mesh disabled, **не транзитивный импорт `pkg/webrtc`**).
+  - `PresenceFactory func(deps) (PresenceProvider, error)` (nil = no presence layer).
+  - `Suite Suite` (default = `Suite0x01`).
+  Цель: внешний проект может собрать `network.Node` без webrtc/presence, передав только transport + dht + Suite. Тесты: `TestNetwork_NoMesh_NoWebRTCImport` (build-tag-based assertion, что без factory `pion/webrtc` не тянется в бинарь). Acceptance: udisend messenger работает as-is (mesh enabled через factory из `internal/messenger`).
+
+- [ ] **11.9 Package godoc + Suite usage example** — каждый `pkg/*/doc.go` (или ведущий файл) содержит package-level comment: что делает, какой контракт нужен, мини-пример консьюмера. `pkg/identity/doc.go` содержит развёрнутый пример: «как добавить Suite0x02». `pkg/network` и `pkg/webrtc` — отдельный фокус (явный запрос пользователя на переиспользование).
+
+- [ ] **11.10 Re-audit + final review** — (a) повторный reusability-проход той же метрикой; ожидаем ≥ 13/15 GREEN (`identity` остаётся YELLOW из-за wire-формата ключей; `network` — YELLOW из-за богатого Config, но без hardcoded coupling). Результаты — `review/phase-11-reusability-final.md`. (b) **3-iteration post-phase review** (три fresh-context Explore-агента) с фокусом: backward compat не сломана, скрытого coupling не осталось, Suite-интерфейс действительно позволяет добавить Suite0x02 без правок консьюмеров (демо: stub-Suite0x02 в тесте, который только тип, без новой крипты). Сводка в `review/phase-11-summary.md`. MUST FIX закрыть до перевода фазы в ✅.
+
+### Acceptance criteria
+
+- [ ] `pkg/identity` (или `pkg/suite`) экспортирует `Suite`, `Signer`/`Verifier`, `KeyAgreement`, `PeerID`. `Suite0x01` собран из текущего стека.
+- [ ] `pkg/{dht,noise,presence,signaling,webrtc}` в публичном API оперируют интерфейсами `PeerID`/`Signer`/`KeyAgreement`/`Suite`, не `identity.Hash`/`*identity.Identity`.
+- [ ] `suite.Registry` мапит version-byte ↔ Suite; декодеры выбирают суиту по version-byte; неизвестный version → `ErrUnknownSuite`.
+- [ ] Hardcoded `"udisend-x25519-key"` и `"udisend"` realm доступны для override через Config / Suite-конструкторы; дефолты bit-exact с текущим поведением.
+- [ ] `pkg/network.Config` собирает Node без mesh/presence (build-tag-тест на отсутствие `pion/webrtc` в импортах).
+- [ ] **Backward compat:** existing identity-файлы парсятся, existing DHT-records / signaling-envelopes / SignedSDP читаются без изменений (тесты с фикстурами из текущего кода).
+- [ ] `go test -race ./...` зелёный после каждого sub-stage.
+- [ ] `go test -tags=e2e ./...` зелёный после фазы (включая mesh e2e из Phase 10).
+- [ ] Re-audit: ≥ 13/15 пакетов в GREEN, оставшиеся YELLOW — с документированной причиной.
+- [ ] Каждый `pkg/*/doc.go` описывает контракт + мини-пример; `pkg/identity/doc.go` — пример «как добавить Suite0x02».
+- [ ] Stub-test «добавили Suite0x02 без правок консьюмеров» проходит.
+- [ ] 3-iteration post-phase review проведён, MUST FIX закрыты.
+- [ ] `p2p-messenger-design.md` синхронизирован: §"Crypto agility" уточнена («теперь реализовано через `suite.Registry`»); package layout отражает новые интерфейсы.
+
+### Out-of-this-phase / deferred
+
+- [ ] **Реальная Suite0x02** (post-quantum hybrid: Ed25519+Dilithium2 / X25519+Kyber768, или другая комбинация) — Phase 12+. Phase 11 только готовит каркас.
+- [ ] **Migration tooling** между Suite-версиями (rotate identity, re-publish presence record под новой суитой, peer-discovery того, какие суиты поддерживает сосед) — отдельная фаза, когда появится Suite0x02.
+- [ ] **Generic-параметризация** (`dht.New[ID PeerID]`) вместо interface-based — отложено: interface-based проще, generic добавит когнитивную нагрузку без явного выигрыша. Если в 11.10 ревью настоит — follow-up.
+- [ ] **Multi-module repo** (`pkg/*` как отдельные Go-модули) — Out-of-MVP. Сейчас цель — позволить копирование пакета в чужой проект; multi-module — следующий шаг при появлении внешнего потребителя.
+- [ ] **WebRTC-layer crypto agility** (DTLS suite, SRTP) — мы её не контролируем, фиксировано стандартом WebRTC и pion. Не входит в `Suite` концепцию.
+
+---
+
 ## Decisions log
 
 Запись принципиальных архитектурных решений по ходу реализации. Формат: `[DATE] [PHASE] DECISION: ... — RATIONALE: ...`.
@@ -612,6 +683,7 @@ Acceptance: `udisend run` без preconditions работает (loopback); `udi
 
 - `[2026-05-05] [PHASE 10] DECISION: 10.9 MemoryWebRTCHub отказ.` — RATIONALE: оригинальный план предполагал отдельный hub-fake для unit-тестов, аналог `transport.MemoryHub`. На практике эквивалентное покрытие дают два уже существующих fake: `fakeMeshTransport` в `pkg/webrtc/peer_manager_test.go` (scriptable Connect outcomes, исчерпывающе тестирует PeerManager FSM/backoff/eviction за ~1.5s) и `inProcessSignaler` в `pkg/transport/webrtc_e2e_test.go` (per-peer hub поверх real pion за ~20ms). Третий уровень test infrastructure не даёт новой ценности; пока что отказ зафиксирован, hub можно вернуть, если в 10.10 e2e появится новая потребность. `[2026-05-05]`.
 - `[2026-05-05] [PHASE 10] DECISION: K=8 mesh-links, full peer overlay (не NAT-only).` — RATIONALE: альтернатива — overlay только между NAT-узлами, чтобы не нагружать публичные. Но: (а) единая mental model «каждый узел держит K линков» проще для реализации и аудита; (б) граф устойчивее, если публичные тоже — full peers (их падение не выбивает целые сегменты overlay'я); (в) публичные всё равно держат DHT-state на UDP — добавочная нагрузка от 8 PeerConnection (~80MB RAM, ~400ms на handshake) приемлема. K=8 выбрано как баланс между connectivity-redundancy (K-2 потери допустимы) и resource-cost; configurable через `Config.MaxMeshLinks`.
+- `[2026-05-06] [PHASE 11] DECISION: Phase 11 строится вокруг единого `Suite` combinator, а не двух отдельных абстракций `PeerID`/`DH`.` — RATIONALE: reusability-аудит выявил две независимые задачи — (а) разблокировать переиспользование `pkg/*` (убрать coupling на `identity.Hash`/`*identity.Identity`) и (б) реализовать уже задокументированную в design doc §"Crypto agility" модель version-byte ↔ algorithm_id. Обе требуют одного и того же интерфейса: контракт «что такое идентичность пира + как ей подписать/договориться о ключе». Делать абстракции отдельно (PeerID-only сначала, Suite позже) → дважды менять сигнатуры одних и тех же функций в `pkg/{dht,noise,presence,signaling,webrtc}`. Делать сразу `Suite { Signer + KeyAgreement + AEAD + Hash + PeerID + ID() byte }` → один проход по консьюмерам, плюс получаем готовый registry version-byte ↔ Suite, который к 11.5 нужен всё равно (декодеры выбирают суиту). Trade-off: Suite крупнее одного интерфейса, дизайн в 11.1 требует больше внимания (правильно расщепить методы между Signer/Verifier/KA, чтобы post-quantum hybrid влезал без переписывания). Принято: один проход, один Suite. Реальная Suite0x02 — Phase 12+, Phase 11 только готовит каркас и доказывает stub-тестом, что добавление новой суиты не требует правок консьюмеров.
 - `[2026-05-03] [REFACTOR] DECISION: lift internal/network → pkg/network as opaque Node; rewrite messenger to consume it agnostically; delete cmd/network.` — RATIONALE: до рефакторинга `internal/network` и `internal/messenger` параллельно собирали один и тот же `pkg/{transport,dht,signaling,presence,bootstrap}`-стек, дублируя bootstrap-логику и присутствие — package-oriented design нарушался. После: `pkg/network.Node` инкапсулирует DHT/signaling/transport/STUN/TURN/presence; messenger импортирует только `pkg/{identity,network,webrtc}` (5 сетевых пакетов схлопнулись в 1). Низкоуровневое API — единый `Node.Income() <-chan *Income` (peer + sessionID + PeerPublic + payload + final) + outbound `Connect/Send/CloseSession`; messenger демуксит по sessionID и оборачивает в `SignedSDP`. errgroup поверх `Run(ctx) error` для propagate-on-error. `*Income` идёт через `sync.Pool` (0 allocs/op в `BenchmarkIncomePool`); `Session`/`PeerInfo` — value-types, без лишних heap-escape. `cmd/network` удалён — passive relay use-case покрывает отдельный binary позже. Тесты: `pkg/network/api_test.go` (Connect/Income/Lookup/SeenPeerStore), `pkg/network/income_internal_test.go` (pool), `internal/messenger/messenger_test.go` + `outbox_test.go` переписаны под новую `Open(cfg Config{Network, Storage})`. Branch `refactor/pkg-network-agnostic-messenger`. Out-of-scope этого PR: переименование `cmd/messenger`→`cmd/messenger-web`, `internal/httpui`→`internal/webui`, вычистка boilerplate в `cmd/*`, превращение `pkg/dht|presence|signaling.Run` в `Run(ctx) error`.
 
 ---
