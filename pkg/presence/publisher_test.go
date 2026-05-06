@@ -18,7 +18,7 @@ type fakeDHT struct {
 	values map[dht.NodeID][]byte
 }
 
-func (f *fakeDHT) PutValue(_ context.Context, key dht.NodeID, value []byte) error {
+func (f *fakeDHT) PutValue(_ context.Context, key identity.PeerID, value []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.values == nil {
@@ -26,19 +26,21 @@ func (f *fakeDHT) PutValue(_ context.Context, key dht.NodeID, value []byte) erro
 	}
 	c := make([]byte, len(value))
 	copy(c, value)
-	f.values[key] = c
+	f.values[key.Bytes()] = c
+
 	return nil
 }
 
-func (f *fakeDHT) LookupValue(_ context.Context, key dht.NodeID) ([]byte, []dht.Contact, error) {
+func (f *fakeDHT) LookupValue(_ context.Context, key identity.PeerID) ([]byte, []dht.Contact, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	v, ok := f.values[key]
+	v, ok := f.values[key.Bytes()]
 	if !ok {
 		return nil, nil, nil
 	}
 	out := make([]byte, len(v))
 	copy(out, v)
+
 	return out, nil, nil
 }
 

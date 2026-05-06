@@ -93,13 +93,3 @@ func (b nodeRouting) LookupNode(ctx context.Context, target identity.Hash) ([]dh
 	return b.n.LookupNode(ctx, target)
 }
 
-// nodeAdapter exposes the subset of dht.Node required by presence.DHT.
-type nodeAdapter struct{ n *dht.Node }
-
-func (a nodeAdapter) PutValue(ctx context.Context, key dht.NodeID, value []byte) error {
-	return a.n.PutValue(ctx, key, value)
-}
-
-func (a nodeAdapter) LookupValue(ctx context.Context, key dht.NodeID) ([]byte, []dht.Contact, error) {
-	return a.n.LookupValue(ctx, key)
-}

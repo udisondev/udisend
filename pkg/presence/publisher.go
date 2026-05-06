@@ -15,10 +15,12 @@ import (
 const DefaultRecordTTL = 90 * time.Second
 
 // DHT is the subset of *dht.Node used by the publisher / resolver. Defined
-// as an interface so tests can substitute a fake.
+// as an interface so tests can substitute a fake. Phase 11.5 boundary
+// types are identity.PeerID — *dht.Node satisfies this interface
+// directly without an adapter.
 type DHT interface {
-	PutValue(ctx context.Context, key dht.NodeID, value []byte) error
-	LookupValue(ctx context.Context, key dht.NodeID) ([]byte, []dht.Contact, error)
+	PutValue(ctx context.Context, key identity.PeerID, value []byte) error
+	LookupValue(ctx context.Context, key identity.PeerID) ([]byte, []dht.Contact, error)
 }
 
 // Publisher periodically signs and pushes a presence record into the DHT.
@@ -133,7 +135,7 @@ func (r *Resolver) Cache() *Cache { return r.cache }
 // version and return it. Otherwise an attacker who replays an old
 // (still signature-valid) record can pin a victim at a stale address
 // indefinitely.
-func (r *Resolver) Lookup(ctx context.Context, peer identity.Hash) (*Record, error) {
+func (r *Resolver) Lookup(ctx context.Context, peer identity.PeerID) (*Record, error) {
 	if rec, ok := r.cache.Get(r.now(), peer); ok {
 		return rec, nil
 	}

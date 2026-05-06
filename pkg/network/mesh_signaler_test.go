@@ -31,10 +31,10 @@ func (s *staticResolver) put(rec *presence.Record) {
 	s.recs[rec.DestinationHash()] = rec
 }
 
-func (s *staticResolver) Lookup(_ context.Context, peer identity.Hash) (*presence.Record, error) {
+func (s *staticResolver) Lookup(_ context.Context, peer identity.PeerID) (*presence.Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, ok := s.recs[peer]
+	r, ok := s.recs[peer.Bytes()]
 	if !ok {
 		return nil, presence.ErrNotFound
 	}

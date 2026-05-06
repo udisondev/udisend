@@ -37,9 +37,10 @@ func noiseStaticFromIdentity(id *identity.Identity) noise.StaticKeypair {
 
 // AddressResolver returns the network address for a destination hash.
 // The signaling service uses presence.Resolver in production but tests
-// can substitute a static map.
+// can substitute a static map. peer is identity.PeerID — Hash satisfies
+// the interface, custom suite-aware peer types also work.
 type AddressResolver interface {
-	Lookup(ctx context.Context, peer identity.Hash) (*presence.Record, error)
+	Lookup(ctx context.Context, peer identity.PeerID) (*presence.Record, error)
 }
 
 // Router is the subset of routing-table behaviour the signaling Service

@@ -241,7 +241,7 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 	n.signaling.SetRouter(newDHTRouter(n.dht))
 	n.signaling.SetHandler(n.onIncomingChannel)
 
-	n.resolver = presence.NewResolver(nodeAdapter{n.dht}, cfg.PresenceTTL)
+	n.resolver = presence.NewResolver(n.dht, cfg.PresenceTTL)
 
 	caps := capsFor(cfg.Mode, cfg.PublicIP != "", cfg.MeshEnabled)
 	pubAddr := tr.LocalAddr().String()
@@ -267,7 +267,7 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 		Address:      pubAddr,
 		Capabilities: caps,
 		TTL:          cfg.PresenceTTL,
-		DHT:          nodeAdapter{n.dht},
+		DHT:          n.dht,
 		Logger:       cfg.Logger,
 	})
 
@@ -940,6 +940,6 @@ func (n *Node) runContext() context.Context {
 // signaling.Service field is a stable interface reference.
 type resolverDelegate struct{ n *Node }
 
-func (r *resolverDelegate) Lookup(ctx context.Context, peer identity.Hash) (*presence.Record, error) {
+func (r *resolverDelegate) Lookup(ctx context.Context, peer identity.PeerID) (*presence.Record, error) {
 	return r.n.resolver.Lookup(ctx, peer)
 }

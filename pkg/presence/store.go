@@ -40,11 +40,12 @@ func (c *Cache) Put(now time.Time, r *Record) (bool, error) {
 	return true, nil
 }
 
-// Get fetches the most recent valid record for `peer`. Returns (nil,
+// Get fetches the most recent valid record for peer. Returns (nil,
 // false) if not present or expired.
-func (c *Cache) Get(now time.Time, peer identity.Hash) (*Record, bool) {
+func (c *Cache) Get(now time.Time, peer identity.PeerID) (*Record, bool) {
+	key := peer.Bytes()
 	c.mu.RLock()
-	r, ok := c.records[peer]
+	r, ok := c.records[key]
 	c.mu.RUnlock()
 	if !ok {
 		return nil, false
@@ -53,6 +54,7 @@ func (c *Cache) Get(now time.Time, peer identity.Hash) (*Record, bool) {
 		return nil, false
 	}
 	cp := *r
+
 	return &cp, true
 }
 
