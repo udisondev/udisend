@@ -112,7 +112,8 @@ func (r *Record) Sign(id *identity.Identity) error {
 	if err != nil {
 		return err
 	}
-	r.Signature = id.Sign(preimage)
+	copy(r.Signature[:], id.Sign(preimage))
+
 	return nil
 }
 
@@ -134,7 +135,7 @@ func (r *Record) Verify(now time.Time, ttl time.Duration) error {
 	if err != nil {
 		return err
 	}
-	if !r.Public.Verify(preimage, r.Signature) {
+	if !r.Public.Verify(preimage, r.Signature[:]) {
 		return ErrBadSignature
 	}
 	if r.IssuedAt.After(now.Add(MaxClockSkew)) {

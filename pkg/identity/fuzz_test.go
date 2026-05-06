@@ -41,11 +41,9 @@ func FuzzVerify(f *testing.F) {
 	}
 	pub := id.Public()
 	sig := id.Sign([]byte("hello"))
-	f.Add([]byte("hello"), sig[:])
+	f.Add([]byte("hello"), sig)
 	f.Add([]byte{}, []byte{})
 	f.Fuzz(func(t *testing.T, msg, rawSig []byte) {
-		var s identity.Signature
-		copy(s[:], rawSig)
-		_ = pub.Verify(msg, s) // must never panic
+		_ = pub.Verify(msg, rawSig) // must never panic on arbitrary length
 	})
 }

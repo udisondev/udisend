@@ -148,7 +148,7 @@ func (s *SignedSDP) signingBytes() []byte {
 
 // Sign produces the signature over s with id's private key.
 func (s *SignedSDP) Sign(id *identity.Identity) {
-	s.Signature = id.Sign(s.signingBytes())
+	copy(s.Signature[:], id.Sign(s.signingBytes()))
 }
 
 // Verify checks the signature AND the channel-binding fields:
@@ -163,7 +163,7 @@ func (s *SignedSDP) Sign(id *identity.Identity) {
 // constant-time defensively — they are not secrets, but cheap to keep
 // uniform across the codebase.
 func (s *SignedSDP) Verify(pub identity.PublicIdentity, expectedRecipient identity.Hash, expectedSessionID [SessionIDSize]byte, now time.Time) error {
-	if !pub.Verify(s.signingBytes(), s.Signature) {
+	if !pub.Verify(s.signingBytes(), s.Signature[:]) {
 		return ErrSDPSignature
 	}
 	if subtle.ConstantTimeCompare(s.Recipient[:], expectedRecipient[:]) != 1 {
@@ -189,7 +189,7 @@ func (s *SignedSDP) Verify(pub identity.PublicIdentity, expectedRecipient identi
 // binding (e.g. parsers in tests, off-line forensics). Production
 // signaling MUST use Verify.
 func (s *SignedSDP) VerifySignatureOnly(pub identity.PublicIdentity) error {
-	if !pub.Verify(s.signingBytes(), s.Signature) {
+	if !pub.Verify(s.signingBytes(), s.Signature[:]) {
 		return ErrSDPSignature
 	}
 

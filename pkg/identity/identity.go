@@ -124,19 +124,56 @@ func (i *Identity) Public() PublicIdentity {
 // Mutating the returned array does not affect the Identity.
 func (i *Identity) Seed() [SeedSize]byte { return i.seed }
 
-// Sign produces an Ed25519 signature over msg.
-func (i *Identity) Sign(msg []byte) Signature {
-	var s Signature
-	copy(s[:], ed25519.Sign(i.edPriv, msg))
-	return s
+// Sign produces an Ed25519 signature over msg as a freshly-allocated
+// byte slice (length identity.SignatureSize). Implements the Signer
+// interface from suite.go; consumers that want the fixed-size form
+// can copy into an identity.Signature.
+func (i *Identity) Sign(msg []byte) []byte {
+	return ed25519.Sign(i.edPriv, msg)
 }
 
+// AgreementPublic returns this identity's X25519 public key as a
+// freshly-allocated 32-byte slice. Implements KeyAgreement.
+func (i *Identity) AgreementPublic() []byte {
+	out := make([]byte, len(i.xPub))
+	copy(out, i.xPub[:])
+
+	return out
+}
+
+// Agree performs an X25519 ECDH against the remote public key bytes
+// and returns the 32-byte shared secret. Implements KeyAgreement.
+// Callers MUST run the result through a KDF before using it as a
+// session key — raw ECDH outputs are not uniform random.
+func (i *Identity) Agree(remote []byte) ([]byte, error) {
+	if len(remote) != curve25519.PointSize {
+		return nil, fmt.Errorf("%w: agreement key length %d, want %d",
+			ErrInvalidPublicBlob, len(remote), curve25519.PointSize)
+	}
+	shared, err := curve25519.X25519(i.xPriv[:], remote)
+	if err != nil {
+		return nil, fmt.Errorf("identity: x25519 ecdh: %w", err)
+	}
+
+	return shared, nil
+}
+
+// Remote returns the public-half of this identity as a Remote
+// interface value. Implements Local.
+func (i *Identity) Remote() Remote { return i.Public() }
+
 // XPriv returns a copy of the X25519 secret. Used by Noise / Diffie–Hellman.
+//
+// Deprecated: prefer Agree (suite-agnostic). XPriv is retained as an
+// escape hatch for pkg/noise, which still feeds the raw key to
+// flynn/noise.
 func (i *Identity) XPriv() [curve25519.ScalarSize]byte { return i.xPriv }
 
 // SharedSecret performs an X25519 ECDH against peer.XPub and returns the
 // 32-byte shared secret. Callers MUST NOT use this raw output as a session
 // key — pass it through a KDF (see pkg/crypto.HKDF).
+//
+// Deprecated: prefer Agree (Suite-agnostic).
 func (i *Identity) SharedSecret(peer PublicIdentity) ([32]byte, error) {
 	var out [32]byte
 	shared, err := curve25519.X25519(i.xPriv[:], peer.XPub[:])
@@ -144,6 +181,7 @@ func (i *Identity) SharedSecret(peer PublicIdentity) ([32]byte, error) {
 		return out, fmt.Errorf("identity: x25519 ecdh: %w", err)
 	}
 	copy(out[:], shared)
+
 	return out, nil
 }
 
@@ -210,6 +248,9 @@ func (p *PublicIdentity) UnmarshalBinary(data []byte) error {
 }
 
 // DestinationHash returns the peer's address: SHA-256(ed_pub‖x_pub)[:16].
+//
+// Note: PeerID() returns the same value behind the suite-agnostic
+// PeerID interface; new code should prefer PeerID.
 func (p PublicIdentity) DestinationHash() Hash {
 	var msg [PublicKeySize]byte
 	copy(msg[:ed25519.PublicKeySize], p.EdPub)
@@ -217,14 +258,59 @@ func (p PublicIdentity) DestinationHash() Hash {
 	digest := sha256.Sum256(msg[:])
 	var h Hash
 	copy(h[:], digest[:HashSize])
+
 	return h
 }
 
-// Verify checks an Ed25519 signature against this public key. It returns false
-// for any malformed input rather than panicking.
-func (p PublicIdentity) Verify(msg []byte, sig Signature) bool {
+// PeerID returns the peer's network address as a PeerID interface
+// value. Equivalent to DestinationHash() but typed for use with the
+// suite-agnostic Remote interface.
+func (p PublicIdentity) PeerID() PeerID { return p.DestinationHash() }
+
+// AgreementPublic returns this peer's X25519 public key as a
+// freshly-allocated 32-byte slice. Implements Remote.
+func (p PublicIdentity) AgreementPublic() []byte {
+	out := make([]byte, len(p.XPub))
+	copy(out, p.XPub[:])
+
+	return out
+}
+
+// Marshal returns the wire-format encoding of this PublicIdentity
+// (version(1) || ed_pub(32) || x_pub(32)). Implements Remote.
+//
+// Marshal panics on encode failure; PublicIdentity values produced by
+// Suite0x01 (Generate / ParseRemote) are always well-formed, so the
+// branch is unreachable in practice. A panic here indicates a bug
+// (e.g. a caller hand-constructed a PublicIdentity with the wrong
+// EdPub length).
+func (p PublicIdentity) Marshal() []byte {
+	blob, err := p.MarshalBinary()
+	if err != nil {
+		panic(fmt.Sprintf("identity: PublicIdentity.Marshal: %v", err))
+	}
+
+	return blob
+}
+
+// Verify checks an Ed25519 signature against this public key. Returns
+// false for any malformed input — wrong public-key length, wrong
+// signature length — rather than panicking.
+func (p PublicIdentity) Verify(msg []byte, sig []byte) bool {
 	if len(p.EdPub) != ed25519.PublicKeySize {
 		return false
 	}
-	return ed25519.Verify(p.EdPub, msg, sig[:])
+	if len(sig) != SignatureSize {
+		return false
+	}
+
+	return ed25519.Verify(p.EdPub, msg, sig)
 }
+
+// Compile-time assertions that the concrete identity types satisfy
+// the suite-agnostic interfaces declared in suite.go.
+var (
+	_ Local  = (*Identity)(nil)
+	_ Remote = PublicIdentity{}
+	_ PeerID = Hash{}
+)
