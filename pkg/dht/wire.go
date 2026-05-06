@@ -8,7 +8,11 @@ import (
 	"github.com/udisondev/udisend/pkg/wire"
 )
 
-// Message type codes used inside wire frames.
+// Wire-frame type codes consumed by the DHT itself. These occupy the
+// reserved DHT-owned range 0x01–0x0F. Embedders (e.g. pkg/signaling)
+// that multiplex their own frames over the same socket pick opcodes
+// >= 0x10 and register a Config.Extension to receive them; pkg/dht
+// does not interpret embedder opcodes and never names them here.
 const (
 	MsgPing      byte = 0x01
 	MsgPong      byte = 0x02
@@ -18,10 +22,6 @@ const (
 	MsgStoreOK   byte = 0x06
 	MsgFindValue byte = 0x07
 	MsgValue     byte = 0x08
-	// MsgRelay is used by pkg/signaling for opaque payload routing through
-	// DHT nodes. We define the constant here so the demux table is in one
-	// place; the payload format is defined in pkg/signaling.
-	MsgRelay byte = 0x10
 )
 
 // TxIDSize is the length of a transaction identifier.

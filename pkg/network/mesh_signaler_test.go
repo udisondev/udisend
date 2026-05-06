@@ -65,7 +65,7 @@ func makeMeshPeer(t *testing.T, hub *transport.MemoryHub, resolver signaling.Add
 		Resolver:  resolver,
 	})
 	node := dht.NewNode(id, tr, nil, dht.Config{
-		ExtraHandler: svc.HandlePacket,
+		Extension: svc,
 	})
 	ctx, cancel := context.WithCancel(t.Context())
 	go node.Run(ctx)

@@ -37,7 +37,7 @@ func newSigCluster(c *Cluster) *SigCluster {
 }
 
 // makeService is invoked from Cluster.spawnOne BEFORE dht.NewNode.
-// The returned Service is wired as the dht.Node's ExtraHandler.
+// The returned Service is wired as the dht.Node's Extension.
 func (sc *SigCluster) makeService(t *testing.T, p *Peer) *signaling.Service {
 	t.Helper()
 

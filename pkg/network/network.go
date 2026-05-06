@@ -222,8 +222,8 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 
 	store := presence.NewRateLimitedStore(dht.NewMemoryStore(nil))
 	n.dht = dht.NewNode(cfg.Identity, tr, store, dht.Config{
-		Logger:       cfg.Logger,
-		ExtraHandler: n.signaling.HandlePacket,
+		Logger:    cfg.Logger,
+		Extension: n.signaling,
 	})
 	n.signaling.SetRouter(newDHTRouter(n.dht))
 	n.signaling.SetHandler(n.onIncomingChannel)

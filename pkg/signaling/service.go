@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/udisondev/udisend/pkg/dht"
 	"github.com/udisondev/udisend/pkg/identity"
 	"github.com/udisondev/udisend/pkg/noise"
 	"github.com/udisondev/udisend/pkg/presence"
@@ -146,7 +145,8 @@ type Config struct {
 }
 
 // NewService constructs a signaling service. The caller must register
-// `Service.HandlePacket` as the dht.Node's ExtraHandler.
+// the *Service itself as the dht.Node's Extension (it satisfies
+// dht.Extension via HandleDHTFrame).
 func NewService(cfg Config) *Service {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -231,27 +231,30 @@ func (s *Service) Close() {
 	})
 }
 
-// HandlePacket is the DHT ExtraHandler entry point.
-func (s *Service) HandlePacket(ctx context.Context, pkt transport.Packet, typ byte, payload []byte) bool {
-	if typ != dht.MsgRelay {
-		return false
+// HandleDHTFrame implements dht.Extension. Frames carrying signaling
+// envelopes are routed here by pkg/dht for any opcode outside its own
+// range; signaling owns 0x10 (frameTypeRelay) and silently drops other
+// opcodes — they belong to peers running protocol versions we do not
+// recognise.
+func (s *Service) HandleDHTFrame(ctx context.Context, pkt transport.Packet, typ byte, payload []byte) {
+	if typ != frameTypeRelay {
+		return
 	}
 	select {
 	case <-s.lifecycleCtx.Done():
-		return true // service shut down — don't insert into a cleared map
+		return // service shut down — don't insert into a cleared map
 	default:
 	}
 	env, err := DecodeBody(payload)
 	if err != nil {
 		s.logger.Debug("signaling: bad envelope", "from", pkt.From, "err", err)
-		return true
+		return
 	}
 	if env.Recipient != s.selfDH {
 		s.relay(ctx, pkt.From, env)
-		return true
+		return
 	}
 	s.dispatch(ctx, pkt.From, env)
-	return true
 }
 
 // relayBudgetPerMinute caps how many envelopes a single source IP may

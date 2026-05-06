@@ -37,11 +37,18 @@ const (
 	DefaultDisjoint = 3
 )
 
-// PacketHandler is invoked for inbound packets whose type is not consumed
-// by the DHT itself (notably MsgRelay, used by the signaling layer).
-// Returning false leaves the packet for further processing by the DHT —
-// today that means it is dropped.
-type PacketHandler func(ctx context.Context, pkt transport.Packet, typ byte, payload []byte) bool
+// Extension is the embedder hook for frames whose outer wire-frame type
+// falls outside the DHT-owned opcode range (0x01–0x0F). The DHT does
+// not interpret such frames; it merely demultiplexes them off the
+// shared UDP socket and hands them to the embedder. Embedders own
+// opcodes >= 0x10; pkg/signaling, for instance, registers itself here
+// and multiplexes its envelope frames (relay opcode 0x10) through.
+//
+// The handler runs on the DHT's inbound goroutine; long work must be
+// dispatched off-thread by the implementor.
+type Extension interface {
+	HandleDHTFrame(ctx context.Context, pkt transport.Packet, typ byte, payload []byte)
+}
 
 // Config tunes Node behaviour.
 type Config struct {
@@ -50,10 +57,11 @@ type Config struct {
 	RequestTimeout time.Duration
 	LookupTimeout  time.Duration
 	Logger         *slog.Logger
-	// ExtraHandler, if non-nil, is given first crack at every inbound packet
-	// the DHT does not handle natively. Used by pkg/signaling to multiplex
-	// MsgRelay frames over the same socket.
-	ExtraHandler PacketHandler
+	// Extension, if non-nil, receives every inbound packet whose outer
+	// wire-frame type is outside the DHT-owned range (0x01–0x0F).
+	// Embedders such as pkg/signaling implement this to multiplex their
+	// own opcode space over the same UDP socket.
+	Extension Extension
 	// InboundRate / InboundBurst configure the per-source-IP DoS limiter on
 	// inbound packets. Zero rate disables limiting.
 	InboundRate  float64
@@ -230,13 +238,16 @@ func (n *Node) handlePacket(ctx context.Context, pkt transport.Packet) {
 		n.cfg.Logger.Debug("dht: bad frame", "from", pkt.From, "err", err)
 		return
 	}
-	// Dispatch non-DHT frames (MsgRelay, future types) to the embedder.
+	// Dispatch frames outside the DHT-owned opcode range (0x01–0x0F)
+	// to the embedder. The set below pins exactly which opcodes the
+	// DHT consumes natively; everything else — including future opcodes
+	// owned by embedders such as pkg/signaling — flows through Extension.
 	switch typ {
 	case MsgPing, MsgPong, MsgFindNode, MsgNodes,
 		MsgStore, MsgStoreOK, MsgFindValue, MsgValue:
 	default:
-		if n.cfg.ExtraHandler != nil {
-			n.cfg.ExtraHandler(ctx, pkt, typ, body)
+		if n.cfg.Extension != nil {
+			n.cfg.Extension.HandleDHTFrame(ctx, pkt, typ, body)
 		}
 
 		return

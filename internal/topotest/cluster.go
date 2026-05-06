@@ -219,11 +219,11 @@ func (c *Cluster) spawnOne(t *testing.T) *Peer {
 	}
 
 	// If signaling is enabled, the Service must be ready BEFORE
-	// dht.NewNode so we can pass its HandlePacket as ExtraHandler.
+	// dht.NewNode so we can pass it as the dht.Extension.
 	// dht.Node has no post-construction hook for this.
 	if c.sig != nil {
 		p.svc = c.sig.makeService(t, p)
-		cfg.ExtraHandler = p.svc.HandlePacket
+		cfg.Extension = p.svc
 	}
 
 	p.node = dht.NewNode(id, tr, nil, cfg)

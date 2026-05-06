@@ -1,11 +1,13 @@
 // Package signaling sets up encrypted bidirectional channels between two
 // peers identified by their destination hashes. It rides on top of the DHT
-// transport (sharing the same UDP socket via dht.Node's ExtraHandler) and
+// transport (sharing the same UDP socket: pkg/signaling.Service satisfies
+// dht.Extension and registers itself via dht.Config.Extension) and
 // uses Noise XK for the cryptographic handshake. Once a Channel is open,
 // callers can send arbitrary bytes — typically WebRTC SDP/ICE payloads
 // during session negotiation, or any application-level message in tests.
 //
-// Wire envelope (sits inside a wire frame of type dht.MsgRelay):
+// Wire envelope (sits inside a wire frame of outer opcode 0x10, which is
+// the embedder-range opcode pkg/signaling owns):
 //
 //	version(1) | recipient(16) | sender(16) | session_id(16) | inner_type(1)
 //	  | inner_payload(uvarint+bytes)
@@ -18,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/udisondev/udisend/pkg/dht"
 	"github.com/udisondev/udisend/pkg/identity"
 	"github.com/udisondev/udisend/pkg/wire"
 )
@@ -33,6 +34,13 @@ const (
 	// MaxHops bounds how many relay hops an envelope may traverse before
 	// being dropped (hop-by-hop signaling routing).
 	MaxHops byte = 8
+
+	// frameTypeRelay is the outer wire-frame opcode for envelope frames.
+	// It sits in the embedder range (>= 0x10) reserved by pkg/dht for
+	// multiplexed protocols; pkg/dht never interprets this opcode itself
+	// and dispatches matching frames to Config.Extension. Defined here
+	// so signaling owns its own opcode space — see Phase 12.
+	frameTypeRelay byte = 0x10
 )
 
 // SessionIDSize is the length of a session identifier.
@@ -110,7 +118,7 @@ var (
 	ErrUnknownInner = errors.New("signaling: unknown inner type")
 )
 
-// Encode wraps the envelope into a dht.MsgRelay wire frame. Uses
+// Encode wraps the envelope into a frameTypeRelay wire frame. Uses
 // wire.NewFrameWriter so frame header and body share one allocation.
 func (e *Envelope) Encode() ([]byte, error) {
 	if len(e.Payload) > MaxInnerSize {
@@ -125,7 +133,7 @@ func (e *Envelope) Encode() ([]byte, error) {
 	w.WriteUint8(e.Hops)
 	w.WriteUint8(e.InnerType)
 	w.WriteBytes(e.Payload)
-	return wire.FinishFrame(w, dht.MsgRelay)
+	return wire.FinishFrame(w, frameTypeRelay)
 }
 
 // Decode parses a wire.Frame produced by Encode. It is tolerant of
@@ -135,14 +143,14 @@ func Decode(frame []byte) (*Envelope, error) {
 	if err != nil {
 		return nil, err
 	}
-	if typ != dht.MsgRelay {
+	if typ != frameTypeRelay {
 		return nil, fmt.Errorf("%w: wrong wire type %d", ErrEnvelope, typ)
 	}
 	return DecodeBody(payload)
 }
 
 // DecodeBody parses just the envelope body (i.e. the wire-frame payload).
-// pkg/dht hands us this directly via ExtraHandler, so the outer frame is
+// pkg/dht hands us this directly via Config.Extension, so the outer frame is
 // already consumed. Reads the fixed-size fields directly into the result
 // struct via ReadFixedInto so we do not pay for three intermediate slices.
 func DecodeBody(payload []byte) (*Envelope, error) {

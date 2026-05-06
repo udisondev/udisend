@@ -92,7 +92,7 @@ func BenchmarkEnvelope_DecodeBody_1KB(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	// Strip the dht.MsgRelay frame to get the raw body the relay path sees.
+	// Strip the relay-opcode frame to get the raw body the relay path sees.
 	// We cheat by encoding then re-decoding to isolate the body bytes.
 	got, err := signaling.Decode(blob)
 	if err != nil {

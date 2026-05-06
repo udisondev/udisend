@@ -29,6 +29,7 @@
 | 9 | Threat-model audit (protocol-slice) | ✅ done | 2026-05-04 | 2026-05-05 |
 | 10 | Inter-node WebRTC mesh | ✅ done | 2026-05-05 | 2026-05-05 |
 | 11 | `pkg/` reusability refactor | ✅ done | 2026-05-06 | 2026-05-06 |
+| 12 | API surface tightening (cross-layer opcode leaks) | 🚧 in progress | 2026-05-06 | — |
 
 ---
 
@@ -588,6 +589,47 @@ Acceptance: `udisend run` без preconditions работает (loopback); `udi
 - [ ] **Generic-параметризация** (`dht.New[ID PeerID]`) вместо interface-based — отложено: interface-based проще, generic добавит когнитивную нагрузку без явного выигрыша. Если в 11.10 ревью настоит — follow-up.
 - [ ] **Multi-module repo** (`pkg/*` как отдельные Go-модули) — Out-of-MVP. Сейчас цель — позволить копирование пакета в чужой проект; multi-module — следующий шаг при появлении внешнего потребителя.
 - [ ] **WebRTC-layer crypto agility** (DTLS suite, SRTP) — мы её не контролируем, фиксировано стандартом WebRTC и pion. Не входит в `Suite` концепцию.
+
+---
+
+## Phase 12 — API surface tightening (cross-layer opcode leaks)
+
+**Контекст и мотивация.** Phase 11 параметризовал нижние пакеты по `PeerID`/`Suite`, но осталось два архитектурных leak'а на уровне opcode-таблиц: (1) `pkg/dht` экспортирует `MsgRelay byte = 0x10` ради централизованного demux в `handlePacket` — opcode принадлежит signaling-у, а живёт в dht; собственный комментарий в `wire.go:21-24` это признаёт. (2) `pkg/signaling` экспортирует `InnerMeshOffer/Answer/Candidate` (0x06–0x08) ради централизованного switch-а в `service.dispatch` — opcode принадлежит mesh-у (pkg/network), а живёт в signaling. Каждый нижний пакет знает чужие opcode'ы. Принцип, заявленный пользователем: «потребитель тянет завершённый пакет; пакет даёт Client API; opcode-таблица — деталь реализации, не часть API».
+
+**Цель:** каждый `pkg/*` владеет только своими opcode'ами; embedder получает типизированный extension-API + reserved-byte-range договор. Wire-format **bit-exact** с предыдущей версией — это перестановка отвественности, не смена протокола.
+
+**Deliverable:**
+- `pkg/dht`: `Config.ExtraHandler PacketHandler` → `Config.Extension dht.Extension` (interface). Opcode `MsgRelay` удалён из `pkg/dht`; `pkg/dht/wire.go` switches только по своим (msgPing..msgValue). pkg/signaling определяет константу 0x10 у себя приватно.
+- `pkg/signaling`: `Channel.SendMesh`/`Service.SetMeshHandler`/`MeshHandler`/`IsMeshInner` переименованы в generic-версии (`SendExtension`/`SetExtensionHandler`/`ExtensionHandler` + private `isExtensionKind`); константы `InnerMeshOffer/Answer/Candidate` удалены из `pkg/signaling`. pkg/network определяет 0x06/0x07/0x08 приватно.
+- Reserved-range договоры в godoc: pkg/dht owns 0x01–0x0F, embedder owns ≥0x10; pkg/signaling owns 0x01–0x05, embedder owns ≥0x06.
+- Тесты: cross-package тесты, форгающие wire frame'ы напрямую, мигрированы на новые символы (или на private wire-helpers внутри пакета).
+
+**Scope guard:** **только** перенос двух cross-layer leak'ов. **Не** входит в скоуп: unexport чисто внутрипакетных opcode'ов (`MsgPing`..`MsgValue`, `InnerHelloInit`..`InnerBye`) — они пока торчат в godoc как low-level wire-codec, но не пересекают слой; их подъём — отдельный косметический проход (Phase 12.5+ или N/A).
+
+### Sub-stages (TDD: failing test → minimal code → refactor)
+
+- [x] **12.1 `pkg/dht.Extension` + перенос `MsgRelay`** — failing test `TestNode_ExtensionReceivesEmbedderFrames` (форгает frame opcode 0x10 через `wire.EncodeFrame`, ждёт доставку через capture-Extension). Введён `dht.Extension` interface с единственным методом `HandleDHTFrame(ctx, pkt, typ, payload)`; `Config.ExtraHandler PacketHandler` удалён, заменён на `Config.Extension dht.Extension`. handlePacket switch'ит только по своим opcode'ам (msgPing..msgValue из range 0x01–0x0F); всё остальное идёт в Extension. Константа `MsgRelay` удалена из pkg/dht; pkg/signaling определяет приватную `frameTypeRelay byte = 0x10` в `envelope.go`. `Service.HandlePacket(ctx, pkt, typ, payload) bool` переименован в `Service.HandleDHTFrame(...)` (без bool — return value никогда не инспектировался) и теперь satisfies `dht.Extension` напрямую. callsites обновлены: `pkg/network/network.go` (`Extension: n.signaling`), `pkg/network/mesh_signaler_test.go`, `pkg/signaling/signaling_test.go`, `internal/topotest/cluster.go`. Импорт `pkg/signaling → pkg/dht` (только для константы `MsgRelay`) удалён — pkg/signaling теперь не зависит от pkg/dht в `envelope.go`/`service.go` для opcode'а. Wire-format **bit-exact** — frame с outer opcode 0x10 идёт ровно тем же путём. `go test -race ./...` зелёный (все 25 пакетов), `go vet ./...` clean. Commit `phase 12.1: pkg/dht.Extension interface + MsgRelay moved into pkg/signaling`.
+
+- [ ] **12.2 `pkg/signaling.Channel.SendExtension` + перенос InnerMesh*** — failing test (форгает Extension-frame kind=0x06, ожидает доставку через `SetExtensionHandler`); ренейм `MeshHandler` → `ExtensionHandler`, `SetMeshHandler` → `SetExtensionHandler`, `Channel.SendMesh` → `Channel.SendExtension`, `MaxPendingMeshFrames` → `MaxPendingExtensionFrames`, `IsMeshInner` → private `isExtensionKind`. `InnerMeshOffer/Answer/Candidate` удалены из pkg/signaling; pkg/network/mesh_signaler.go определяет приватные `meshKindOffer = 0x06` etc. Reserved-range docstring: signaling owns 0x01–0x05, embedder ≥0x06. Тесты `pkg/signaling/mesh_test.go` мигрированы на новые имена (kind берут из локальных констант теста). Wire-format bit-exact. `go test -race ./...` зелёный.
+
+- [ ] **12.3 Post-phase 3-iteration review + retrospective** — три fresh-context review prompts (CLAUDE.md процедура), сводка в `review/phase-12-summary.md`. MUST FIX (3/3) исправлены до закрытия фазы. Финальный run `go test -race ./...` + `go vet ./...` зелёные. Phase 12 → ✅, retrospective запись в decisions log.
+
+### Acceptance criteria
+
+- [ ] `pkg/dht` не упоминает `MsgRelay` ни в коде, ни в комментариях.
+- [ ] `pkg/signaling` не упоминает `InnerMeshOffer/Answer/Candidate` ни в коде, ни в комментариях.
+- [ ] `pkg/dht.Config.Extension` — interface, не функция-callback.
+- [ ] `pkg/signaling.Channel.SendExtension` принимает `kind byte` ≥ 0x06, отказывает на 0x01–0x05 (signaling-internal).
+- [ ] `go test -race ./...` зелёный после каждого sub-stage.
+- [ ] `go test -tags=e2e ./...` зелёный после фазы.
+- [ ] 3-iteration post-phase review проведён, MUST FIX закрыты.
+- [ ] Wire-format bit-exact: existing peer (pre-Phase-12 build) и new peer (post-Phase-12) интероперабельны — symbolic test через encode/decode round-trip с manually-built frame.
+
+### Out-of-this-phase / deferred
+
+- [ ] **Unexport pkg-internal opcode constants** (`MsgPing`..`MsgValue`, `InnerHelloInit`..`InnerBye`) — косметика godoc, не cross-layer leak. Если внешние консьюмеры пожалуются на noise — подобрать пакет export_test.go pattern. Возможно follow-up Phase 12.5.
+- [ ] **`Channel`-per-extension chan API** (вместо service-level callback `SetExtensionHandler`) — более композабельно, но disruptive; рассмотреть, когда появится второй extension-consumer (помимо pkg/network mesh).
+- [ ] **`pkg/network` opt-in mesh sub-package** — вынос `pkg/webrtc` транзитивного импорта (см. Phase 11.8 deferred).
 
 ---
 

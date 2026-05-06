@@ -87,7 +87,7 @@ func TestSig_RelayChain(t *testing.T) {
 // resolves any cluster peer), but to force two-hop we override R1's
 // view too: from R1's perspective B's address is R2. Each hop
 // re-encrypts the envelope envelope (signaling layer treats every
-// MsgRelay frame the same way) and delivery still works because
+// relay frame the same way) and delivery still works because
 // every router knows the full cluster.
 //
 // Note: in production cf design.md §4, multi-hop is handled by
