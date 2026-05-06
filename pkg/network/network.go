@@ -120,6 +120,14 @@ type Config struct {
 	// MaxMeshLinks caps the live PeerSession count when mesh is
 	// enabled. 0 falls back to webrtc.DefaultMaxLinks (8).
 	MaxMeshLinks int
+
+	// SignalingHandshakeTimeout overrides signaling.DefaultHandshakeTimeout
+	// (6s) for the Noise XK 3-message handshake. Production callers leave
+	// it zero. Tests under -race + heavy parallelism set it to 20-30s
+	// because race-detector overhead can starve pion / noise enough
+	// to miss the production-tuned window — without this knob the
+	// mesh-e2e suite flakes when run alongside other heavy packages.
+	SignalingHandshakeTimeout time.Duration
 }
 
 // DefaultIncomeBuffer is the size of the Income channel when Config
@@ -155,7 +163,7 @@ type Node struct {
 	sessMu   sync.RWMutex
 	sessions map[sessionKey]*signaling.Channel
 
-	income chan *Income
+	income *incomeChannel
 
 	pumpWg sync.WaitGroup // tracks per-session pump goroutines
 
@@ -237,14 +245,15 @@ func Open(ctx context.Context, cfg Config) (*Node, error) {
 		cfg:       cfg,
 		transport: tr,
 		sessions:  make(map[sessionKey]*signaling.Channel),
-		income:    make(chan *Income, cfg.IncomeBuffer),
+		income:    newIncomeChannel(cfg.IncomeBuffer),
 	}
 
 	n.signaling = signaling.NewService(signaling.Config{
-		Identity:  cfg.Identity,
-		Transport: tr,
-		Resolver:  &resolverDelegate{n: n},
-		Logger:    cfg.Logger,
+		Identity:         cfg.Identity,
+		Transport:        tr,
+		Resolver:         &resolverDelegate{n: n},
+		Logger:           cfg.Logger,
+		HandshakeTimeout: cfg.SignalingHandshakeTimeout,
 	})
 
 	store := presence.NewRateLimitedStore(dht.NewMemoryStore(nil))
@@ -565,7 +574,9 @@ func (n *Node) Run(ctx context.Context) error {
 	err := g.Wait()
 	closeErr := n.closeServers()
 	n.pumpWg.Wait()
-	close(n.income)
+	// Wrapper's atomic+RWMutex coordination makes this safe against
+	// late signaling-handler senders that outlive pumpWg + signaling.Close.
+	n.income.Close()
 
 	return errors.Join(err, closeErr)
 }
@@ -743,7 +754,7 @@ func (n *Node) Identity() *identity.Identity { return n.cfg.Identity }
 
 // Income returns the channel of low-level inbound events. ONE consumer
 // is supported (the messenger). The channel closes after Run returns.
-func (n *Node) Income() <-chan *Income { return n.income }
+func (n *Node) Income() <-chan *Income { return n.income.Recv() }
 
 // SessionFor builds a value-typed Session handle for an already-
 // registered session. Higher layers consuming Income events use this
@@ -843,9 +854,7 @@ func (n *Node) emitOpened(peer identity.Hash, sid SessionID, peerPub identity.Pu
 	inc.SessionID = sid
 	inc.PeerPublic = peerPub
 
-	select {
-	case n.income <- inc:
-	case <-n.runContext().Done():
+	if !n.income.Send(inc, n.runContext().Done()) {
 		inc.Release()
 	}
 }
@@ -909,9 +918,7 @@ func (n *Node) pumpSession(ch *signaling.Channel, peerPub identity.PublicIdentit
 		inc.PeerPublic = peerPub
 		inc.Payload = payload
 
-		select {
-		case n.income <- inc:
-		case <-rctx.Done():
+		if !n.income.Send(inc, rctx.Done()) {
 			inc.Release()
 			n.emitFinal(peer, sid, peerPub)
 			return
@@ -926,10 +933,7 @@ func (n *Node) emitFinal(peer identity.Hash, sid SessionID, peerPub identity.Pub
 	inc.PeerPublic = peerPub
 	inc.Final = true
 
-	rctx := n.runContext()
-	select {
-	case n.income <- inc:
-	case <-rctx.Done():
+	if !n.income.Send(inc, n.runContext().Done()) {
 		inc.Release()
 	}
 }

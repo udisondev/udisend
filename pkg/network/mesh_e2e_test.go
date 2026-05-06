@@ -13,6 +13,14 @@ import (
 	"github.com/udisondev/udisend/pkg/transport"
 )
 
+// testHandshakeTimeout is the signaling handshake budget used by the
+// e2e suite. Production stays at signaling.DefaultHandshakeTimeout
+// (6s); tests need a longer window because race-detector overhead
+// under concurrent package binaries can push the Noise XK 3-message
+// handshake well past the production-tuned value. Keeping it as a
+// single const keeps the per-Open Config calls in sync.
+const testHandshakeTimeout = 30 * time.Second
+
 // twoMeshNodes spins up A and B with MeshEnabled and waits for both
 // sides to resolve each other's presence record. Returns only after
 // the routing tables and presence caches are warm enough that
@@ -29,10 +37,11 @@ func twoMeshNodes(t *testing.T) (*network.Node, *network.Node) {
 	trB := hub.NewMemoryTransport()
 
 	a, err := network.Open(ctx, network.Config{
-		Identity:     mustIdentity(t),
-		Transport:    trA,
-		MeshEnabled:  true,
-		MaxMeshLinks: 2,
+		Identity:                  mustIdentity(t),
+		Transport:                 trA,
+		MeshEnabled:               true,
+		MaxMeshLinks:              2,
+		SignalingHandshakeTimeout: testHandshakeTimeout,
 	})
 	if err != nil {
 		t.Fatalf("open A: %v", err)
@@ -45,11 +54,12 @@ func twoMeshNodes(t *testing.T) (*network.Node, *network.Node) {
 	goRun(t, "A", a.Run, ctx)
 
 	b, err := network.Open(ctx, network.Config{
-		Identity:     mustIdentity(t),
-		Transport:    trB,
-		Bootstrap:    []string{a.LocalAddress()},
-		MeshEnabled:  true,
-		MaxMeshLinks: 2,
+		Identity:                  mustIdentity(t),
+		Transport:                 trB,
+		Bootstrap:                 []string{a.LocalAddress()},
+		MeshEnabled:               true,
+		MaxMeshLinks:              2,
+		SignalingHandshakeTimeout: testHandshakeTimeout,
 	})
 	if err != nil {
 		t.Fatalf("open B: %v", err)
@@ -62,7 +72,7 @@ func twoMeshNodes(t *testing.T) (*network.Node, *network.Node) {
 	goRun(t, "B", b.Run, ctx)
 
 	// Wait for mutual presence resolution — same gate as twoNodes.
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		lctx, lcancel := context.WithTimeout(ctx, 250*time.Millisecond)
 		_, errA := a.Lookup(lctx, b.Identity().Public().DestinationHash())
@@ -94,8 +104,7 @@ func twoMeshNodes(t *testing.T) (*network.Node, *network.Node) {
 // without the e2e link working, the bigger "kill 2 publics" tests
 // have no foundation to stand on.
 func TestMesh_E2E_TwoNodesEstablishLink(t *testing.T) {
-	t.Parallel()
-
+	// Not t.Parallel: see TestMesh_E2E_DataRoundTrip.
 	if testing.Short() {
 		t.Skip("requires pion ICE — skipped under -short")
 	}
@@ -106,9 +115,10 @@ func TestMesh_E2E_TwoNodesEstablishLink(t *testing.T) {
 	bHash := b.Identity().Public().DestinationHash()
 
 	// PeerManager fires reconcile every 30s by default but the
-	// initial reconcile happens immediately on Run. Wait up to 20s
-	// for both sides to see the live mesh connection.
-	deadline := time.Now().Add(20 * time.Second)
+	// initial reconcile happens immediately on Run. The 60s budget
+	// covers race-detector overhead under concurrent suite load
+	// (production handshake completes in <1s).
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		if a.MeshTransport().IsConnected(bHash) && b.MeshTransport().IsConnected(aHash) {
 			break
@@ -166,15 +176,12 @@ func waitForMeshLink(t *testing.T, a, b *network.Node, deadline time.Duration) b
 		errBA := b.MeshTransport().Send(ctx, addrA, probe)
 		cancel()
 		if errAB == nil && errBA == nil {
-			// Drain the two probe packets so they don't pollute the
-			// test's own inbox expectations.
-			for range 2 {
-				select {
-				case <-a.MeshTransport().Inbox():
-				case <-b.MeshTransport().Inbox():
-				case <-time.After(500 * time.Millisecond):
-				}
-			}
+			// Drain the two probe packets from each side so they
+			// don't pollute the test's own inbox expectations.
+			// Quiet=250ms is the per-slot budget; 2s ceiling guards
+			// against pathological pion pipeline lag.
+			drainInbox(a.MeshTransport().Inbox(), 250*time.Millisecond, 2*time.Second)
+			drainInbox(b.MeshTransport().Inbox(), 250*time.Millisecond, 2*time.Second)
 			return true
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -189,15 +196,19 @@ func waitForMeshLink(t *testing.T, a, b *network.Node, deadline time.Duration) b
 // pion + Noise XK + the WebRTCTransport.pumpInbox path actually
 // deliver data to the consumer's transport.Inbox.
 func TestMesh_E2E_DataRoundTrip(t *testing.T) {
-	t.Parallel()
-
+	// Not t.Parallel: two real pion stacks per call, race detector
+	// adds ~10× overhead, and `go test ./pkg/... ./internal/...`
+	// runs every package binary in parallel. Heavy mesh tests
+	// running concurrently in one binary starve each other for CPU
+	// and miss even the bumped 60s handshake window. Sequential
+	// execution keeps each test in a deterministic budget.
 	if testing.Short() {
 		t.Skip("requires pion ICE — skipped under -short")
 	}
 
 	a, b := twoMeshNodes(t)
 
-	if !waitForMeshLink(t, a, b, 20*time.Second) {
+	if !waitForMeshLink(t, a, b, 60*time.Second) {
 		t.Fatal("mesh link never established")
 	}
 
@@ -254,11 +265,12 @@ func threeMeshNodes(t *testing.T) (*network.Node, *network.Node, *network.Node) 
 	open := func(name string, bootstrap []string) *network.Node {
 		tr := hub.NewMemoryTransport()
 		n, err := network.Open(ctx, network.Config{
-			Identity:     mustIdentity(t),
-			Transport:    tr,
-			Bootstrap:    bootstrap,
-			MeshEnabled:  true,
-			MaxMeshLinks: 4,
+			Identity:                  mustIdentity(t),
+			Transport:                 tr,
+			Bootstrap:                 bootstrap,
+			MeshEnabled:               true,
+			MaxMeshLinks:              4,
+			SignalingHandshakeTimeout: testHandshakeTimeout,
 		})
 		if err != nil {
 			t.Fatalf("open %s: %v", name, err)
@@ -275,7 +287,7 @@ func threeMeshNodes(t *testing.T) (*network.Node, *network.Node, *network.Node) 
 
 	// Wait for full triangle convergence: every pair must Lookup
 	// the other two.
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	pairs := []struct {
 		from, to *network.Node
 		label    string
@@ -333,7 +345,7 @@ func TestMesh_E2E_ThreeNodeTriangle(t *testing.T) {
 		{b, c, "B↔C"},
 	}
 
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for {
 		allUp := true
 		for _, p := range pairs {
@@ -388,17 +400,13 @@ func TestMesh_E2E_SurvivesRelayLoss(t *testing.T) {
 	aHash := a.Identity().Public().DestinationHash()
 	cHash := c.Identity().Public().DestinationHash()
 
-	// Wait for the A↔C link in particular.
-	end := time.Now().Add(20 * time.Second)
-	linked := false
-	for time.Now().Before(end) {
-		if a.MeshTransport().IsConnected(cHash) && c.MeshTransport().IsConnected(aHash) {
-			linked = true
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if !linked {
+	// waitForMeshLink does the IsConnected check + a probe Send so
+	// we know pion's OnDataChannel actually fired on both sides
+	// before we proceed. Plain IsConnected flips true the moment a
+	// responder installs its session, well before the DC is usable;
+	// proceeding on that early signal makes the post-relay Send race
+	// the responder's bring-up and intermittently report ErrNoRoute.
+	if !waitForMeshLink(t, a, c, 60*time.Second) {
 		t.Skipf("A↔C link did not establish before relay-loss test (timing)")
 	}
 
@@ -424,6 +432,14 @@ func TestMesh_E2E_SurvivesRelayLoss(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
+	// Drain any leftover probe packets from waitForMeshLink that may
+	// still be in pion's pipeline. Its in-line drain has a 500ms
+	// per-slot budget — under -race that is sometimes shorter than
+	// pion's actual Inbox-pump latency, so a stale probe leaks into
+	// the inbox we are about to read post-Send. 2s ceiling is well
+	// above any realistic pipeline-drain time.
+	drainInbox(c.MeshTransport().Inbox(), 250*time.Millisecond, 2*time.Second)
+
 	addr := transport.NewWebRTCAddr(cHash)
 	payload := []byte("post-relay-loss")
 	if err := a.MeshTransport().Send(ctx, addr, payload); err != nil {
@@ -440,19 +456,41 @@ func TestMesh_E2E_SurvivesRelayLoss(t *testing.T) {
 	}
 }
 
+// drainInbox pulls packets off inbox until either no packet has
+// arrived for `quiet` consecutive duration OR `maxWait` total time
+// has elapsed since the call started. Used after a probe phase
+// (waitForMeshLink) to clear stragglers that pion's pipeline is
+// still flushing under -race.
+//
+// The maxWait ceiling matters: on a busy channel that delivers at
+// least one packet every <quiet duration, the quiet timer never
+// fires and the helper would loop forever. Tests should pass a
+// maxWait slightly above their expected drain budget.
+func drainInbox(inbox <-chan transport.Packet, quiet, maxWait time.Duration) {
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		select {
+		case <-inbox:
+		case <-time.After(quiet):
+			return
+		}
+	}
+}
+
 // TestMesh_E2E_StatsAccumulate ensures the transport-level counters
 // reflect actual traffic over a series of Sends — protects against
 // regressions in the observability path (silent-drop counter
 // updates would not be caught by the smoke test).
 func TestMesh_E2E_StatsAccumulate(t *testing.T) {
-	t.Parallel()
-
+	// Not t.Parallel: same CPU-starvation rationale as
+	// TestMesh_E2E_DataRoundTrip — pion under -race needs the
+	// foreground when other heavy mesh tests share the process.
 	if testing.Short() {
 		t.Skip("requires pion ICE — skipped under -short")
 	}
 
 	a, b := twoMeshNodes(t)
-	if !waitForMeshLink(t, a, b, 20*time.Second) {
+	if !waitForMeshLink(t, a, b, 60*time.Second) {
 		t.Fatal("mesh link never established")
 	}
 

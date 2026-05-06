@@ -59,7 +59,7 @@ type Channel struct {
 	pendingMesh []pendingMeshFrame // mesh frames received before handshake+verify completes
 	mu          sync.Mutex
 
-	// handshakeTimer fires HandshakeTimeout after acceptInit if the
+	// handshakeTimer fires Service.handshakeTimeout after acceptInit if the
 	// initiator never completes the handshake (responder DoS guard).
 	// nil for initiator-side channels. Stopped once handleFinal lands
 	// so a successful handshake doesn't leave a closure on the runtime

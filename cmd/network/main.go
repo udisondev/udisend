@@ -103,12 +103,23 @@ func run() error {
 
 	// A pure relay is not a session destination — drain Income so the
 	// pump never blocks. Misbehaving peers that do try to open a noise
-	// session here just have their frames Released and dropped.
+	// session here just have their frames Released and dropped. Drain
+	// loop exits on ctx cancel — n.income is intentionally never
+	// closed (multi-sender + close panics on late writers).
 	drainDone := make(chan struct{})
 	go func() {
 		defer close(drainDone)
-		for inc := range node.Income() {
-			inc.Release()
+		income := node.Income()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case inc, ok := <-income:
+				if !ok {
+					return
+				}
+				inc.Release()
+			}
 		}
 	}()
 

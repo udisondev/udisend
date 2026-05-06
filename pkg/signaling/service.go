@@ -18,9 +18,13 @@ import (
 	"github.com/udisondev/udisend/pkg/transport"
 )
 
-// HandshakeTimeout caps how long a Connect call waits for the handshake
-// to complete.
-const HandshakeTimeout = 6 * time.Second
+// DefaultHandshakeTimeout caps how long a Connect call waits for the
+// Noise XK handshake (3 messages + initiator's static-key disclosure)
+// to complete. 6s is generous for production: a healthy cross-Atlantic
+// signaling-relay path is well under 1s. Override via Config.HandshakeTimeout
+// in tests where heavy parallelism + race-detector overhead can push
+// the handshake past 6s.
+const DefaultHandshakeTimeout = 6 * time.Second
 
 // noiseStaticFromIdentity bridges *identity.Identity (Suite0x01) into
 // the noise.StaticKeypair shape flynn/noise needs. pkg/noise itself
@@ -80,7 +84,7 @@ type MeshHandler func(ch *Channel, kind byte, sdp []byte)
 // MaxHalfOpenPerIP caps the number of in-flight (handshake-not-yet-
 // complete) responder sessions a single source IP may hold. Protects
 // against a HELLO_INIT flood where each accepted INIT pins a Noise
-// responder allocation for the full HandshakeTimeout (6s) — without
+// responder allocation for the full DefaultHandshakeTimeout (6s) — without
 // the cap, an attacker rotating SessionIDs from one IP can keep
 // thousands of responder allocations live concurrently. The cap
 // matches what a real client could ever need (one or two retries,
@@ -88,12 +92,13 @@ type MeshHandler func(ch *Channel, kind byte, sdp []byte)
 const MaxHalfOpenPerIP = 8
 
 type Service struct {
-	id        *identity.Identity
-	selfDH    identity.Hash // cached id.Public().DestinationHash() — used per packet
-	transport transport.Transport
-	resolver  AddressResolver
-	router    atomic.Pointer[Router]
-	logger    *slog.Logger
+	id               *identity.Identity
+	selfDH           identity.Hash // cached id.Public().DestinationHash() — used per packet
+	transport        transport.Transport
+	resolver         AddressResolver
+	router           atomic.Pointer[Router]
+	logger           *slog.Logger
+	handshakeTimeout time.Duration
 
 	mu       sync.Mutex
 	sessions map[sessionKey]*Channel
@@ -128,6 +133,12 @@ type Config struct {
 	// recipient is not us. Without it, foreign envelopes are dropped.
 	Router Router
 	Logger *slog.Logger
+	// HandshakeTimeout caps Connect wait for the Noise XK 3-message
+	// handshake to complete. Zero means DefaultHandshakeTimeout (6s).
+	// The pkg/network mesh-e2e suite sets it to 30s — race-detector
+	// overhead under concurrent package binaries can starve pion /
+	// noise enough to miss the production-tuned window.
+	HandshakeTimeout time.Duration
 }
 
 // NewService constructs a signaling service. The caller must register
@@ -136,15 +147,19 @@ func NewService(cfg Config) *Service {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	if cfg.HandshakeTimeout <= 0 {
+		cfg.HandshakeTimeout = DefaultHandshakeTimeout
+	}
 	s := &Service{
-		id:           cfg.Identity,
-		selfDH:       cfg.Identity.Public().DestinationHash(),
-		transport:    cfg.Transport,
-		resolver:     cfg.Resolver,
-		logger:       cfg.Logger,
-		sessions:     make(map[sessionKey]*Channel),
-		halfOpenByIP: make(map[string]int),
-		closed:       make(chan struct{}),
+		id:               cfg.Identity,
+		selfDH:           cfg.Identity.Public().DestinationHash(),
+		transport:        cfg.Transport,
+		resolver:         cfg.Resolver,
+		logger:           cfg.Logger,
+		handshakeTimeout: cfg.HandshakeTimeout,
+		sessions:         make(map[sessionKey]*Channel),
+		halfOpenByIP:     make(map[string]int),
+		closed:           make(chan struct{}),
 	}
 	if cfg.Router != nil {
 		r := cfg.Router
@@ -424,7 +439,7 @@ func (s *Service) acceptInit(ctx context.Context, from net.Addr, env *Envelope) 
 	// Per-IP half-open cap: refuse the INIT outright if this source IP
 	// already has MaxHalfOpenPerIP responder slots in flight. Without
 	// this gate, an attacker rotating SessionIDs from one IP can pin
-	// HandshakeTimeout × N responder allocations live concurrently.
+	// handshakeTimeout × N responder allocations live concurrently.
 	//
 	// Reserve the slot under the first lock so that the expensive
 	// noise.NewResponder + ReadMessage + WriteMessage path runs only for
@@ -499,7 +514,7 @@ func (s *Service) acceptInit(ctx context.Context, from net.Addr, env *Envelope) 
 	// same window Connect honours; a real peer always finishes within it.
 	// Stored on the Channel so handleFinal can Stop the timer once the
 	// handshake completes successfully.
-	ch.handshakeTimer = time.AfterFunc(HandshakeTimeout, func() {
+	ch.handshakeTimer = time.AfterFunc(s.handshakeTimeout, func() {
 		if ch.noise.Done() {
 			return
 		}
@@ -601,8 +616,8 @@ func (s *Service) Connect(ctx context.Context, peer identity.Hash) (*Channel, er
 	// session attempt, but on graceful shutdown many concurrent Connects
 	// can be cancelled mid-handshake. NewTimer + Stop releases the timer
 	// slot immediately on the ctx-cancel / closed paths; time.After would
-	// hold it until natural expiry (HandshakeTimeout).
-	timer := time.NewTimer(HandshakeTimeout)
+	// hold it until natural expiry (handshakeTimeout).
+	timer := time.NewTimer(s.handshakeTimeout)
 	defer timer.Stop()
 	select {
 	case <-ch.ready:

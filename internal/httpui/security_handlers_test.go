@@ -12,6 +12,7 @@ import (
 )
 
 func TestAuthState_Loopback(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -40,6 +41,7 @@ func TestAuthState_Loopback(t *testing.T) {
 }
 
 func TestAuthState_PassphraseSetReflected(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -58,6 +60,7 @@ func TestAuthState_PassphraseSetReflected(t *testing.T) {
 }
 
 func TestAuthChangePassphrase_RejectsBadOld(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -79,6 +82,7 @@ func TestAuthChangePassphrase_RejectsBadOld(t *testing.T) {
 }
 
 func TestAuthChangePassphrase_TooShort(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -99,6 +103,7 @@ func TestAuthChangePassphrase_TooShort(t *testing.T) {
 }
 
 func TestAuthChangePassphrase_Roundtrip(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -122,6 +127,7 @@ func TestAuthChangePassphrase_Roundtrip(t *testing.T) {
 }
 
 func TestTOTPEnrollFlow(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -211,6 +217,7 @@ func TestTOTPEnrollFlow(t *testing.T) {
 }
 
 func TestTOTPDisable_RequiresStepUp(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -254,8 +261,11 @@ func TestTOTPDisable_RequiresStepUp(t *testing.T) {
 		t.Fatalf("code-only must reject; got %d", resp.StatusCode)
 	}
 
-	// passphrase + TOTP code: succeeds.
-	good = auth.CurrentTOTP(creds.TOTPSecret, time.Now().Add(35*time.Second))
+	// passphrase + TOTP code: succeeds. The code MUST be for the step
+	// after enrollment (replay protection rejects equal-or-earlier
+	// steps). nextTOTPStepTime puts us safely inside step+1, so the
+	// server's ±1 skew window accepts regardless of phase.
+	good = auth.CurrentTOTP(creds.TOTPSecret, nextTOTPStepTime(time.Now()))
 	if _, err := postJSON(alice, "/api/auth/totp/disable", map[string]any{
 		"passphrase": "pass-1234567890!", "code": good,
 	}); err != nil {
@@ -268,6 +278,7 @@ func TestTOTPDisable_RequiresStepUp(t *testing.T) {
 }
 
 func TestRecoveryRegen_ReplacesCodes(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -287,7 +298,9 @@ func TestRecoveryRegen_ReplacesCodes(t *testing.T) {
 		t.Fatalf("passphrase-only must reject; got %d", resp.StatusCode)
 	}
 
-	good := auth.CurrentTOTP(creds.TOTPSecret, time.Now().Add(35*time.Second))
+	// Code for the step after enrollment (replay-safe + always inside
+	// the validator's ±1 skew window — see nextTOTPStepTime).
+	good := auth.CurrentTOTP(creds.TOTPSecret, nextTOTPStepTime(time.Now()))
 	body, err := postJSON(alice, "/api/auth/recovery/regenerate", map[string]any{
 		"passphrase": "pass-1234567890!", "code": good,
 	})
@@ -310,6 +323,7 @@ func TestRecoveryRegen_ReplacesCodes(t *testing.T) {
 }
 
 func TestAuthSessions_LoopbackEmpty(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -324,6 +338,7 @@ func TestAuthSessions_LoopbackEmpty(t *testing.T) {
 }
 
 func TestAuthLog_Tail(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
