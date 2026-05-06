@@ -117,7 +117,7 @@ type MeshSDPMsg struct {
 // their own policy. Closing the channel on shutdown is OPTIONAL —
 // most consumers gate on context instead.
 type Signaler interface {
-	SendMeshSDP(ctx context.Context, peer identity.Hash, kind MeshSDPKind, sdp []byte) error
+	SendMeshSDP(ctx context.Context, peer identity.PeerID, kind MeshSDPKind, sdp []byte) error
 	RecvMeshSDP() <-chan MeshSDPMsg
 }
 
@@ -403,9 +403,10 @@ func (t *WebRTCTransport) Inbox() <-chan Packet { return t.inbox }
 // IsConnected reports whether peer currently has an open
 // DataChannel-backed session. PeerManager (pkg/webrtc) polls this
 // to detect drops between Connect attempts.
-func (t *WebRTCTransport) IsConnected(peer identity.Hash) bool {
+func (t *WebRTCTransport) IsConnected(peer identity.PeerID) bool {
+	h := peer.Bytes()
 	t.mu.Lock()
-	_, ok := t.peers[peer]
+	_, ok := t.peers[h]
 	t.mu.Unlock()
 
 	return ok
@@ -427,10 +428,11 @@ func (t *WebRTCTransport) Peers() []identity.Hash {
 // Disconnect tears down a session for peer. Used by PeerManager to
 // drop healthy-but-evicted peers when reshaping the mesh. Returns
 // false if there was no session to drop.
-func (t *WebRTCTransport) Disconnect(peer identity.Hash) bool {
+func (t *WebRTCTransport) Disconnect(peer identity.PeerID) bool {
+	h := peer.Bytes()
 	t.mu.Lock()
-	entry, ok := t.peers[peer]
-	delete(t.peers, peer)
+	entry, ok := t.peers[h]
+	delete(t.peers, h)
 	t.mu.Unlock()
 	if !ok {
 		return false
@@ -475,10 +477,11 @@ func (t *WebRTCTransport) Close() error {
 // singleflight: concurrent calls to the same peer share one
 // underlying handshake. Returns nil once the DataChannel is open or
 // an error if the handshake fails / context cancels.
-func (t *WebRTCTransport) Connect(ctx context.Context, peer identity.Hash) error {
+func (t *WebRTCTransport) Connect(ctx context.Context, peerID identity.PeerID) error {
 	if t.isClosed() {
 		return ErrClosed
 	}
+	peer := peerID.Bytes()
 
 	t.mu.Lock()
 	if _, ok := t.peers[peer]; ok {

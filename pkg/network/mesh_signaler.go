@@ -60,7 +60,7 @@ func NewMeshSignaler(svc *signaling.Service, logger *slog.Logger) *MeshSignaler 
 // success the Channel is cached for subsequent SendMeshSDP calls.
 func (ms *MeshSignaler) SendMeshSDP(
 	ctx context.Context,
-	peer identity.Hash,
+	peer identity.PeerID,
 	kind transport.MeshSDPKind,
 	sdp []byte,
 ) error {
@@ -69,7 +69,7 @@ func (ms *MeshSignaler) SendMeshSDP(
 		return err
 	}
 
-	ch, err := ms.getOrOpen(ctx, peer)
+	ch, err := ms.getOrOpen(ctx, peer.Bytes())
 	if err != nil {
 		return fmt.Errorf("network: mesh channel: %w", err)
 	}

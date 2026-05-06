@@ -30,28 +30,29 @@ func newFakeMesh() *fakeMeshTransport {
 	return &fakeMeshTransport{connected: make(map[identity.Hash]bool)}
 }
 
-func (f *fakeMeshTransport) Connect(_ context.Context, peer identity.Hash) error {
+func (f *fakeMeshTransport) Connect(_ context.Context, peer identity.PeerID) error {
+	h := peer.Bytes()
 	f.connectAttempts.Add(1)
 	f.mu.Lock()
 	fn := f.connectFn
 	f.mu.Unlock()
 	if fn != nil {
-		if err := fn(peer); err != nil {
+		if err := fn(h); err != nil {
 			return err
 		}
 	}
 	f.mu.Lock()
-	f.connected[peer] = true
+	f.connected[h] = true
 	f.mu.Unlock()
 
 	return nil
 }
 
-func (f *fakeMeshTransport) IsConnected(peer identity.Hash) bool {
+func (f *fakeMeshTransport) IsConnected(peer identity.PeerID) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	return f.connected[peer]
+	return f.connected[peer.Bytes()]
 }
 
 func (f *fakeMeshTransport) Peers() []identity.Hash {
@@ -65,13 +66,14 @@ func (f *fakeMeshTransport) Peers() []identity.Hash {
 	return out
 }
 
-func (f *fakeMeshTransport) Disconnect(peer identity.Hash) bool {
+func (f *fakeMeshTransport) Disconnect(peer identity.PeerID) bool {
+	h := peer.Bytes()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.connected[peer] {
+	if !f.connected[h] {
 		return false
 	}
-	delete(f.connected, peer)
+	delete(f.connected, h)
 
 	return true
 }

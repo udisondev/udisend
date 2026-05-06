@@ -43,9 +43,9 @@ func (h *signalerHub) register(peer identity.Hash) *inProcessSignaler {
 	return &inProcessSignaler{hub: h, me: peer}
 }
 
-func (s *inProcessSignaler) SendMeshSDP(_ context.Context, peer identity.Hash, kind transport.MeshSDPKind, sdp []byte) error {
+func (s *inProcessSignaler) SendMeshSDP(_ context.Context, peer identity.PeerID, kind transport.MeshSDPKind, sdp []byte) error {
 	s.hub.mu.Lock()
-	dst, ok := s.hub.peers[peer]
+	dst, ok := s.hub.peers[peer.Bytes()]
 	s.hub.mu.Unlock()
 	if !ok {
 		return errors.New("inproc-signaler: unknown peer")

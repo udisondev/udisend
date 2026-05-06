@@ -14,11 +14,16 @@ import (
 // MeshTransport is the slice of WebRTCTransport that PeerManager
 // consumes. Defining the contract here lets us swap in fakes for
 // unit-testing the FSM without spinning up real pion sessions.
+//
+// Inputs accept identity.PeerID so external Suite-aware peer types
+// can drive the manager. Peers() returns []identity.Hash because the
+// transport stores its connection map keyed by Hash — exposing that
+// internal type avoids copies on the read path.
 type MeshTransport interface {
-	Connect(ctx context.Context, peer identity.Hash) error
-	IsConnected(peer identity.Hash) bool
+	Connect(ctx context.Context, peer identity.PeerID) error
+	IsConnected(peer identity.PeerID) bool
 	Peers() []identity.Hash
-	Disconnect(peer identity.Hash) bool
+	Disconnect(peer identity.PeerID) bool
 }
 
 // PeerSelector returns up to k candidate peers ordered by
